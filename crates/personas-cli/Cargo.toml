@@ -1,0 +1,32 @@
+[package]
+name = "personas-cli"
+version.workspace = true
+edition.workspace = true
+
+# The single `personas` CLI. It replaces the former `client` (Signal) and `slack-client`
+# binaries: one flat command set whose behaviour — which route family, which request shape —
+# is chosen by the configured transport (`--transport signal|slack`). All crypto lives in
+# `personas-client`; this crate is argument parsing, config resolution, and HTTP. The `render`
+# feature (badge images) is always on because the slack transport shows them.
+[[bin]]
+name = "personas"
+path = "src/main.rs"
+
+[dependencies]
+personas-client = { path = "../personas-client", features = ["render"] }
+personas-config = { path = "../personas-config" }
+# Serverless mode (workstream d4): the messenger drives a local replica; no server.
+personas-core = { path = "../personas-core" }
+personas-bulletin = { path = "../personas-bulletin" }
+personas-messenger = { path = "../personas-messenger" }
+transport-api = { path = "../transports/transport-api" }
+transport-mock = { path = "../transports/transport-mock" }
+
+anyhow.workspace = true
+clap.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true

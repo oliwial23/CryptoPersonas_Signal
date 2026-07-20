@@ -1,0 +1,27 @@
+diff --git a/service/src/main/java/org/whispersystems/textsecuregcm/websocket/WebSocketAccountAuthenticator.java b/service/src/main/java/org/whispersystems/textsecuregcm/websocket/WebSocketAccountAuthenticator.java
+index 4ba267d..1620a5d 100644
+--- a/service/src/main/java/org/whispersystems/textsecuregcm/websocket/WebSocketAccountAuthenticator.java
++++ b/service/src/main/java/org/whispersystems/textsecuregcm/websocket/WebSocketAccountAuthenticator.java
+@@ -39,9 +39,18 @@ public class WebSocketAccountAuthenticator implements WebSocketAuthenticator<Aut
+     final BasicCredentials credentials = basicCredentialsFromAuthHeader(authHeader)
+         .orElseThrow(InvalidCredentialsException::new);
+ 
+-    final AuthenticatedDevice authenticatedDevice = accountAuthenticator.authenticate(credentials)
+-        .orElseThrow(InvalidCredentialsException::new);
+-
+-    return Optional.of(authenticatedDevice);
++    // personas e2 A1 wiring — return the authenticator's Optional directly instead of
++    // throwing when the credentials do not resolve to an existing account. Stock behaviour
++    // (orElseThrow -> InvalidCredentialsException -> 403) is fatal during INITIAL
++    // registration: presage opens an *authenticated* /v1/websocket/ with the provisional
++    // (e164, registration-password) BEFORE the account exists, so this lookup is empty and
++    // the upgrade would be refused. Returning empty makes the connection UNAUTHENTICATED;
++    // the upgrade's Authorization header is still forwarded onto the POST /v1/registration
++    // request frame (WebSocketResourceProvider.getCombinedHeaders merges upgrade + frame
++    // headers, and Authorization is not in EXCLUDED_UPGRADE_REQUEST_HEADERS), so
++    // RegistrationController reads the basic-auth and creates the account. After
++    // registration presage reconnects with now-valid credentials and authenticates
++    // normally. Isolated single-tenant test-server ONLY — do not carry to production.
++    return accountAuthenticator.authenticate(credentials);
+   }
+ }

@@ -1,0 +1,15 @@
+[package]
+name = "transport-mock"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+transport-api = { path = "../transport-api" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

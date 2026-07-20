@@ -1,0 +1,60 @@
+# Rust
+/target/
+**/target/
+
+# Keep the workspace lockfile committed. Individual crates can override this locally.
+!Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Node / JS tooling, if used by local experiments
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local env, secrets, and generated runtime data
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local
+*.log
+*.pid
+*.sock
+json_files/
+experiments/
+*.jsonl
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local deploy/test artifacts
+.local/

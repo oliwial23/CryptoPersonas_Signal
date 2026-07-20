@@ -1,0 +1,16 @@
+[package]
+name = "personas-wire"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ark-serialize.workspace = true
+ciborium = "0.2"
+serde.workspace = true
+serde_bytes = "0.11"
+thiserror.workspace = true
+
+[dev-dependencies]
+ark-bn254.workspace = true
+ark-ff.workspace = true
+ark-std.workspace = true

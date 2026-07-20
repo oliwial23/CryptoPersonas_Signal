@@ -1,0 +1,21 @@
+[package]
+name = "signal-cli-client"
+version = "0.0.1"
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+jsonrpsee.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lib]
+name = "signal_cli_client"
+path = "src/lib.rs"

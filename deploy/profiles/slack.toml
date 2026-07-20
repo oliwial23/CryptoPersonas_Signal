@@ -1,0 +1,22 @@
+# As-a-service over real Slack. The slack routes relay through the Slack Web/socket API; the
+# signal routes fall back to the mock (no Signal number here). Select with
+# `PERSONAS_PROFILE=slack`.
+#
+# Both tokens are secrets and are NOT written here — set `SLACK_BOT_TOKEN` and
+# `SLACK_APP_TOKEN` in the environment (or a `.env` file). Without both, the slack routes fall
+# back to the mock, so this profile is safe to commit.
+
+mode = "service"
+
+[server]
+bind = "127.0.0.1:3000"
+data_dir = "server/data"
+
+[client]
+api = "http://127.0.0.1:3000"
+transport = "slack"
+
+[transport]
+force_mock = false
+
+# bot_token / app_token come from SLACK_BOT_TOKEN / SLACK_APP_TOKEN (secrets)

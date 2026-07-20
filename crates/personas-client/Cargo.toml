@@ -1,0 +1,37 @@
+[package]
+name = "personas-client"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+# Badge image rendering (SVG via badge-maker, rasterized by resvg). Only the Slack
+# transport shows badge images; the Signal and serverless paths carry the badge proof
+# and nothing else, so they skip these deps entirely.
+render = ["dep:badge-maker", "dep:resvg"]
+
+[dependencies]
+personas-config = { path = "../personas-config" }
+personas-core = { path = "../personas-core" }
+personas-wire = { path = "../personas-wire" }
+personas-bulletin = { path = "../personas-bulletin" }
+zk-callbacks = { workspace = true, features = ["folding"] }
+folding-schemes.workspace = true
+
+ark-bn254.workspace = true
+ark-ff.workspace = true
+ark-grumpkin.workspace = true
+ark-relations.workspace = true
+ark-serialize.workspace = true
+ark-std.workspace = true
+
+anyhow.workspace = true
+hex.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+badge-maker = { workspace = true, optional = true }
+resvg = { workspace = true, optional = true }

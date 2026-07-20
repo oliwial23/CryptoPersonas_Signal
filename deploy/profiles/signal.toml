@@ -1,0 +1,24 @@
+# As-a-service over real Signal. The signal routes relay through a `signal-cli` JSON-RPC
+# daemon; the slack routes fall back to the mock (no Slack tokens here). Select with
+# `PERSONAS_PROFILE=signal`.
+#
+# The bot number is a secret and is NOT written here — set `SIGNAL_BOT_NUMBER` in the
+# environment (or a `.env` file). Without it the signal routes fall back to the mock, so this
+# profile is safe to commit.
+
+mode = "service"
+
+[server]
+bind = "127.0.0.1:3000"
+data_dir = "server/data"
+
+[client]
+api = "http://127.0.0.1:3000"
+transport = "signal"
+
+[transport]
+force_mock = false
+
+[transport.signal]
+# bot_number comes from SIGNAL_BOT_NUMBER (a secret)
+daemon = "127.0.0.1:7583"

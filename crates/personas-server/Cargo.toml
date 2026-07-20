@@ -1,0 +1,46 @@
+[package]
+name = "personas-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+personas-config = { path = "../personas-config" }
+personas-core = { path = "../personas-core" }
+personas-wire = { path = "../personas-wire" }
+transport-api = { path = "../transports/transport-api" }
+transport-mock = { path = "../transports/transport-mock" }
+transport-signal-cli = { path = "../transports/transport-signal-cli" }
+transport-slack = { path = "../transports/transport-slack" }
+
+zk-callbacks = { workspace = true, features = ["folding"] }
+folding-schemes.workspace = true
+
+ark-bn254.workspace = true
+ark-ff.workspace = true
+ark-grumpkin.workspace = true
+ark-serialize.workspace = true
+ark-snark.workspace = true
+ark-std.workspace = true
+
+anyhow.workspace = true
+axum.workspace = true
+dotenvy.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Force the ring backend for rustls (avoids the aws-lc-rs build dependency)
+rustls.workspace = true
+rustls-webpki.workspace = true
+hyper-rustls.workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "personas-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zk-callbacks = { workspace = true, features = ["folding"] }
+folding-schemes.workspace = true
+
+ark-bn254.workspace = true
+ark-crypto-primitives.workspace = true
+ark-ff.workspace = true
+ark-groth16.workspace = true
+ark-grumpkin.workspace = true
+ark-r1cs-std.workspace = true
+ark-relations.workspace = true
+ark-serialize.workspace = true
+ark-snark.workspace = true
+ark-std.workspace = true
+
+blake2.workspace = true
+hex.workspace = true
+lazy_static.workspace = true
+petname.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

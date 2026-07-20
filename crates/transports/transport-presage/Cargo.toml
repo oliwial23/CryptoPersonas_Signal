@@ -1,0 +1,81 @@
+[package]
+name = "transport-presage"
+version.workspace = true
+edition.workspace = true
+
+# e2 — the modified in-process Signal client transport.
+#
+# Replaces the out-of-process signal-cli path (transport-signal-cli) for the
+# serverless deployment. Built on presage (+ libsignal-service-rs + signalapp/
+# libsignal), so the personas layer controls the sender-key state, the message
+# key, and the sealed-sender call — the content-/delivery-layer anonymity
+# modifications specified in docs/SERVERLESS_SIGNAL_DESIGN.md. Implements the same
+# transport_api::Transport trait as every other transport, so the d3/d4 replica +
+# messenger are untouched.
+#
+# Status: fork foundation. This crate establishes the presage dependency and the
+# Transport seam; the send/receive paths are phased (A1/B1/A2 in the design doc)
+# and require a registered Signal account (staging, sign-off-gated e2f/g).
+
+[dependencies]
+transport-api = { path = "../transport-api" }
+presage.workspace = true
+# presage's SQLite store backend — the registered `Manager` the PresageTransport actor
+# drives persists its Signal protocol state here (identity keys, sessions, prekeys).
+presage-store-sqlite.workspace = true
+# The Phase A1 content cipher drives libsignal's group cipher directly (in-process,
+# no network) — see src/content_cipher.rs and SERVERLESS_SIGNAL_DESIGN.md §4.
+libsignal-protocol.workspace = true
+uuid = "1"
+# libsignal's group cipher wants a rand 0.9 `Rng + CryptoRng` csprng. The workspace
+# rand is pinned to 0.8 for arkworks/zk-callbacks; mixing them in one call is an
+# E0277 ("multiple versions of rand_core"), so this crate keeps its own rand 0.9 for
+# the Signal side only. Already in the lockfile via presage.
+rand = "0.9"
+# e2a's KeyManager/GroupSecret API (src/pprf_cipher.rs, Phase A2) is generic over
+# `rand::RngCore` from the *workspace* rand (0.8.5, pinned for arkworks/zk-callbacks
+# elsewhere) — a different major version than the `rand = "0.9"` above that libsignal's
+# group cipher wants. Renamed so both can coexist in one crate without an E0277.
+# (Workspace-dependency inheritance (`workspace = true`) does not accept a `package`
+# rename key, so this is pinned to the same "0.8.5" the workspace table uses directly,
+# rather than inherited.)
+rand08 = { package = "rand", version = "0.8.5" }
+async-trait.workspace = true
+anyhow.workspace = true
+# e2a — the PPRF/KeyManager message-key schedule Phase A2 wires in, replacing the
+# Phase A1 static shared sender key (src/content_cipher.rs). See
+# SERVERLESS_SIGNAL_DESIGN.md §5 and src/pprf_cipher.rs.
+personas-group-crypto = { path = "../../personas-group-crypto" }
+# The Phase A2 AEAD keyed by the PPRF's single-use `mk` (design doc §5: "a standard,
+# vetted AEAD... `mk` is single-use... so nonce management is trivial"). This is the
+# RustCrypto implementation of the same AES-GCM-SIV family libsignal's own
+# (unexported) `signal-crypto` crate uses; already resolved in the lockfile as a
+# transitive dependency of libsignal-protocol, so this adds no new primitive to the
+# tree, just a direct, usable handle on it.
+aes-gcm-siv = "0.11.1"
+# The Transport actor: a dedicated OS thread runs a current-thread Tokio runtime +
+# LocalSet (presage's receive_messages spawns local tasks), owning the Manager +
+# PprfContentCipher. The Transport talks to it over Send channels; the ciphertext
+# rides base64 inside a Signal DataMessage body.
+tokio = { workspace = true }
+futures-util.workspace = true
+base64.workspace = true
+tracing.workspace = true
+# B2/D1 — linking every member as a device of the shared "phantom" Signal account
+# (src/lib.rs::link_as_phantom_device). `Manager::link_secondary_device`'s
+# provisioning-URL callback is a `futures_channel::oneshot::Sender<Url>`, which is a
+# different crate than the `futures-util` combinators above; both are already in the
+# lockfile via presage, this just gives us a direct handle on them.
+futures-channel = "0.3"
+url = "2"
+# e2c — serializing the DistributedSecret wire bytes for the body of the pairwise
+# key-distribution DataMessage (src/lib.rs::distribute_group_secret /
+# receive_group_secret). Already in the lockfile everywhere else this type travels
+# (personas-group-crypto itself derives Serialize/Deserialize on it).
+serde_json.workspace = true
+
+[dev-dependencies]
+# The A1 account-gated tests/examples drive real presage registration + send/receive
+# against the self-hosted test-server: temp DBs + structured logs to debug the handshake.
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
