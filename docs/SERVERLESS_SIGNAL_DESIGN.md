@@ -57,17 +57,6 @@ it — it has been superseded by the K2/PPRF cipher
   root / zkgroup params; and a one-file server patch so presage can register (the
   authenticated websocket must upgrade before the account exists).
 
-**B2 status.** Wired and **confirmed passing** against the staging server. §6 has
-the full account: the original certificate-substitution design turned out not to
-be reachable through presage's public API at all, so it's realized instead via
-Signal's stock multi-device linking — [`PresageTransport::link_as_phantom_device`]
-plus the [`b2_phantom_link`] example, which registers a phantom, links a member as
-its device, sends, and checks that an independent observer account sees the
-phantom's identity rather than the member's. `cargo run -p transport-presage
---example b2_phantom_link` passed clean on the first real run: the linked device
-registered as an additional `device_id` of the phantom's ACI, and the observer's
-decrypt showed the phantom's ACI as sender, not a distinct one for the member.
-
 **e2c status.** Wired. `PresageTransport::distribute_group_secret` /
 `receive_group_secret` send the `DistributedSecret` as the body of an ordinary 1:1
 Signal message — the same `send_message`/`receive_messages` path content already
@@ -85,18 +74,28 @@ byte-identical but installs a working `KeyManager` on both ends.
 `PresageTransport::create_group_secret` still exists for tests/bring-up that want
 the bytes directly without a network round trip.
 
+**B2 status.** Wired, via a fork — `docs/FINDINGS.md`'s newest entry has the full
+account. §6 explains why: certificate substitution alone is cryptographically
+unsound (not an API gap), and device linking (built, then reverted) closes that
+gap but leaks a stable per-member device-id tag. What's built instead is a
+**shared ACI identity keypair**: every member registers their own fully
+independent Signal account, but with an identity keypair deterministically
+derived from the group secret instead of a random one
+(`PresageTransport::register_as_phantom`, `DistributedSecret::derive_phantom_identity_seed`).
+Needed a fork of `presage` itself (vendored at `third_party/presage`, patched in
+the same way `libsignal-service-rs` already is) — `Manager::confirm_verification_code`
+had no seam to override the internally-generated identity keypair — plus a small
+addition to the already-vendored `libsignal-service-rs` to surface the
+certificate's embedded identity key on receive. Proof:
+[`b2_shared_identity`](../crates/transports/transport-presage/examples/b2_shared_identity.rs).
+
 **Remaining:** the re-key *triggers* (e2d — deciding when to call
 `PprfContentCipher::rekey`: epoch boundary, ban, leave, or a time/message-count
 cadence; the mechanism is wired, the triggers from the replica's/messenger's event
-stream are not); the phantom-linking provisioning URL (§6) is still handed across
-in-process rather than over this same now-real pairwise channel — a follow-up, not
-a blocker, since e2c's channel now exists to carry it; and unlinking a device on
-ban/leave (`Manager::unlink_secondary` exists but nothing calls it yet). Live
-*production* Signal remains cryptographer-sign-off-gated (§10); the isolated
-self-host is not that.
-
-[`PresageTransport::link_as_phantom_device`]: ../crates/transports/transport-presage/src/lib.rs
-[`b2_phantom_link`]: ../crates/transports/transport-presage/examples/b2_phantom_link.rs
+stream are not) — which, per §6, would now also need to rotate the phantom
+identity (re-registration, not a cheap operation) once wired. Live *production*
+Signal remains cryptographer-sign-off-gated (§10); the isolated self-host is not
+that.
 
 ---
 
@@ -220,7 +219,6 @@ The two axes phase independently:
   account), so this is a bring-up step only.
 - **Phase B2 — D1 shared phantom identity.** All members deliver as one shared
   phantom account; recipients see only "phantom." Full delivery anonymity.
-  **Revised from a shared `SenderCertificate` to device linking — see §6.**
 
 What each phase buys, and which sub-workstream owns it:
 
@@ -230,7 +228,7 @@ What each phase buys, and which sub-workstream owns it:
 | A2 | + concurrency-safe, + genuine per-message FS | e2a (done) + A2 rework | **wired, confirmed passing** |
 | A2 (ban-exclusion re-key) | banned member's key stops working at the Signal layer | e2d | open (mechanism exists, no trigger) |
 | B1 | record rides real Signal; own-account receive; replica converges over the wire | Phase-1 fork | **wired, confirmed passing** |
-| B2 | server + recipients cannot attribute the account | e2c (D1, via device linking) | **wired, confirmed passing** |
+| B2 | server + recipients cannot attribute the account | e2c (D1, shared identity keypair) | **wired** (via a presage fork) |
 | K2 secret distribution | group secret reaches every member over a real pairwise session, not an in-process hand-off | e2c | **wired, confirmed passing** |
 
 The first end-to-end milestone, **A1 + B1**, has already been superseded by **A2 +
@@ -337,59 +335,113 @@ decrypt→ingest→puncture seam), **e2d** (re-key triggers).
 
 ---
 
-## 6. Delivery layer — D1 shared phantom identity — **realized via device linking,
-## not certificate substitution (revised; see FINDINGS D14)**
+## 6. Delivery layer — D1 shared phantom identity — realized as a shared ACI
+## identity keypair, not certificate substitution or device linking
 
-**Original design, and why it changed.** The design as first specced: all members
-hold one shared phantom account identity and its short-lived, server-signed
-`SenderCertificate`, and deliver sealed-sender under it directly — "this is the
-`SenderCertificate` argument to `sealed_sender_encrypt` — a *use* of a stock API,
-not a fork." That assumed `presage`'s `Manager` would expose (a) a way to fetch a
-`SenderCertificate` and (b) a way to pass one into the send path. Neither exists:
-`Manager<S, Registered>`'s complete public method list (checked against its
-published docs) has no certificate accessor and no override parameter on
-`send_message`/`send_message_to_group`. Reaching the stock `SenderCertificate`
-argument for real would mean forking presage or hand-rolling delivery directly
-against the vendored `libsignal-service-rs`, bypassing `Manager` — the "no fork"
-framing of the original plan didn't survive contact with presage's actual surface.
+**Two designs that don't work, ruled out first.**
 
-**What is built instead.** Signal's own multi-device linking, which presage does
-expose (`Manager::link_secondary_device` / `Manager::link_secondary`, both stock,
-undocumented-as-relevant-here but present in the public API). Every member becomes
-their own independent **device** of one shared phantom account — own real identity
-key, own real device-specific certificate, entirely unmodified — rather than
-borrowing the phantom's certificate. `send_message` and every downstream
-`PresageTransport` code path are **untouched**: the certificate a linked device
-fetches for itself simply names the phantom's ACI, because that is genuinely which
-account it now is. This achieves the identical externally-visible property
-("recipients see a single 'phantom' sender") without touching a certificate at
-all. Implemented as
-[`PresageTransport::link_as_phantom_device`](../crates/transports/transport-presage/src/lib.rs),
-proven end to end (phantom registers → member links as its device → member sends
-→ an independent third "observer" account decrypts and confirms the sender ACI is
-the phantom's, not the member's own) by the
-[`b2_phantom_link`](../crates/transports/transport-presage/examples/b2_phantom_link.rs)
-example.
+Naively swapping the outer `SenderCertificate` on an otherwise-normal send does
+not work, and this is a protocol fact, not an implementation gap: a recipient's
+`sealed_sender_decrypt` looks up the Double Ratchet session to decrypt *with*
+using the address named in the certificate
+(`ProtocolAddress::new(cert.sender_uuid(), cert.sender_device_id())` —
+`signalapp/libsignal`, `rust/protocol/src/sealed_sender.rs`). If a member
+encrypts under their own identity key but attaches the phantom's certificate, the
+recipient decrypts against the *phantom's* session — a different ratchet chain
+entirely — and decryption fails outright, not just misattributes.
 
-**What is still a bring-up stand-in.** The provisioning URL that authorizes a link
-(`link_secondary_device`'s output, consumed by the primary's `link_secondary`) is
-still handed across **directly, in-process** by the caller today, even though e2c
-(real pairwise Double Ratchet distribution) now exists and proves the mechanism
-works — `distribute_group_secret`/`receive_group_secret` just haven't been reused
-for this second payload yet. The decision the user made explicitly when this was
-revised stands: the provisioning URL should travel over the *same* pairwise
-channel already carrying the K2/PPRF group secret to each member, so only someone
-who already legitimately holds the group secret can ever get a device linked as
-the phantom — a follow-up change to `link_as_phantom_device`, not a new mechanism
-to design.
+Device linking (every member becomes a real, additional Signal *device* of the
+phantom account) sidesteps that correctly, because a linked device genuinely
+receives the phantom's real identity key during the linking handshake. It was
+built and confirmed working (`docs/FINDINGS.md` D14), but introduces its own
+problem: a linked device's `device_id` is a stable, persistent per-member tag
+visible to every recipient on every message (`docs/B2_DEVICE_ID_LINKABILITY_ISSUE.md`,
+no longer in the tree — reverted alongside the rest of that approach), breaking
+post-to-post unlinkability. A fix (per-message device rotation) was attempted and
+found not to work on this server, which reuses freed device-id slots immediately.
+Both device-linking and its rotation fix were reverted; see `docs/FINDINGS.md`'s
+history for the full account.
 
-**Unaffected by this change.** The recipient-access-key point (a sender needs each
-recipient's access key from the group-shared profile keys to sealed-send) and the
-accepted NDSS'21 residual timing/receipt-leakage limitation both still apply —
-this revision only changes *whose* certificate gets used, not sealed sender's
-other properties. The rejected D2 alternative (a certless custom content type) is
-now doubly moot: it was rejected for being a deeper client modification with no
-payoff, and device linking turns out to need no client modification at all.
+**What's actually built: a shared ACI identity keypair.**
+
+The insight that unblocks this (credit: external review) is that "encrypt under
+your own identity key" was never a fixed constraint — the identity keypair
+backing an account's Double Ratchet sessions is *just a Curve25519 keypair*,
+freely choosable at registration. Nothing requires it to be randomly generated,
+and nothing requires it to be unique per account.
+
+So every member registers their **own, completely independent** real Signal
+account — own phone number, own uuid, own device id, own prekeys, own sessions
+with every recipient — except the **ACI identity keypair** is not randomly
+generated. It is deterministically derived from the group secret
+(`personas_group_crypto::DistributedSecret::derive_phantom_identity_seed`,
+HKDF over `(seed, epoch)`, domain-separated from the message-key schedule),
+turned into a Curve25519 keypair
+(`PrivateKey::deserialize` on the derived 32 bytes, then `.public_key()`), and
+passed into registration
+(`transport_presage::PresageTransport::register_as_phantom`). Every member who
+installed the same group secret derives the identical keypair, with zero extra
+network round trips — the derivation is entirely local, riding on e2c's
+already-distributed secret.
+
+Signal's server, seeing nothing unusual (a normal account registering with a
+normal-looking identity key), legitimately signs that account's own
+`SenderCertificate` — which now just happens to embed the same public identity
+key as every other member's. Nothing about certificate issuance, session
+establishment, or delivery needed to change; `Manager::send_message` and every
+existing `PresageTransport` code path are untouched. The one real fork was
+upstream of all of that: `Manager<S, Confirmation>::confirm_verification_code`
+always calls `IdentityKeyPair::generate(&mut rng)` inline, with no way to
+override it — see `third_party/presage/presage/src/manager/confirmation.rs`'s
+`confirm_verification_code_with_identity`, added specifically for this.
+
+**Why this doesn't reintroduce a collision hazard.** Each member's Double Ratchet
+sessions with any given recipient stay entirely independent: X3DH mixes in each
+member's own distinct signed-prekey and one-time-prekey (fetched from *their*
+account's own, real prekey bundle) even though the identity-key input to that
+handshake happens to be shared. Two members are never advancing the same ratchet
+chain, unlike sharing an actual sender-key chain (Phase A1's own accepted
+limitation) or sharing a device id (the reverted device-linking rotation
+attempt) — both of those collide because they share *mutable, sequentially
+advanced* state; a shared identity key is neither mutable nor sequential, it is
+static input to independent handshakes.
+
+**What the receive side has to do differently.** Sealed sender was never designed
+to hide the sender from the *recipient* — `sealed_sender_decrypt` always exposes
+`cert.sender_uuid()` to whoever decrypts, that's how the recipient's client knows
+who to attribute the message to. So even with every member sharing an identity
+key, `content.metadata.sender` (the uuid) still reports each member's own,
+genuinely distinct real account — nothing hides that field, and this scheme does
+not try to. What's actually shared is the certificate's **embedded identity
+public key**, a field the recipient never previously had a reason to look at.
+`third_party/libsignal-service-rs`'s `Metadata` struct now carries it
+(`sender_identity_key: Option<PublicKey>`, populated only on sealed-sender
+deliveries — see the fork in `src/cipher.rs`/`src/content.rs`), and
+`PresageTransport`'s receive loop reports *that* (base64-encoded, `phantom:`
+prefix) as `Incoming::Message::sender` whenever it's present, falling back to the
+real uuid otherwise (identified bring-up delivery, or a group not using this
+scheme). That fallback matters: sealed sender itself is conditional in this
+codebase — `Manager::send_message` only attempts unidentified delivery once the
+sender's store already holds the recipient's profile key, which presage learns
+automatically from one prior identified message in each direction (already
+happens naturally in every multi-message example here). Before that point, a
+send is identified and this scheme has nothing to hide behind.
+
+**Cost, stated plainly.** The identity keypair is scoped to the epoch, like the
+rest of the group secret — a re-key rotates it. Unlike a content-layer re-key,
+rotating an *identity* keypair is not cheap: it means every member re-registering
+their Signal account identity, not just installing a new `KeyManager`. Not yet
+wired to any re-key trigger (e2d, the same open item the message-key schedule
+already has).
+
+**Proof structure.** `transport-presage/examples/b2_shared_identity.rs`: two
+members register independently (`register_as_phantom`, same group secret), an
+independent observer registers normally, a bootstrap round gets profile keys
+exchanged so the real test sends actually go sealed-sender, then each member
+sends the observer one more message. The observer must see two *different*
+`sender` uuids (proving this is not device linking) and two *identical*
+`sender_identity_key` values (proving the shared-identity property actually
+holds where it matters).
 
 ---
 
@@ -459,13 +511,13 @@ only — `group_encrypt`/`group_decrypt`.
    proven by `e2e_record_converges_over_signal` and `pprf_cipher`'s own unit tests.
    The **e2d re-key triggers** (deciding *when* to call `rekey` — epoch boundary,
    ban, leave, cadence — from the replica's/messenger's event stream) remain.
-5. ~~Land **B2** (§6, D1 phantom identity).~~ **Done** —
-   `PresageTransport::link_as_phantom_device` (device linking, not certificate
-   substitution — presage's `Manager` has no path to the latter; §6 has the full
-   story) + the `b2_phantom_link` example, confirmed passing against the staging
-   server. The phantom-linking provisioning URL is still handed across directly by
-   the caller (a follow-up to reuse e2c's now-real channel), as does unlinking a
-   device on ban/leave.
+5. ~~Land **B2** (§6, D1 phantom identity).~~ **Done, via a fork** —
+   `PresageTransport::register_as_phantom` (shared ACI identity keypair, derived
+   from the group secret; `third_party/presage`'s `confirm_verification_code_with_identity`
+   is the actual fork point) + a small addition to the already-vendored
+   `libsignal-service-rs` exposing the certificate's embedded identity key on
+   receive. Proven by `b2_shared_identity`: two independent members, two
+   different real uuids, the same certificate-embedded identity key on both.
 6. ~~Land **e2c** (real pairwise Double Ratchet distribution of the group secret).~~
    **Done** — `PresageTransport::distribute_group_secret`/`receive_group_secret`,
    proven by the `e2c_key_distribution` example (creator distributes, member
@@ -493,13 +545,11 @@ only — `group_encrypt`/`group_decrypt`.
   and the **decrypt→ingest→puncture receive seam** — specified here (§2, §5),
   implemented against real libsignal in the fork. There is no well-layered e2b code
   to write in the current mock build; e2b **is** the spec plus the seam it defines.
-- **e2c — mostly realized.** D1 delivery (§6) is `link_as_phantom_device` (device
-  linking, wired, confirmed passing). Real pairwise distribution of the K2/PPRF
-  group secret over the Double Ratchet is done —
-  `distribute_group_secret`/`receive_group_secret`, confirmed passing via
-  `e2c_key_distribution`. What's still open is reusing that same channel for the
-  phantom-linking provisioning URL, which today is still modelled in-process by
-  handing the URL across directly.
+- **e2c — done.** Real pairwise distribution of the K2/PPRF group secret over the
+  Double Ratchet — `distribute_group_secret`/`receive_group_secret`, confirmed
+  passing via `e2c_key_distribution`. D1 delivery (§6, the shared phantom
+  sealed-sender identity) is also done, via the shared-ACI-identity-keypair
+  scheme (a `presage` fork) — confirmed passing via `b2_shared_identity`.
 - **e2d** — the re-key triggers (§5).
 - **e2e** — Layer-0 adversarial gate; concurrency/FS/outsider-key-secrecy already
   landed in `e2a`; non-member forgery + banned-persona rejection need the fork's
@@ -529,14 +579,14 @@ only — `group_encrypt`/`group_decrypt`.
 - **Accepted limitations, restated:** sealed-sender residual timing/receipt
   leakage (NDSS'21) not addressed; PCS is re-key-only, same as stock groups;
   Phase-1 no-concurrency and no-content-layer-ban-exclusion.
-- **D1 realized as device linking, not certificate substitution (new — see §6,
-  FINDINGS D14).** Every member is now a genuine additional *device* of the
-  phantom account, each with its own real identity key, rather than borrowing a
-  single shared certificate. Worth explicit sign-off: this means Signal's server
-  itself treats every member as a legitimate device of one account (able to
-  receive that account's fanned-out messages, appear in `devices()`, etc.), which
-  is a different trust/blast-radius shape than "many senders reuse one
-  certificate" — e.g. a malicious member who links is a *device* of the phantom,
-  not merely a certificate-holder, until unlinked. Whether that distinction
-  matters for this threat model wants a second opinion before B2 is considered
-  closed.
+- **Shared ACI identity keypair across accounts (new — see §6).** Multiple real,
+  independently-registered Signal accounts now intentionally hold the *same*
+  identity keypair. Signal's own trust model (TOFU identity pinning, safety
+  numbers) generally assumes one identity key maps to one account; this scheme
+  deliberately breaks that assumption for every member of a group. It has no
+  effect on *this* system's own clients (which don't need or check that
+  invariant), but is worth explicit sign-off before any interop with real,
+  unmodified Signal clients is on the table — an unmodified client seeing the
+  same identity key across what look like unrelated contacts is untested,
+  unspecified behavior from Signal's own point of view, not something this
+  design doc can vouch for.

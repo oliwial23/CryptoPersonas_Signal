@@ -119,6 +119,17 @@ curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag 
 # override that source with the in-tree copy so the ServiceConfiguration repoint (point
 # the client at our isolated self-hosted Signal-Server test-server, SERVERLESS_SIGNAL_DESIGN.md
 # §8 / signal-server-selfhost-route) is an editable patch rather than a fork of a git dep.
-# presage itself stays a plain git dep and transparently resolves against this copy.
 [patch."https://github.com/whisperfish/libsignal-service-rs"]
 libsignal-service = { path = "third_party/libsignal-service-rs" }
+
+# e2c/D1 — vendored, patchable fork of presage itself (mirrors the libsignal-service-rs
+# pattern above), at the same pinned rev as the `presage`/`presage-store-sqlite`
+# workspace-dependency declarations above. Needed because the shared-phantom-identity
+# scheme (SERVERLESS_SIGNAL_DESIGN.md §6, FINDINGS.md) requires registering an account
+# with a caller-supplied ACI identity keypair (derived from the PPRF group secret)
+# instead of the randomly generated one `Manager<S, Confirmation>::confirm_verification_code`
+# always produces internally — presage's public API exposes no seam for this, so the
+# fork edits that one function directly (see third_party/presage/presage/src/manager/confirmation.rs).
+[patch."https://github.com/whisperfish/presage"]
+presage = { path = "third_party/presage/presage" }
+presage-store-sqlite = { path = "third_party/presage/presage-store-sqlite" }

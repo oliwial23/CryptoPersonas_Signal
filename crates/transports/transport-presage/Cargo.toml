@@ -61,13 +61,6 @@ tokio = { workspace = true }
 futures-util.workspace = true
 base64.workspace = true
 tracing.workspace = true
-# B2/D1 — linking every member as a device of the shared "phantom" Signal account
-# (src/lib.rs::link_as_phantom_device). `Manager::link_secondary_device`'s
-# provisioning-URL callback is a `futures_channel::oneshot::Sender<Url>`, which is a
-# different crate than the `futures-util` combinators above; both are already in the
-# lockfile via presage, this just gives us a direct handle on them.
-futures-channel = "0.3"
-url = "2"
 # e2c — serializing the DistributedSecret wire bytes for the body of the pairwise
 # key-distribution DataMessage (src/lib.rs::distribute_group_secret /
 # receive_group_secret). Already in the lockfile everywhere else this type travels

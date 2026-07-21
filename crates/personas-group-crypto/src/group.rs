@@ -34,6 +34,11 @@ use crate::pprf::{Nonce, PuncturableKey};
 const EPOCH_KEY_INFO: &[u8] = b"personas/group-epoch-key/v1";
 const EPOCH_KEY_SALT: &[u8] = b"personas/group-epoch-key/salt/v1";
 const MESSAGE_KEY_INFO: &[u8] = b"personas/message-key/v1";
+/// Distinct from the two labels above so a phantom-identity seed can never be
+/// confused with (or derived the same way as) an epoch key or message key, even
+/// though all three come from the same `(seed, epoch)` input pair.
+const PHANTOM_IDENTITY_INFO: &[u8] = b"personas/phantom-identity-seed/v1";
+const PHANTOM_IDENTITY_SALT: &[u8] = b"personas/phantom-identity-seed/salt/v1";
 
 /// What a recipient needs to re-derive a message key: the epoch that was installed
 /// and the sender's random nonce. Rides in the `PersonaEnvelope` header (e2b);
@@ -108,6 +113,37 @@ impl GroupSecret {
 pub struct DistributedSecret {
     pub epoch: u64,
     pub seed: [u8; HASH_LEN],
+}
+
+impl DistributedSecret {
+    /// Derive a stable 32-byte seed for the shared "phantom identity" scheme
+    /// (`docs/SERVERLESS_SIGNAL_DESIGN.md` §6): every member who has installed
+    /// this same `DistributedSecret` derives this identical value, suitable as a
+    /// Curve25519 private-key seed. This crate stays libsignal-free by design
+    /// (see the module doc), so it returns raw bytes — `transport-presage`
+    /// constructs the actual `IdentityKeyPair` from them.
+    ///
+    /// Domain-separated (a distinct HKDF `info`/`salt` from [`GroupSecret::epoch_key`]
+    /// and the message-key schedule) so this can never be confused for, or derived
+    /// the same way as, either of those — despite all three coming from the same
+    /// `(seed, epoch)` input.
+    ///
+    /// Scoped to the epoch, like the rest of this secret: a re-key (new epoch)
+    /// yields a *different* phantom identity. That is semantically consistent with
+    /// why re-keys happen at all (a banned member should not remain bound to the
+    /// group's shared identity any more than they remain able to decrypt its
+    /// content) — but it is a real, heavier cost than a content-layer re-key: an
+    /// identity key change means every member re-registering their Signal account
+    /// identity, not just installing a new `KeyManager`. Not yet wired to any
+    /// re-key trigger (e2d, same open item as the message-key schedule).
+    pub fn derive_phantom_identity_seed(&self) -> Zeroizing<[u8; HASH_LEN]> {
+        let mut ikm = [0u8; HASH_LEN + 8];
+        ikm[..HASH_LEN].copy_from_slice(&self.seed);
+        ikm[HASH_LEN..].copy_from_slice(&self.epoch.to_le_bytes());
+        let out = hkdf_sha256(PHANTOM_IDENTITY_SALT, &ikm, PHANTOM_IDENTITY_INFO);
+        ikm.zeroize();
+        Zeroizing::new(out)
+    }
 }
 
 /// A per-message AEAD key handed to e2b. Zeroized on drop; never logged.
@@ -380,5 +416,58 @@ mod tests {
                 got: 9
             })
         );
+    }
+
+    #[test]
+    fn phantom_identity_seed_is_deterministic_and_matches_across_members() {
+        let mut r = rng(8);
+        let secret = GroupSecret::generate(0, &mut r);
+        let wire = secret.to_wire();
+
+        // Every member who installs the *same* DistributedSecret derives the
+        // identical phantom identity seed, with no coordination beyond having
+        // received the secret itself — exactly the property the shared-identity
+        // scheme needs.
+        let member_a_seed = wire.derive_phantom_identity_seed();
+        let member_b_seed = wire.clone().derive_phantom_identity_seed();
+        assert_eq!(*member_a_seed, *member_b_seed);
+
+        // Deterministic: re-deriving from the same wire bytes again matches.
+        assert_eq!(*member_a_seed, *wire.derive_phantom_identity_seed());
+    }
+
+    #[test]
+    fn phantom_identity_seed_differs_across_epochs_and_secrets() {
+        let mut r = rng(9);
+        let epoch0 = GroupSecret::generate(0, &mut r).to_wire();
+        let epoch1 = GroupSecret::generate(1, &mut r).to_wire();
+
+        // Different epoch (a re-key) ⇒ different phantom identity, even with an
+        // unrelated fresh seed — this is the cost documented on the method: a
+        // re-key rotates the shared identity, not just the message-key schedule.
+        assert_ne!(
+            *epoch0.derive_phantom_identity_seed(),
+            *epoch1.derive_phantom_identity_seed()
+        );
+
+        // Same epoch number, different seed (different group) ⇒ different identity.
+        let other_group_epoch0 = GroupSecret::generate(0, &mut r).to_wire();
+        assert_ne!(
+            *epoch0.derive_phantom_identity_seed(),
+            *other_group_epoch0.derive_phantom_identity_seed()
+        );
+    }
+
+    #[test]
+    fn phantom_identity_seed_is_domain_separated_from_epoch_key() {
+        // The phantom identity seed must never equal the epoch key derived from
+        // the same (seed, epoch) pair — otherwise the two derivations could be
+        // confused for each other, or knowledge of one could leak the other.
+        let mut r = rng(10);
+        let secret = GroupSecret::generate(0, &mut r);
+        let wire = secret.to_wire();
+        let phantom_seed = wire.derive_phantom_identity_seed();
+        let epoch_key = secret.epoch_key();
+        assert_ne!(*phantom_seed, epoch_key);
     }
 }

@@ -184,22 +184,6 @@ You can check its status later with `./tls-proxy.sh status`, and stop it with
   ```sh
   cargo test -p personas-messenger --release -- --ignored --nocapture e2e_record_converges_over_signal
   ```
-- The **phantom identity** check (B2): registers a phantom account and an
-  independent "observer" account, links a member as a device of the phantom, sends
-  from the linked member to the observer, and confirms the observer sees the
-  phantom's identity, not the member's:
-  ```sh
-  cargo run -p transport-presage --example b2_phantom_link
-  ```
-- The **per-message rotation** check: sends two messages, each through its own
-  single-use linked device, and is meant to show two _different_ device ids for
-  them. On a real run this currently **fails** — the server reuses a freed device
-  slot immediately, so both sends come back with the same device id. See
-  `docs/B2_DEVICE_ID_LINKABILITY_ISSUE.md`'s update and `docs/FINDINGS.md` D15 for
-  the finding; not a code bug to retry past, a server-allocation-policy result:
-  ```sh
-  cargo run -p transport-presage --example b2_rotating_phantom
-  ```
 - The **key distribution** check (e2c): a creator distributes a fresh group
   secret to a member over a real 1:1 Signal message (X3DH + Double Ratchet, not
   an in-process hand-off), the member recovers it, and both sides exchange one
@@ -207,10 +191,22 @@ You can check its status later with `./tls-proxy.sh status`, and stop it with
   ```sh
   cargo run -p transport-presage --example e2c_key_distribution
   ```
+- The **shared phantom identity** check (B2/D1): two members register two fully
+  independent accounts but with the same identity keypair (derived from the
+  group secret), and an independent observer confirms both real accounts'
+  messages carry the *same* certificate-embedded identity key while still
+  showing *different* real uuids (not device linking):
+  ```sh
+  cargo run -p transport-presage --example b2_shared_identity
+  ```
 
-All five create their own fresh throwaway accounts/numbers/group secrets every
+All four create their own fresh throwaway accounts/numbers/group secrets every
 run — nothing to set up beforehand, and nothing persists between runs (the fake
 server's datastores are in-memory and reset when Terminal 1's process stops).
+The `b2_shared_identity` example additionally exercises the `third_party/presage`
+fork — no separate setup needed, `cargo build`/`cargo run` picks it up
+automatically via the workspace `[patch]`, same as `third_party/libsignal-service-rs`
+already does.
 
 ### If something in Terminal 3 fails
 

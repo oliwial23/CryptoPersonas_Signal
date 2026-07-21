@@ -278,6 +278,7 @@ where
                     needs_receipt: false,
                     unidentified_sender: false,
                     was_plaintext: false,
+                    sender_identity_key: None,
 
                     server_guid,
                 };
@@ -324,6 +325,7 @@ where
                     needs_receipt: false,
                     unidentified_sender: false,
                     was_plaintext: true,
+                    sender_identity_key: None,
 
                     server_guid,
                 };
@@ -357,6 +359,7 @@ where
                     needs_receipt: false,
                     unidentified_sender: false,
                     was_plaintext: false,
+                    sender_identity_key: None,
 
                     server_guid,
                 };
@@ -386,12 +389,15 @@ where
                 Plaintext { metadata, data }
             },
             Type::UnidentifiedSender => {
-                let SealedSenderDecryptionResult {
-                    sender_uuid,
-                    sender_e164: _,
-                    device_id,
-                    mut message,
-                } = sealed_sender_decrypt(
+                let (
+                    SealedSenderDecryptionResult {
+                        sender_uuid,
+                        sender_e164: _,
+                        device_id,
+                        mut message,
+                    },
+                    sender_identity_key,
+                ) = sealed_sender_decrypt(
                     ciphertext,
                     &self.trust_roots,
                     Timestamp::from_epoch_millis(envelope.timestamp()),
@@ -444,6 +450,7 @@ where
                     unidentified_sender: true,
                     needs_receipt,
                     was_plaintext: false,
+                    sender_identity_key: Some(sender_identity_key),
 
                     server_guid,
                 };
@@ -676,6 +683,16 @@ impl From<SignalProtocolError> for SealedSenderDecryptionError {
         ciphertext = ciphertext.len(),
     )
 )]
+// Personas fork: also returns the sender certificate's embedded identity
+// `PublicKey` alongside the stock decryption result (`SealedSenderDecryptionResult`
+// itself is an external libsignal-protocol type we don't fork). The shared-
+// phantom-identity scheme (docs/SERVERLESS_SIGNAL_DESIGN.md §6) needs this: every
+// member of a group registers with the same ACI identity keypair
+// (transport-presage's `register_as_phantom`), so this key is identical across
+// every member's messages — the signal a recipient should treat as "who is this,
+// really" instead of the certificate's per-account uuid. `usmc` (the decrypted
+// `UnidentifiedSenderMessageContent`) already carries the validated certificate
+// right here; the only change from upstream is not discarding it.
 async fn sealed_sender_decrypt(
     ciphertext: &[u8],
     trust_roots: &[PublicKey],
@@ -688,7 +705,7 @@ async fn sealed_sender_decrypt(
     signed_pre_key_store: &mut dyn SignedPreKeyStore,
     sender_key_store: &mut dyn SenderKeyStore,
     kyber_pre_key_store: &mut dyn KyberPreKeyStore,
-) -> Result<SealedSenderDecryptionResult, SealedSenderDecryptionError> {
+) -> Result<(SealedSenderDecryptionResult, PublicKey), SealedSenderDecryptionError> {
     let usmc =
         sealed_sender_decrypt_to_usmc(ciphertext, identity_store).await?;
 
@@ -728,8 +745,11 @@ async fn sealed_sender_decrypt(
         usmc.sender()?.sender_uuid()?.to_string(),
         usmc.sender()?.sender_device_id()?,
     );
+    // Personas fork: the certificate's embedded identity key, grabbed here while
+    // `usmc` is still in scope — see this function's doc comment.
+    let sender_identity_key = usmc.sender()?.key()?;
 
-    sealed_sender_decrypt_with_validated_usmc(
+    let result = sealed_sender_decrypt_with_validated_usmc(
         &usmc,
         &remote_address,
         &local_address,
@@ -744,7 +764,8 @@ async fn sealed_sender_decrypt(
     .map_err(|inner| SealedSenderDecryptionError {
         inner,
         sender: Some(remote_address),
-    })
+    })?;
+    Ok((result, sender_identity_key))
 }
 
 #[allow(clippy::too_many_arguments)]

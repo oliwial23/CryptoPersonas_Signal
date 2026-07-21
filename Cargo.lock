@@ -3701,7 +3701,6 @@ dependencies = [
 [[package]]
 name = "presage"
 version = "0.8.0-dev"
-source = "git+https://github.com/whisperfish/presage?rev=63482efd0cbdc0780baf0650517c7d55f1cac05d#63482efd0cbdc0780baf0650517c7d55f1cac05d"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3723,7 +3722,6 @@ dependencies = [
 [[package]]
 name = "presage-store-sqlite"
 version = "0.8.0-dev"
-source = "git+https://github.com/whisperfish/presage?rev=63482efd0cbdc0780baf0650517c7d55f1cac05d#63482efd0cbdc0780baf0650517c7d55f1cac05d"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5737,7 +5735,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
- "futures-channel",
  "futures-util",
  "libsignal-protocol",
  "personas-group-crypto",
@@ -5751,7 +5748,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.23",
  "transport-api",
- "url",
  "uuid",
 ]
 

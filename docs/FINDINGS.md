@@ -589,137 +589,12 @@ observer's `Replica::ingest` verifies and folds it. `pprf_cipher`'s own in-proce
 been separately confirmed to pass in isolation but exercise the same code paths the e2e test does.
 Not independently crypto-reviewed — see the open items above (AEAD choice sign-off, e2c, e2d, B2).
 
-### D14. B2's shared phantom identity is realized via Signal device linking, not certificate substitution — presage's `Manager` has no path to the latter
-
-**What was tried first, and why it doesn't work.** The design as specced (§6, pre-revision): fetch the
-phantom account's own `SenderCertificate` and have every member sealed-send under it directly — "a
-*use* of a stock API, not a fork." Checking presage's actual public API before writing any code (its
-published method list for `Manager<S, Registered>`) shows this isn't reachable: there is no method to
-fetch a `SenderCertificate` anywhere on `Manager`, and no parameter on `send_message`/
-`send_message_to_group` to pass one in. The vendored `libsignal-service-rs` *does* have the pieces
-(`SignalWebSocket<Identified>::get_sender_certificate`, `sealed_sender_encrypt`/
-`sealed_sender_decrypt_to_usmc` in `cipher.rs`), but nothing in presage exposes the authenticated
-`SignalWebSocket` needed to reach them. Getting there for real would mean either forking presage (to
-add the missing accessor/override) or bypassing `Manager` entirely and hand-rolling delivery directly
-against `libsignal-service-rs` — a materially bigger undertaking than the original "just pass a
-different certificate" framing suggested.
-
-**What is built instead.** Signal's own multi-device linking, which presage *does* expose end to end:
-`Manager::<S, Linking>::link_secondary_device` (the new device's half: generates a provisioning
-request, yields its URL over a `futures_channel::oneshot::Sender<Url>`) and
-`Manager::<S, Registered>::link_secondary` (the primary's half: approves a given URL). Every member
-calls the former against their own fresh store; whoever holds the phantom's already-registered
-`Manager` calls the latter with the resulting URL. The member ends up with their own genuine,
-independent device of the *same* phantom account — own real identity key, own real device-specific
-certificate — rather than borrowing the phantom's. `send_message` and every existing
-`PresageTransport` code path are consequently **untouched**: a linked device's own certificate simply
-names the phantom's ACI, because that's genuinely which account it now is. Implemented as
-`PresageTransport::link_as_phantom_device` (`transport-presage/src/lib.rs`).
-
-**Proof structure, not yet run.** `transport-presage/examples/b2_phantom_link.rs`: register a phantom,
-register a wholly independent third "observer" account, link a member as the phantom's device, send
-from the linked member to the observer, and check that the observer's decrypted sender ACI is the
-phantom's — not the member's, and not some third value. That's the actual anonymity property; the
-example fails loudly (`bail!`) if the observer sees anything other than the phantom's ACI.
-
-**What's still open, deliberately not addressed here.**
-
-- **The provisioning-URL handoff is a bring-up stand-in**, exactly like `create_group_secret`'s
-  `DistributedSecret` already is: the caller passes the URL from the new device's half to the
-  primary's half directly, in-process, rather than over an encrypted pairwise channel. Decided with
-  the user: once e2c (real pairwise Double Ratchet distribution) exists, this URL should travel over
-  the *same* pairwise session already carrying the K2/PPRF group secret, so only someone who already
-  holds the group secret can ever get a device linked as the phantom.
-- **Different blast radius than the original design anticipated.** A member linked as a phantom
-  device is now a genuine Signal-protocol device of that account — not merely holding a copy of a
-  certificate. Flagged as a new §10 sign-off item: whether that distinction (e.g., a linked-but-later-
-  banned member remaining a *device* until explicitly unlinked, versus merely holding a revocable
-  certificate) matters for this threat model wants explicit review.
-- **Unlinking on ban/leave** is not implemented. `Manager::unlink_secondary` exists and is the
-  obvious mechanism, but nothing currently calls it — this is a natural companion to the e2d re-key
-  triggers, not yet wired to any ban/leave event.
-- **A persistently linked device leaks a stable per-member tag** (`content.metadata.sender_device`
-  is visible to every recipient and stays fixed for as long as a member remains linked, so two posts
-  from the same member are linkable to each other even though they share the phantom's account id —
-  see `docs/B2_DEVICE_ID_LINKABILITY_ISSUE.md`). **Still open.** Per-message rotation
-  (`send_as_rotating_phantom_device`, D15) was implemented as the fix but does not close the gap on
-  this server: it reuses the same freed device-id slot on every rotation, so two rotated sends still
-  show the same `sender_device`. See D15's build/test status for the confirmed failure.
-
-**Build/test status.** Written and reasoned against presage's *published* method list (fetched
-directly, not guessed). Run against the staging server on the first real attempt (one small type
-error fixed — `send_message` wanted the already-complete `ServiceId` the example had, not a re-wrapped
-one, a copy-paste mismatch from `a1_smoke.rs`'s different variable shape): **`b2_phantom_link`
-passes.** The linked member registered as an additional `device_id` of the phantom's ACI, sent
-through it, and the independent observer's decrypt showed the phantom's ACI as sender — the actual
-anonymity property, confirmed, not just plausible. The `LocalSet` concern flagged above as an open
-unknown turned out not to be an issue: linking worked fine on the caller's ordinary runtime, no actor
-thread needed.
-
-### D15. Per-message phantom device rotation, closing D14's device-id linkability gap
-
-**The gap, restated.** D14's `link_as_phantom_device` gives a member a *persistent* device of the
-phantom account. `content.metadata.sender_device` is visible to every recipient on every message and
-stays fixed for as long as that device stays linked — a stable per-member tag that lets a recipient
-group every message from the same member together, even though they all share the phantom's account
-id. Full writeup, requested in exactly this shape for external review:
-`docs/B2_DEVICE_ID_LINKABILITY_ISSUE.md`.
-
-**The fix.** `PresageTransport::send_as_rotating_phantom_device` (`transport-presage/src/lib.rs`):
-link a brand-new, in-memory, single-use device of the phantom account, send exactly one message
-through it, then unlink it — unconditionally, whether the send succeeded or failed. Mirrors the
-content layer's own single-use-key discipline (`PprfContentCipher`'s `mk`, punctured the moment it's
-used) at the delivery layer instead: a device id, like a message key, exists for one message and is
-then gone.
-
-**Cost.** Three network round trips per message instead of one (link is itself two round trips, one
-per side of the handshake, plus the send, plus unlink) — `link_as_phantom_device`'s persistent device
-pays that cost once per member for an entire session; this pays it on every single message. This is
-the per-message option from the tradeoff `B2_DEVICE_ID_LINKABILITY_ISSUE.md` lays out (against the
-cheaper but weaker per-epoch alternative, which is not implemented — nothing currently re-links on the
-content layer's re-key cadence).
-
-**Unlink failure handling.** If the unlink call itself fails after a send, that's logged as a warning,
-not surfaced as the function's error — the caller asked about the send, and got that answer; a failed
-unlink means a device may be left linked and reusable until removed some other way, which is worth
-monitoring for, not something this function pretends can't happen.
-
-**Proof structure.** `transport-presage/examples/b2_rotating_phantom.rs`: send two messages through
-this function to an independent observer account, and fail loudly unless the observer sees two
-**different** `sender_device` values. (`b2_phantom_link` only proves the account id is shared; it
-doesn't touch this property, since it links one persistent device and never sends twice.)
-
-**Build/test status.** Run against the staging server — it compiles and completes, but **the core
-assertion fails**: both sequential rotated sends came back with the identical `sender_device`
-(`DeviceId(2)` on both, in the real run). Root cause is not a bug in this implementation — it is the
-server's device-id allocation policy. The server hands out the lowest free device-id slot; `unlink`
-frees a slot immediately; so the very next `link` call gets that same freed slot straight back. Link →
-send → unlink therefore does not achieve single-use device ids on this server, and the linkability gap
-this was meant to close (see the "Still open" note added to D14's open-issues list) remains. This is a
-genuine design-level finding, not something a small patch fixes: any fix needs either a different
-rotation shape (e.g. a pre-linked pool of several devices, sent from at random, trading a hard
-guarantee for a k-anonymity one and reintroducing a diluted version of A1's collision hazard — see the
-pool-based design appended to `docs/B2_DEVICE_ID_LINKABILITY_ISSUE.md`) or accepting the persistent-
-device leak as a documented residual limitation, the way sealed sender's own NDSS'21 timing leak is
-accepted. Not yet decided; no implementation change has been made in response.
-
-A related, still-unresolved question: `transport-presage/examples/b2_device_cap_probe.rs` (link
-additional devices without ever unlinking, until the server's typed `DeviceLimitReached` error
-surfaces, to learn the real per-account device cap — directly informs whether a pool-based pool size is
-even viable) hung on a real run after successfully linking 6 additional devices, and was killed rather
-than left running. Not yet debugged to a confirmed root cause; the leading hypothesis is the missing
-`tokio::time::timeout` around `link_as_phantom_device`'s internal `join!` (every other network call in
-this module is timeout-bounded; this one and `send_as_rotating_phantom_device`'s equivalent are not),
-possibly compounded by reopening the phantom's store fresh every loop iteration with no delay between
-iterations. Proposed fixes (add the timeout; reuse one phantom connection across iterations; add an
-inter-iteration delay) have not been applied.
-
-### D16. e2c: real pairwise distribution of the K2 group secret over the Double Ratchet
+### D14. e2c: real pairwise distribution of the K2 group secret over the Double Ratchet
 
 **What was open.** Every earlier example and the `personas-messenger` e2e test installed the K2 group
 secret by handing `DistributedSecret` wire bytes across directly in a Rust variable
 (`PresageTransport::create_group_secret`'s return value, passed straight to `start`) — a bring-up
-stand-in explicitly flagged as such everywhere it appeared (D13, D14, `SERVERLESS_SIGNAL_DESIGN.md` §5
+stand-in explicitly flagged as such everywhere it appeared (D13, `SERVERLESS_SIGNAL_DESIGN.md` §5
 step 2). The design has always called for this to travel over the pairwise Double Ratchet instead
 (`group.rs`'s own module doc: "hands its `DistributedSecret` wire form to every other member over the
 pairwise Double Ratchet").
@@ -749,10 +624,9 @@ real PPRF-encrypted content message end to end. That last step is what distingui
 checking the bytes match: it proves the *received* secret installs a `KeyManager` that genuinely
 interoperates with the creator's, not just that transit preserved the bytes.
 
-**What's still open.** The phantom-linking provisioning URL (D14) is not yet routed over this channel,
-even though the channel this finding built is exactly the one D14 called for reusing — a small follow-up
-to `link_as_phantom_device`, not a new distribution mechanism. The e2d re-key triggers (when to call
-`rekey`) are unrelated and remain open.
+**What's still open.** This finding is unrelated to B2 (D1, §6 — the shared phantom sealed-sender
+identity), which was open at the time this was written and is now built — see D15. The e2d re-key
+triggers (when to call `rekey`) remain open.
 
 **Build/test status.** Run against the staging server: **`e2c_key_distribution` passes.** The member's
 received `epoch`/`seed` matched the creator's byte-for-byte, and both sides' `KeyManager`s — one
@@ -771,3 +645,93 @@ second real run: that specific error pair no longer appears. A milder, different
 occasionally — same request/response-losing-its-pairing family, but presage itself logs it as
 non-blocking ("continuing") rather than cascading into a bookkeeping failure, and it hasn't affected a
 pass/fail result. Left alone rather than chased further.
+
+### D15. B2/D1 realized as a shared ACI identity keypair — a `presage` fork, not certificate substitution
+or device linking
+
+**Why the two earlier approaches don't work.** Certificate substitution alone (attach the phantom's
+`SenderCertificate` while continuing to encrypt under a member's own identity key) is not an
+implementation gap — it is cryptographically incoherent. Checked directly against
+`signalapp/libsignal`'s `sealed_sender_decrypt` (`rust/protocol/src/sealed_sender.rs`): the recipient
+decrypts using the Double Ratchet session stored under `ProtocolAddress::new(cert.sender_uuid(),
+cert.sender_device_id())` — the address the *certificate* names, not whatever the sender actually used.
+Attach a certificate naming the phantom while encrypting under a different identity key, and the
+recipient looks up a session keyed to a different ratchet chain entirely; decryption fails outright, it
+doesn't just misattribute. Device linking (D14) sidesteps this correctly — a linked device genuinely
+receives the phantom's real identity key during linking — but leaks a persistent per-member `device_id`
+tag (`docs/FINDINGS.md`'s D14/D15 history, both reverted in this session before this entry).
+
+**The unblocking insight (credit: external/professor review, not found independently at first).** The
+identity keypair backing an account's Double Ratchet sessions is not fixed to "whatever was randomly
+generated at registration" — it is just a Curve25519 keypair, freely choosable, and nothing requires it
+to be unique per account. So: give every member their own, completely independent real Signal account
+(own phone number, uuid, device id, prekeys, sessions) — except register with the **same** ACI identity
+keypair instead of a random one. Signal's server, seeing an ordinary registration, legitimately signs
+that account's own `SenderCertificate` — which now embeds the same public identity key as every other
+member's. Nothing about certificate issuance or session establishment changes; `Manager::send_message`
+and every existing `PresageTransport` code path are untouched.
+
+**Why this doesn't collide.** X3DH still mixes in each member's own distinct signed-prekey and
+one-time-prekey (fetched from *that account's own* published bundle) even though the identity-key input
+is shared, so two members' sessions with a given recipient stay entirely independent ratchet chains —
+unlike sharing a sender-key chain (A1's own accepted limitation) or sharing a device id (D14's rotation
+attempt), which collide because they share *mutable, sequentially-advanced* state. A shared identity key
+is static input to independent handshakes, not shared mutable state.
+
+**What's built.**
+
+- `crates/personas-group-crypto/src/group.rs`: `DistributedSecret::derive_phantom_identity_seed` — HKDF
+  over `(seed, epoch)`, domain-separated (`personas/phantom-identity-seed/v1`) from the epoch-key and
+  message-key derivations so the three can never be confused. Returns raw bytes — the crate stays
+  libsignal-free by design (its own module doc). Epoch-scoped like the rest of the secret: a re-key
+  produces a *different* phantom identity, which is semantically right (a banned member shouldn't stay
+  bound to the shared identity any more than they stay able to decrypt) but costly — an identity-key
+  change means re-registration, not just installing a new `KeyManager`. Three new unit tests: determinism
+  across members, difference across epochs/secrets, domain-separation from the epoch key.
+- `third_party/presage` (**newly vendored** — mirrors the existing `libsignal-service-rs` vendoring
+  pattern: cloned at the same pinned rev already used elsewhere in this workspace,
+  `63482efd0cbdc0780baf0650517c7d55f1cac05d`, root workspace Cargo.toml stripped so it doesn't create a
+  nested-workspace conflict, patched in via `[patch."https://github.com/whisperfish/presage"]`). The
+  actual fork, in `presage/src/manager/confirmation.rs`: `Manager::confirm_verification_code` always
+  called `IdentityKeyPair::generate(&mut rng)` inline with no seam to override it. Refactored into a
+  private `confirm_verification_code_impl(self, code, aci_identity_key_pair: Option<IdentityKeyPair>)`,
+  with the original public method delegating with `None` (unchanged behavior for every existing caller)
+  and a new `confirm_verification_code_with_identity` delegating with `Some(...)`. PNI identity is
+  unaffected — still always random — since PNI is unrelated to what this scheme shares.
+- `third_party/libsignal-service-rs`'s `cipher.rs`/`content.rs`: `Metadata` gains
+  `sender_identity_key: Option<PublicKey>`, populated only on sealed-sender deliveries. The private
+  `sealed_sender_decrypt` helper already had the validated `UnidentifiedSenderMessageContent` (and thus
+  `usmc.sender()?.key()?`, the certificate's embedded key) in scope and was simply discarding it after
+  building `SealedSenderDecryptionResult` — changed its return type to also hand back the key, no new
+  decrypt call needed. Every other `Metadata` construction/destructuring site in both vendored trees
+  (9 total across `libsignal-service-rs` and `presage`/`presage-store-sqlite`) updated to set/ignore the
+  new field — the SQLite persistence layer doesn't have a column for it yet, so a message reloaded from
+  disk reports `None` regardless of how it originally arrived; a real limitation, not silently patched
+  over.
+- `transport-presage/src/lib.rs`: `PresageTransport::register_as_phantom` (derive the seed, build the
+  `IdentityKeyPair` via `PrivateKey::deserialize` + `.public_key()`, call the forked confirmation method)
+  and the receive loop now reports `content.metadata.sender_identity_key` (base64, `phantom:` prefix)
+  in place of the uuid whenever it's present, falling back to the real uuid otherwise — sealed sender
+  itself is conditional here (`Manager::send_message` only attempts it once the sender's store already
+  holds the recipient's profile key, which presage learns automatically from one prior identified
+  message in each direction), so the fallback is a real, not theoretical, path.
+
+**What's still open.** Making sealed-sender delivery *reliably* engaged — today it depends on an earlier
+identified round trip having happened in each direction; nothing forces that ahead of time. The e2d
+re-key triggers, and what rotating the phantom identity on re-key would actually require operationally
+(re-registration is not something that can happen silently). Interop with real, unmodified Signal clients
+is untested and unspecified given the shared-identity-key deviation from Signal's normal one-key-per-
+account trust model — flagged as a new §10 sign-off item, not something this document can resolve alone.
+
+**Proof structure.** `transport-presage/examples/b2_shared_identity.rs`: two members register
+independently via `register_as_phantom` with the same group secret; an independent observer registers
+normally; a bootstrap round (each member → observer, observer → each member) lets profile keys exchange
+so the real test sends go out sealed-sender; each member then sends the observer one more message. Passes
+only if the observer sees two *different* `sender` uuids (not device linking) and two *identical*
+`sender_identity_key` values (the actual property this scheme needs).
+
+**Build/test status.** Written and reasoned against `signalapp/libsignal` v0.94.4 and the exact pinned
+`presage`/`libsignal-service-rs` revisions already used elsewhere in this workspace, checked directly
+against source (not guessed) for every claim above about how `sealed_sender_decrypt`, `IdentityKeyPair`,
+`PrivateKey::deserialize`, and `confirm_verification_code` actually work. Not yet independently run
+against the staging server — same caution as any unverified entry here applies until it is.

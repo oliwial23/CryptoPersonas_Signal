@@ -1,7 +1,7 @@
 //! e2c smoke test — real pairwise distribution of the K2 group secret over Signal's
 //! own 1:1 sessions (`PresageTransport::distribute_group_secret` /
 //! `receive_group_secret`), replacing the in-process hand-off every earlier example
-//! (`a1_smoke`, `b2_phantom_link`, the `personas-messenger` e2e test) uses via
+//! (`a1_smoke`, the `personas-messenger` e2e test) uses via
 //! `create_group_secret`'s bytes.
 //!
 //! What it proves, in order:

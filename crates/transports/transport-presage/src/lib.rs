@@ -32,8 +32,8 @@
 //! - **Send** ([`send`](Transport::send)): [`PprfContentCipher::encrypt`] (derive a
 //!   fresh single-use `mk` from a random nonce, puncture it, AEAD-seal, prepend the
 //!   `MessageTag`) → base64 inside a Signal `DataMessage` body → **fan out** to each
-//!   other member as a 1:1 message (B1 bring-up delivery; the GroupV2/multi-recipient
-//!   and D1 phantom-cert paths are B2/e2c).
+//!   other member as a 1:1 message (B1 bring-up delivery; GroupV2/multi-recipient
+//!   delivery remains open).
 //! - **Receive** ([`subscribe`](Transport::subscribe)): the Signal receive websocket
 //!   → [`PprfContentCipher::decrypt`] (re-derive `mk` from the wire `MessageTag`,
 //!   puncture, AEAD-open) → body bytes → [`Incoming::Message`]. The messenger then
@@ -47,12 +47,26 @@
 //!   exactly as design doc §5 calls for. [`create_group_secret`](PresageTransport::create_group_secret)
 //!   still exists for tests/bring-up that want the bytes directly without a network
 //!   round trip.
+//! - **Shared phantom identity** ([`register_as_phantom`](PresageTransport::register_as_phantom),
+//!   **B2/D1**): every member registers their own real Signal account — own phone
+//!   number, uuid, device id, prekeys, all independent — but with the *same* ACI
+//!   identity keypair, deterministically derived from the group secret
+//!   ([`DistributedSecret::derive_phantom_identity_seed`](personas_group_crypto::DistributedSecret::derive_phantom_identity_seed)).
+//!   Each member's own, genuinely server-issued `SenderCertificate` then embeds
+//!   that same public key. The receive loop reports it (base64, `phantom:` prefix)
+//!   in place of the per-account uuid whenever a message arrives sealed-sender —
+//!   see the fork in `third_party/presage` and `third_party/libsignal-service-rs`,
+//!   and design doc §6 for why this, and not certificate substitution or device
+//!   linking, is the realization that's actually cryptographically sound.
 //! - **Still open** (not this module): the re-key *triggers* — ban/leave/epoch-
-//!   boundary events calling [`PprfContentCipher::rekey`] (e2d). The **B2** shared
-//!   phantom sealed-sender certificate is a separate, delivery-layer change this
-//!   module does not touch (its own provisioning-URL handoff is still in-process —
-//!   see [`link_as_phantom_device`](PresageTransport::link_as_phantom_device)'s docs
-//!   for why it can reuse this same pairwise channel next).
+//!   boundary events calling [`PprfContentCipher::rekey`] (e2d) — which, per
+//!   [`DistributedSecret::derive_phantom_identity_seed`](personas_group_crypto::DistributedSecret::derive_phantom_identity_seed)'s
+//!   own docs, would also rotate the phantom identity and require every member to
+//!   re-register; and making sealed-sender delivery reliably engaged (today it only
+//!   activates once a recipient's profile key is already known to the sender's
+//!   store — presage picks this up automatically after one prior identified
+//!   exchange in each direction, which is what every example already does, but
+//!   nothing forces it before that point).
 //!
 //! # Why an actor thread
 //!
@@ -172,203 +186,76 @@ impl PresageTransport {
         ))
     }
 
-    /// Link a new device to the group's shared **phantom** Signal account — the
-    /// delivery-layer realization of design doc §6 (D1, the shared phantom
-    /// sealed-sender identity), built on Signal's stock multi-device linking
-    /// instead of a custom `SenderCertificate`.
+    /// e2c/D1 — register a fresh Signal account exactly like [`register`](Self::register),
+    /// except its **ACI identity keypair** is derived from `group_secret` instead of
+    /// randomly generated, via the forked
+    /// `Manager::confirm_verification_code_with_identity`
+    /// (`third_party/presage/presage/src/manager/confirmation.rs`).
     ///
-    /// # Why linking, not certificate substitution
+    /// # The shared-phantom-identity scheme
     ///
-    /// The original §6 design called for fetching the phantom's own certificate and
-    /// having every member sealed-send under it directly. That turns out not to be
-    /// reachable through presage's public `Manager` API at all — it exposes no way
-    /// to fetch a `SenderCertificate` and no way to pass one into `send_message`
-    /// (confirmed against the published method list for `Manager<S, Registered>`;
-    /// reaching it would mean either forking presage or hand-rolling delivery
-    /// directly against the vendored `libsignal-service-rs`, bypassing `Manager`
-    /// entirely). Device linking sidesteps the problem structurally: every member
-    /// becomes their own genuine, independent **device** of the one shared phantom
-    /// account, with their own real (device-specific) identity key and certificate,
-    /// unmodified. `send_message`/[`PresageTransport::start`] do not change at all —
-    /// the certificate a linked device's presage instance fetches for itself simply
-    /// *names the phantom's ACI*, because that is genuinely which account it now is.
-    /// Recipients see "phantom," and this transport never touches a certificate.
+    /// Every member who calls this with the same `group_secret` derives, entirely
+    /// locally (no extra network round trip beyond distributing the secret itself —
+    /// already e2c's job), the identical [`IdentityKeyPair`]
+    /// ([`DistributedSecret::derive_phantom_identity_seed`] → clamp as a Curve25519
+    /// scalar → derive the matching public key). Each member still registers their
+    /// own real phone number, uuid, and device id completely normally — nothing
+    /// shared there, no device linking, no cross-member session/ratchet collision
+    /// risk. What's shared is only the identity key *material* backing each
+    /// member's own independent account. Signal's server, seeing nothing unusual,
+    /// legitimately signs each member's own [`SenderCertificate`] — which now just
+    /// happens to embed the same public identity key for everyone.
     ///
-    /// # What this call does
+    /// This is *not* "swap the certificate": each member's `SenderCertificate` still
+    /// names their own real uuid/device id, and the encryption still rides their own
+    /// entirely normal per-account Double Ratchet sessions (no shared session state,
+    /// no chain-iteration collision hazard the way sharing an actual sender-key
+    /// chain would reintroduce — see `docs/FINDINGS.md`). The only place the shared
+    /// identity becomes visible as "one phantom sender" is the *receive* side, which
+    /// has to stop reporting the per-account uuid and instead report the
+    /// certificate's embedded identity public key — see `Incoming::Message`'s
+    /// `sender` field and the receive loop this module's actor thread runs.
     ///
-    /// `phantom_store_url` is the already-registered phantom account (create it once
-    /// with [`register`](Self::register), the same way any account is registered —
-    /// nothing phantom-specific about that step). `new_device_store_url` is a fresh
-    /// store for the member being linked. This drives presage's own
-    /// `Manager::link_secondary_device` (the new device's half — generates a
-    /// provisioning request and yields its URL) concurrently with
-    /// `Manager::link_secondary` on the already-loaded phantom Manager (the primary's
-    /// half — approves it), both in-process, and returns the linked device's
-    /// `Manager` once presage completes the handshake.
-    ///
-    /// # What is still a bring-up stand-in (matches [`create_group_secret`]'s status)
-    ///
-    /// This hands the provisioning URL from the new device's half to the primary's
-    /// half **directly, in-process** — it does not relay it over an encrypted
-    /// pairwise channel. Per the design agreed with the user: once e2c (real
-    /// pairwise Double Ratchet distribution) exists, the provisioning URL should
-    /// travel over the *same* pairwise session already carrying the K2/PPRF group
-    /// secret to each member — so only someone who already legitimately holds the
-    /// group secret can ever get a device linked as the phantom. Until e2c lands,
-    /// the caller plays that role directly, which is the same trust boundary
-    /// [`create_group_secret`]'s bring-up handoff already relies on.
-    ///
-    /// [`create_group_secret`]: Self::create_group_secret
-    pub async fn link_as_phantom_device(
-        phantom_store_url: &str,
-        new_device_store_url: &str,
-        device_name: impl Into<String>,
+    /// [`SenderCertificate`]: presage::libsignal_service::protocol::SenderCertificate
+    pub async fn register_as_phantom(
+        store_url: &str,
+        number: &str,
+        group_secret: &DistributedSecret,
     ) -> anyhow::Result<ServiceId> {
         use presage::libsignal_service::configuration::SignalServers;
+        use presage::libsignal_service::prelude::phonenumber;
+        use presage::libsignal_service::protocol::{IdentityKey, IdentityKeyPair, PrivateKey};
+        use presage::manager::RegistrationOptions;
         use presage::model::identity::OnNewIdentity;
 
-        let phantom_store =
-            SqliteStore::open(phantom_store_url, OnNewIdentity::Trust).await?;
-        let mut phantom = Manager::load_registered(phantom_store)
-            .await
-            .map_err(|e| anyhow::anyhow!("loading the phantom account: {e}"))?;
-
-        let new_store =
-            SqliteStore::open(new_device_store_url, OnNewIdentity::Trust).await?;
-        let (url_tx, url_rx) = futures_channel::oneshot::channel();
-        let device_name = device_name.into();
-
-        // The new device's half (generates the request, yields its URL over url_tx)
-        // and the primary's half (approves whatever URL it's handed) run
-        // concurrently — presage's own linking example does the same, except there
-        // a human relays the URL by scanning it; here the second future does that
-        // relay itself, in-process (see the stand-in note above).
-        let (link_result, approve_result) = futures_util::join!(
-            Manager::link_secondary_device(
-                new_store,
-                SignalServers::Staging,
-                device_name,
-                url_tx,
-            ),
-            async {
-                let url = url_rx.await.map_err(|_| {
-                    anyhow::anyhow!(
-                        "the new device dropped its provisioning channel before sending a URL"
-                    )
-                })?;
-                phantom
-                    .link_secondary(url)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("phantom.link_secondary: {e}"))
+        let store = SqliteStore::open(store_url, OnNewIdentity::Trust).await?;
+        let phone_number = phonenumber::parse(None, number)?;
+        let confirm = Manager::register(
+            store,
+            RegistrationOptions {
+                signal_servers: SignalServers::Staging,
+                phone_number,
+                use_voice_call: false,
+                captcha: Some("noop.noop.registration.noop"),
+                force: true,
             },
-        );
-        approve_result?;
-        let linked =
-            link_result.map_err(|e| anyhow::anyhow!("link_secondary_device: {e}"))?;
+        )
+        .await?;
 
+        let seed = group_secret.derive_phantom_identity_seed();
+        let private_key = PrivateKey::deserialize(seed.as_slice())
+            .map_err(|e| anyhow::anyhow!("deriving the phantom identity private key: {e}"))?;
+        let public_key = private_key
+            .public_key()
+            .map_err(|e| anyhow::anyhow!("deriving the phantom identity public key: {e}"))?;
+        let identity_key_pair = IdentityKeyPair::new(IdentityKey::new(public_key), private_key);
+
+        let registered = confirm
+            .confirm_verification_code_with_identity("999999", identity_key_pair)
+            .await?;
         Ok(ServiceId::Aci(
-            linked.registration_data().service_ids.aci.into(),
+            registered.registration_data().service_ids.aci.into(),
         ))
-    }
-
-    /// Send one message as the phantom account using a **fresh, single-use linked
-    /// device that exists only for this one send**, then unlink it immediately.
-    ///
-    /// # Why this exists
-    ///
-    /// [`link_as_phantom_device`](Self::link_as_phantom_device) gives a member a
-    /// *persistent* device of the phantom account, kept for as long as the member
-    /// stays linked. That has a leak `docs/B2_DEVICE_ID_LINKABILITY_ISSUE.md`
-    /// documents: the recipient sees that device's `device_id` on every message
-    /// (`content.metadata.sender_device`), which is a stable per-member tag —
-    /// letting a recipient link every message from the same member together even
-    /// though they all show the shared phantom's account id. This function is the
-    /// per-message-rotation fix that document proposes: link, send, unlink, so the
-    /// *device* id — not just the account id — is single-use, exactly the way
-    /// `PprfContentCipher`'s `mk` is single-use at the content layer (§5). Two
-    /// messages sent through this function should show two different
-    /// `sender_device` values to any recipient, with nothing connecting them.
-    ///
-    /// # Cost
-    ///
-    /// Every call is **three** network round trips to the Signal server instead of
-    /// one — link (itself two round trips, one per side of the handshake) plus the
-    /// send, plus unlink. [`link_as_phantom_device`] pays that cost once per member
-    /// for the whole session; this pays it on every single message. Use this where
-    /// per-message unlinkability actually matters and per-epoch rotation (re-linking
-    /// only on the content layer's existing re-key cadence) isn't enough; use
-    /// [`link_as_phantom_device`] otherwise.
-    ///
-    /// # Unlink is unconditional
-    ///
-    /// The single-use device is unlinked whether the send succeeded or failed — a
-    /// failed send must not leave a linked device behind any more than a successful
-    /// one should. If the unlink call itself fails, that's logged as a warning
-    /// rather than surfaced as this function's error (the send's own result is what
-    /// the caller asked about), but it means a device may be left linked and
-    /// reusable until removed by some other means — worth monitoring for in
-    /// production, not just a theoretical edge case.
-    ///
-    /// [`link_as_phantom_device`]: Self::link_as_phantom_device
-    pub async fn send_as_rotating_phantom_device(
-        phantom_store_url: &str,
-        device_name: impl Into<String>,
-        recipient: ServiceId,
-        body: ContentBody,
-        timestamp: u64,
-    ) -> anyhow::Result<()> {
-        use presage::libsignal_service::configuration::SignalServers;
-        use presage::model::identity::OnNewIdentity;
-
-        let phantom_store =
-            SqliteStore::open(phantom_store_url, OnNewIdentity::Trust).await?;
-        let mut phantom = Manager::load_registered(phantom_store)
-            .await
-            .map_err(|e| anyhow::anyhow!("loading the phantom account: {e}"))?;
-
-        // In-memory and never reused past this call — the whole point is that this
-        // device exists for exactly one send.
-        let ephemeral_store = SqliteStore::open(":memory:", OnNewIdentity::Trust).await?;
-        let (url_tx, url_rx) = futures_channel::oneshot::channel();
-        let device_name = device_name.into();
-
-        let (link_result, approve_result) = futures_util::join!(
-            Manager::link_secondary_device(
-                ephemeral_store,
-                SignalServers::Staging,
-                device_name,
-                url_tx,
-            ),
-            async {
-                let url = url_rx.await.map_err(|_| {
-                    anyhow::anyhow!(
-                        "the single-use device dropped its provisioning channel before sending a URL"
-                    )
-                })?;
-                phantom
-                    .link_secondary(url)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("phantom.link_secondary: {e}"))
-            },
-        );
-        approve_result?;
-        let mut ephemeral =
-            link_result.map_err(|e| anyhow::anyhow!("link_secondary_device: {e}"))?;
-        let device_id = ephemeral.device_id();
-
-        let send_result = ephemeral.send_message(recipient, body, timestamp).await;
-
-        // Unconditional: run regardless of whether the send above succeeded.
-        if let Err(e) = phantom.unlink_secondary(device_id).await {
-            tracing::warn!(
-                error = %e,
-                ?device_id,
-                "failed to unlink the single-use phantom device — it is still linked \
-                 and reusable until removed some other way"
-            );
-        }
-
-        send_result.map_err(|e| anyhow::anyhow!("send_message: {e}"))
     }
 
     /// Create the group's first group secret (epoch 0). Returns the
@@ -683,10 +570,26 @@ async fn actor_main(
                 debug!("decrypted payload was not UTF-8 — dropping");
                 continue;
             };
+            // Shared-phantom-identity scheme (design doc §6): when this arrived
+            // sealed-sender (requires the recipient already holding this sender's
+            // profile key — see `register_as_phantom`'s docs), the certificate's
+            // embedded identity public key is available and, if every member of
+            // this group registered via `register_as_phantom` with the same group
+            // secret, identical across every member — report *that* instead of the
+            // per-account uuid, which stays genuinely distinct per member and is
+            // not what this scheme hides. Falls back to the real uuid when the
+            // identity key isn't available yet (identified bring-up delivery, or a
+            // group not using this scheme at all) — never silently misreports.
+            let sender = match &content.metadata.sender_identity_key {
+                Some(identity_key) => {
+                    format!("phantom:{}", BASE64.encode(identity_key.public_key_bytes()))
+                }
+                None => content.metadata.sender.raw_uuid().to_string(),
+            };
             let incoming = Incoming::Message {
                 id: MessageId::from(content.metadata.timestamp.timestamp_millis().max(0) as u64),
                 conversation: recv_conv.clone(),
-                sender: content.metadata.sender.raw_uuid().to_string(),
+                sender,
                 body,
                 reply_to: None,
                 attachments: Vec::new(),

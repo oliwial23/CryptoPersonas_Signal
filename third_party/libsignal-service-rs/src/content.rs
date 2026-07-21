@@ -1,6 +1,6 @@
 use chrono::Utc;
 use libsignal_core::DeviceId;
-use libsignal_protocol::{ProtocolAddress, ServiceId};
+use libsignal_protocol::{ProtocolAddress, PublicKey, ServiceId};
 use prost::Message;
 use std::fmt;
 use uuid::Uuid;
@@ -31,6 +31,17 @@ pub struct Metadata {
     pub needs_receipt: bool,
     pub unidentified_sender: bool,
     pub was_plaintext: bool,
+
+    /// The sealed-sender certificate's embedded identity public key — `Some` only
+    /// when `unidentified_sender` is true (identified deliveries carry no
+    /// certificate at all). Personas fork addition
+    /// (`docs/SERVERLESS_SIGNAL_DESIGN.md` §6): the shared-phantom-identity scheme
+    /// has every member of a group register with the *same* ACI identity keypair
+    /// (`transport-presage`'s `register_as_phantom`), so this key is identical
+    /// across every member's messages — it is the "who is this, really" signal a
+    /// recipient using that scheme should read instead of `sender`'s per-account
+    /// uuid, which stays genuinely per-member and is not hidden by this scheme.
+    pub sender_identity_key: Option<PublicKey>,
 
     /// A unique UUID for this specific message, produced by the Signal servers.
     ///
