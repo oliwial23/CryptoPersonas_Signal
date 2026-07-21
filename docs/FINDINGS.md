@@ -323,7 +323,145 @@ message sender in the actor), or classify "PUT succeeded, bookkeeping raced" as 
 rework of the send path (personas AEAD under `mk`, §5 of the design doc) is the natural place to
 make send delivery-truthful rather than tied to presage's post-send housekeeping.
 
-## D — Decisions that want a second opinion
+---
+
+### O13. Every `receive_messages()` call races a doomed prekey refresh against process lifetime; `b2_shared_identity` is just the example that loses
+
+**Status: fixed** (`deploy/signal-test-server/minio.sh` + patches `0003-paged-kem-prekey-store-local-s3.patch`).
+The refresh itself no longer fails — verified below. Left under `O` rather than moved to the `F`
+section because fixing it did not make `b2_shared_identity` pass; it uncovered a second, previously
+masked bug. See **O14**.
+
+**What.** Running `cargo run -p transport-presage --example b2_shared_identity` against the local
+test-server (`docs/RUNNING_E2_LOCALLY.md` Track 2) fails at step 4 (the bootstrap round) with
+`Error: observer receiving B's bootstrap — timed out waiting to receive`, on every run (5/5
+observed, not intermittent). `a1_smoke` and `e2c_key_distribution` never show the failure (6/6 clean
+runs combined) — but, importantly, **not because they avoid the underlying bug**. See below.
+
+**Root cause, corrected twice — read this before trusting an earlier theory in this entry's git
+history.** `third_party/presage`'s `Manager::receive_messages()`
+(`presage/src/manager/registered.rs:~616`) unconditionally spawns a background task on *every* call,
+for *every* account, that re-sets account attributes and then calls `register_pre_keys` →
+`update_pre_key_bundle` → `PUT /v2/keys`. This is not conditional on prekey count, not triggered by a
+reconnect, and not specific to any one account in the example — it is fire-and-forget, started fresh
+every time `receive_messages()` is invoked.
+
+For the PQ (Kyber) keys, that upload routes through `KeysManager::storeKemOneTimePreKeys` →
+`PagedSingleUseKEMPreKeyStore`
+(`~/Repos/Signal-Server/service/src/main/java/.../storage/PagedSingleUseKEMPreKeyStore.java`).
+Unlike every other datastore in the test harness (DynamoDB/FoundationDB, both real Testcontainers),
+this one is backed by a real `S3AsyncClient` — Kyber public keys are large enough that Signal-Server
+pages them into S3 objects rather than DynamoDB rows. `test.yml`'s `pagedSingleUseKEMPreKeyStore`
+block (`bucket: preKeyBucket`, `region: us-west-2`) sets no `endpointOverride`, so this client always
+targets real AWS with placeholder credentials and always gets back a 403
+(`The AWS Access Key Id you provided does not exist in our records`), which `KeysController.setKeys`
+surfaces as an HTTP 500. Confirmed by reading `KeysController.setKeys`/`KeysManager` source directly:
+this part is a synchronous, deterministic dependency of the request path, not a race.
+
+**But whether the *background task* gets far enough to hit it is a race against the process exiting**
+— and that part *is* about timing, just not the timing anyone would guess. `a1_smoke`/
+`e2c_key_distribution` each decrypt one message and return almost immediately; the background refresh
+(two sequential requests, ~400ms in the logs) usually hasn't reached the S3 call before `main()`
+returns and the whole tokio runtime — background task included — is dropped. `b2_shared_identity`'s
+**observer** account has to stay connected through four sequential exchanges (two bootstrap + two
+real sends), which is enough wall-clock time for its copy of that same background task to run to
+completion and fail. It is the observer, not member B — traced by `local_address` in the decrypt
+spans, corrected after an earlier pass misattributed it. The observer registers via plain
+`PresageTransport::register`, not `register_as_phantom` — **it isn't one of the phantom-identity
+accounts at all**, which is itself evidence this has nothing to do with the shared-identity scheme.
+
+Two wrong theories preceded this one, in order: (1) a race with `asnTable`'s S3 poller (patches
+`README.md` 0002) — disproved by widening `asnTable`'s refresh interval and rebuilding; the failure
+still reproduced 4/4. (2) member B's websocket dropping and reconnecting — disproved by re-tracing a
+fresh run's `local_address` fields end to end instead of eyeballing nearby log lines.
+
+**Blast radius — wider than it looks.** This is not confined to `b2_shared_identity` or to anything
+resembling a reconnect. It is latent in *every* example and in the real `PresageTransport` actor:
+any account whose `receive_messages()` stream stays alive for a few hundred milliseconds will trigger
+the same background refresh and lose the same race. `a1_smoke`/`e2c_key_distribution` are not immune,
+they are just fast enough to usually win it (verified: grepped three-then-six fresh runs of each for
+`Uploading pre-keys`/`PUT /v2/keys` — zero hits so far, but "usually wins a race" is not "structurally
+can't lose it"; a slower machine, a busier bootstrap, or a longer-lived manager would flip this).
+Registration's own account-creation call does not go through this path (accounts register cleanly
+every time). Not a production concern — real Signal infrastructure has a real S3 bucket configured;
+this is a gap specific to Signal-Server's own `test-server` Maven profile, which upstream already
+documents as partial ("many features are non-functional, especially those that depend on external
+services").
+
+Unrelated to the shared-phantom-identity mechanism `b2_shared_identity` actually tests (D15) — doubly
+so, now that the failing account is confirmed to be the non-phantom observer.
+`GET /v1/certificate/delivery` (sealed-sender certificate issuance) succeeds in every run, including
+the failing ones. Steps 1–3 (independent registration under the shared ACI keypair, distinct uuids,
+certificate issuance) pass every time; only the later real-send comparison is blocked. That leaves
+D15's core claim — two independently-registered phantom accounts produce identical
+certificate-embedded identity keys on real sealed-sender sends — without a locally-automated,
+end-to-end green run (still true after the fix below — see O14).
+
+**Fix, verified.** `deploy/signal-test-server/minio.sh` runs a local MinIO container on
+`127.0.0.1:9100`, credentialed with the exact static `accessKey`/`secretAccess` pair
+`test-secrets-bundle.yml` already supplies everywhere (no credential plumbing to change). Patch
+`0003-paged-kem-prekey-store-local-s3.patch` does three things: points
+`pagedSingleUseKEMPreKeyStore.endpointOverride` at it, enables path-style S3 addressing on that
+store's `S3AsyncClient` (`WhisperServerService.java` — a plain localhost endpoint doesn't resolve
+under virtual-hosted-style addressing, which is what the client defaults to), and lowercases the
+bucket name from `preKeyBucket` to `prekey-bucket` (the original name is invalid under S3's
+bucket-naming rules — real AWS would have rejected it too with `InvalidBucketName`; test-server's
+placeholder credentials just always failed auth first, so upstream never noticed). Confirmed against
+4 fresh `b2_shared_identity` runs post-fix: `Uploading pre-keys` for both ACI and PNI now completes
+with no error every time (previously: `failed to register pre-keys, this is problematic and should
+never happen!` / HTTP 500, every time). `a1_smoke`/`e2c_key_distribution` still pass cleanly
+afterward — no regression.
+
+---
+
+### O14. A pre-existing websocket-teardown race — same family as O12, different request — was always there; O13 just always killed the run first
+
+**What.** Fixing O13 did not make `b2_shared_identity` pass. It still fails identically —
+`Error: observer receiving B's bootstrap — timed out waiting to receive` — on 4/4 post-fix runs.
+What changed is *why*: the prekey refresh that used to 500 now succeeds cleanly every time, which
+means this failure was always here, one layer down, masked because O13 reliably ended the run at
+almost the same point before this could matter.
+
+**What actually happens now (traced from a clean post-fix run).** The observer's
+`receive_messages()` decrypts member A's first message fine. Immediately after, its own automatic
+prekey-count-check response (`Ok(WebSocketResponseMessage { status: 200/204, body:
+{"count":0,"pqCount":0}, .. })` or similar) arrives too late — `Could not deliver response for id
+...` — and `SignalWebSocket: Websocket closing: request handler failed` tears the connection down.
+Presage logs `failed to upsert newly seen contact!` and (now successfully) starts the prekey
+refresh. But whatever reads B's subsequent message never sees it: the run sits idle until the
+45-second `receive_one` timeout, with nothing in between but two `could not generate response to a
+Signal request; responder was canceled` lines around the 45s mark.
+
+This is architecturally the same shape of bug as O12 — a response to a request riding the
+identified websocket arrives after the channel that was waiting for it has already been torn
+down/replaced — just on a different request (an automatic count-check inside `receive_messages()`'s
+background task, not `send_message`'s post-send bookkeeping) and with a worse outcome: O12's send
+path is proven non-fatal (the receiver's own decrypt is the source of truth, and delivery is
+confirmed independently). Here, nothing re-establishes the observer's ability to receive after the
+teardown within the test's window — whether that's because `b2_shared_identity`'s `receive_one`
+helper opens a **fresh** `receive_messages()` call per message (plausible: it calls
+`receiver.receive_messages().await` fresh on every invocation, so an in-flight message could be
+delivered to a stream a *previous* `receive_one` call already returned from and dropped) or because
+presage's own reconnect doesn't resume the message stream, is not yet determined — this needs the
+same level of source-verification O13 got before committing to an explanation, not another
+timing-correlation guess.
+
+**Not yet diagnosed to the same confidence as O13.** Flagging the open question rather than a
+theory: is this a bug in the test harness's example code (`receive_one`'s re-call pattern), in
+`third_party/presage`'s reconnect handling, or in the test-server's response-delivery timing under
+load? The real `PresageTransport` actor (`transport-presage/src/lib.rs`) calls `receive_messages()`
+exactly once per actor lifetime, not per-message, and has no reconnect logic if that single stream
+ends — so this specific manifestation may be test-harness-specific, but the underlying "response
+arrives after the waiting channel is gone" race is not.
+
+**To fix.** `PagedSingleUseKEMPreKeyStoreConfiguration` already supports an `endpointOverride`
+(nullable `URI`, unset here). Standing up a local S3-compatible mock (e.g. MinIO, alongside the
+existing TLS-proxy container in `deploy/signal-test-server`) and pointing `endpointOverride` at it
+via a new patch would close this — except the `S3AsyncClient.builder()` call for this store
+(`WhisperServerService.java`, `asyncKeysS3Client`) doesn't enable path-style addressing the way
+`asnTable`'s alternate constructor does, so redirecting it needs a small source patch
+(`S3Configuration.builder().pathStyleAccessEnabled(true)`) in addition to the config change and the
+new container. Not yet implemented — a real (if bounded) scope decision, not a quick fix.
 
 ### D1. Polls carry no buttons, because a button press deanonymizes the voter
 

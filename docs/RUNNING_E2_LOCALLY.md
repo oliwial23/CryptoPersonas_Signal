@@ -172,6 +172,22 @@ the client already trusts).
 You can check its status later with `./tls-proxy.sh status`, and stop it with
 `./tls-proxy.sh down` when you're done for the day.
 
+**Also in Terminal 2 (or any terminal, once): start the local S3 stand-in.** The test-server's
+`pagedSingleUseKEMPreKeyStore` (PQ one-time-prekey storage) needs a working S3-compatible
+endpoint, which upstream's `test-server` profile doesn't provide (see
+[`FINDINGS.md`](FINDINGS.md), entry O13). Without this, any flow that keeps a connection open
+past a few hundred milliseconds — which is any real usage — hits a `PUT /v2/keys` 500 in the
+background.
+
+```sh
+cd deploy/signal-test-server
+./minio.sh up
+```
+
+One-shot (the command returns; nothing to leave running interactively, though the container
+stays up in the background same as the TLS proxy). Check with `./minio.sh status`, stop with
+`./minio.sh down`.
+
 **Terminal 3 — run something**, from the repo root (`personas-main`, not the
 `deploy/signal-test-server` subfolder):
 
@@ -217,6 +233,15 @@ already does.
   arriving** — a known, intermittent timing race in presage's post-send bookkeeping
   (documented in [`FINDINGS.md`](FINDINGS.md), entry O12). Just re-run the same
   command; it usually passes on retry.
+- **`b2_shared_identity` fails at step 4 with `observer receiving B's bootstrap` /
+  `timed out waiting to receive`, every time, not intermittently** — if you haven't run
+  `./minio.sh up` (above), do that first: this used to be caused by every
+  `receive_messages()` call's background prekey refresh hitting a broken S3 dependency
+  (documented in [`FINDINGS.md`](FINDINGS.md), entry O13), which is now fixed. If MinIO
+  is already up and this still happens, that's a second, different, still-open issue
+  (entry O14) — a websocket response arriving after the channel waiting for it has
+  already been torn down. Retrying will not help either way
+  (documented in [`FINDINGS.md`](FINDINGS.md), entry O13).
 - **Anything else** — re-run with verbose logging to see the real underlying error:
   ```sh
   RUST_LOG=presage=debug,libsignal_service=debug cargo run -p transport-presage --example a1_smoke

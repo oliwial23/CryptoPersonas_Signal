@@ -1,0 +1,13 @@
+diff --git a/service/src/test/resources/config/test.yml b/service/src/test/resources/config/test.yml
+index bc8fe7962..de2eeb9dd 100644
+--- a/service/src/test/resources/config/test.yml
++++ b/service/src/test/resources/config/test.yml
+@@ -534,7 +534,7 @@ asnTable:
+   s3Bucket: a-bucket
+   objectKey: asn.tsv
+   maxSize: 100000
+-  refreshInterval: PT10S
++  refreshInterval: PT24H
+
+ callQualitySurvey:
+   pubSubPublisher:
