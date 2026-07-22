@@ -229,19 +229,28 @@ already does.
 - **"Websocket error: reqwest error" during registration** — almost always means
   Terminal 2 (the TLS proxy) isn't actually up, or a certificate mismatch (see the
   `NOTE:` step above). Check `./tls-proxy.sh status`.
-- **`send_message returned ServiceError(WsClosing ...)` followed by the message not
+- **`send_message returned ServiceError(WsClosing ...)` followed by the message still
   arriving** — a known, intermittent timing race in presage's post-send bookkeeping
-  (documented in [`FINDINGS.md`](FINDINGS.md), entry O12). Just re-run the same
-  command; it usually passes on retry.
+  (documented in [`FINDINGS.md`](FINDINGS.md), entry O12). Harmless — the receiver's own
+  decrypt is the real check, and every example already treats this as non-fatal.
 - **`b2_shared_identity` fails at step 4 with `observer receiving B's bootstrap` /
-  `timed out waiting to receive`, every time, not intermittently** — if you haven't run
-  `./minio.sh up` (above), do that first: this used to be caused by every
-  `receive_messages()` call's background prekey refresh hitting a broken S3 dependency
-  (documented in [`FINDINGS.md`](FINDINGS.md), entry O13), which is now fixed. If MinIO
-  is already up and this still happens, that's a second, different, still-open issue
-  (entry O14) — a websocket response arriving after the channel waiting for it has
-  already been torn down. Retrying will not help either way
-  (documented in [`FINDINGS.md`](FINDINGS.md), entry O13).
+  `timed out waiting to receive`** — if you haven't run `./minio.sh up` (above), do that
+  first: this used to be caused by every `receive_messages()` call's background prekey
+  refresh hitting a broken S3 dependency (`FINDINGS.md` entry O13), which is fixed. A
+  second, deeper bug behind the same symptom (`FINDINGS.md` entry O14 — the example's
+  `receive_one` helper was reopening `receive_messages()`, and therefore the websocket,
+  once per message instead of once per receive burst) is also now fixed. If you still
+  see this failure on current code, it's a new regression, not O13/O14 — re-run with
+  verbose logging (below) and check `FINDINGS.md` for whether it matches either entry's
+  symptoms before assuming it's the same thing.
+- **`a1_smoke` fails on the first `cargo run` after the server boots, then passes on a
+  retry** — a distinct, not-yet-root-caused cold-connection race (`FINDINGS.md` entry
+  O15): the identified websocket can get a clean `code=1000` close from the remote while
+  `send_message` is still awaiting a response, and — unlike O12 — the message can
+  genuinely fail to arrive. `a1_smoke` now retries the send/receive round trip up to 3
+  times on its own, so a single `cargo run` should no longer need a manual re-run. If it
+  still fails after 3 attempts in a row, that's not this known flakiness — treat it as a
+  real error.
 - **Anything else** — re-run with verbose logging to see the real underlying error:
   ```sh
   RUST_LOG=presage=debug,libsignal_service=debug cargo run -p transport-presage --example a1_smoke

@@ -331,10 +331,23 @@ impl PresageTransport {
                 timestamp: Some(timestamp),
                 ..Default::default()
             });
-            manager
-                .send_message(*member, msg, timestamp)
-                .await
-                .map_err(|e| anyhow::anyhow!("distributing the group secret to {member:?}: {e}"))?;
+            // Same O12/O14 shape of race as the fresh-Manager receive helpers: the PUT
+            // to /v1/messages can already have succeeded server-side while presage's
+            // own post-send bookkeeping (self-sync, contact upsert) is still riding the
+            // websocket when it closes, surfacing as `WsClosing` here even though
+            // delivery went through. `receive_group_secret` on the other end is the
+            // actual source of truth (it decodes the real message and has its own
+            // timeout), so don't abort the whole distribution on this — warn and
+            // continue, exactly like `a1_smoke`'s and `b2_shared_identity`'s `send()`
+            // helpers already do for the identical error class.
+            if let Err(e) = manager.send_message(*member, msg, timestamp).await {
+                warn!(
+                    error = %e,
+                    ?member,
+                    "distribute_group_secret: send_message returned an error — continuing, \
+                     receive_group_secret's decode is the real check"
+                );
+            }
         }
 
         // `send_message`'s PUT already delivered the message; presage then does

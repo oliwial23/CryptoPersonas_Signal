@@ -329,8 +329,9 @@ make send delivery-truthful rather than tied to presage's post-send housekeeping
 
 **Status: fixed** (`deploy/signal-test-server/minio.sh` + patches `0003-paged-kem-prekey-store-local-s3.patch`).
 The refresh itself no longer fails — verified below. Left under `O` rather than moved to the `F`
-section because fixing it did not make `b2_shared_identity` pass; it uncovered a second, previously
-masked bug. See **O14**.
+section because fixing it did not make `b2_shared_identity` pass on its own; it uncovered a second,
+previously masked bug, **O14**, which is now also fixed — see that entry. `b2_shared_identity` runs
+green end to end as of both fixes.
 
 **What.** Running `cargo run -p transport-presage --example b2_shared_identity` against the local
 test-server (`docs/RUNNING_E2_LOCALLY.md` Track 2) fails at step 4 (the bootstrap round) with
@@ -416,20 +417,24 @@ afterward — no regression.
 
 ### O14. A pre-existing websocket-teardown race — same family as O12, different request — was always there; O13 just always killed the run first
 
+**Status: fixed** (`crates/transports/transport-presage/examples/b2_shared_identity.rs` —
+`receive_one` and its call sites in `main`). Verified across multiple consecutive post-fix runs,
+including runs that still show the underlying O12-style log noise (see "Fix, verified" below).
+
 **What.** Fixing O13 did not make `b2_shared_identity` pass. It still fails identically —
 `Error: observer receiving B's bootstrap — timed out waiting to receive` — on 4/4 post-fix runs.
 What changed is *why*: the prekey refresh that used to 500 now succeeds cleanly every time, which
 means this failure was always here, one layer down, masked because O13 reliably ended the run at
 almost the same point before this could matter.
 
-**What actually happens now (traced from a clean post-fix run).** The observer's
+**What actually happens (traced from a clean post-O13-fix run).** The observer's
 `receive_messages()` decrypts member A's first message fine. Immediately after, its own automatic
 prekey-count-check response (`Ok(WebSocketResponseMessage { status: 200/204, body:
 {"count":0,"pqCount":0}, .. })` or similar) arrives too late — `Could not deliver response for id
 ...` — and `SignalWebSocket: Websocket closing: request handler failed` tears the connection down.
 Presage logs `failed to upsert newly seen contact!` and (now successfully) starts the prekey
 refresh. But whatever reads B's subsequent message never sees it: the run sits idle until the
-45-second `receive_one` timeout, with nothing in between but two `could not generate response to a
+45-second `receive_one` timeout, with nothing in between but `could not generate response to a
 Signal request; responder was canceled` lines around the 45s mark.
 
 This is architecturally the same shape of bug as O12 — a response to a request riding the
@@ -437,31 +442,81 @@ identified websocket arrives after the channel that was waiting for it has alrea
 down/replaced — just on a different request (an automatic count-check inside `receive_messages()`'s
 background task, not `send_message`'s post-send bookkeeping) and with a worse outcome: O12's send
 path is proven non-fatal (the receiver's own decrypt is the source of truth, and delivery is
-confirmed independently). Here, nothing re-establishes the observer's ability to receive after the
-teardown within the test's window — whether that's because `b2_shared_identity`'s `receive_one`
-helper opens a **fresh** `receive_messages()` call per message (plausible: it calls
-`receiver.receive_messages().await` fresh on every invocation, so an in-flight message could be
-delivered to a stream a *previous* `receive_one` call already returned from and dropped) or because
-presage's own reconnect doesn't resume the message stream, is not yet determined — this needs the
-same level of source-verification O13 got before committing to an explanation, not another
-timing-correlation guess.
+confirmed independently). Here, nothing re-established the observer's ability to receive after the
+teardown within the test's window.
 
-**Not yet diagnosed to the same confidence as O13.** Flagging the open question rather than a
-theory: is this a bug in the test harness's example code (`receive_one`'s re-call pattern), in
-`third_party/presage`'s reconnect handling, or in the test-server's response-delivery timing under
-load? The real `PresageTransport` actor (`transport-presage/src/lib.rs`) calls `receive_messages()`
-exactly once per actor lifetime, not per-message, and has no reconnect logic if that single stream
-ends — so this specific manifestation may be test-harness-specific, but the underlying "response
-arrives after the waiting channel is gone" race is not.
+**Root cause, confirmed.** It's the test harness, not presage's reconnect or the test-server's
+timing. `b2_shared_identity.rs`'s `receive_one` helper called `receiver.receive_messages().await`
+**fresh on every invocation** — once per message it wanted, not once per `Manager`.
+`third_party/presage`'s own doc comment on `receive_messages()`
+(`presage/src/manager/registered.rs:~607`) says exactly what that costs: "we initialise a *fresh*
+Signal websocket, which means any other use of the previous one will go into nirvana." Every call
+after the first tore down the *previous* call's websocket — and, per the trace above, that previous
+call could still have same-socket background bookkeeping in flight on it when it did. Confirmed by
+reading `SignalWebSocketProcess::process_frame`/`::run()`
+(`third_party/libsignal-service-rs/src/websocket/mod.rs`): a *response* whose `oneshot` receiver has
+already been dropped just logs `Could not deliver response for id ...` and moves on harmlessly; but
+an incoming *request* frame whose `request_sink` receiver has been dropped — because the
+`MessagePipe`/stream reading from it was dropped when the previous `receive_one` call returned —
+fails `self.request_sink.send(...).await`, and the `?` on that call ends
+`SignalWebSocketProcess::run()` with `Err(WsClosing { reason: "request handler failed" })`: exactly
+the `SignalWebSocket: Websocket closing: request handler failed` seen in the logs. The real
+`PresageTransport` actor and `e2c_key_distribution`'s `subscribe()`-based receive loop were never
+exposed to this because both call `receive_messages()` exactly once per `Manager` lifetime and drain
+it continuously — `b2_shared_identity`'s `receive_one` was the only call site in the codebase
+re-opening it per message.
 
-**To fix.** `PagedSingleUseKEMPreKeyStoreConfiguration` already supports an `endpointOverride`
-(nullable `URI`, unset here). Standing up a local S3-compatible mock (e.g. MinIO, alongside the
-existing TLS-proxy container in `deploy/signal-test-server`) and pointing `endpointOverride` at it
-via a new patch would close this — except the `S3AsyncClient.builder()` call for this store
-(`WhisperServerService.java`, `asyncKeysS3Client`) doesn't enable path-style addressing the way
-`asnTable`'s alternate constructor does, so redirecting it needs a small source patch
-(`S3Configuration.builder().pathStyleAccessEnabled(true)`) in addition to the config change and the
-new container. Not yet implemented — a real (if bounded) scope decision, not a quick fix.
+An intermediate fix (a short grace sleep between finding a message and returning, mirroring the
+existing O12 workaround already in `PresageTransport::receive_group_secret`) reduced how often this
+hit but did not eliminate it — confirmed by it recurring on a subsequent run even with the sleep in
+place, timing out on B's bootstrap message again. The sleep only narrows the window in which the
+*next* call's fresh socket can clobber the current one's in-flight state; it doesn't stop the
+fresh-socket churn that causes it.
+
+**Fix, verified.** Stopped opening `receive_messages()` per message. `receive_one` now takes an
+already-open, already-pinned stream (`&mut (impl Stream<Item = Received> + Unpin)`) instead of a
+`&mut Manager` that it opens a stream on internally. `main` opens `receive_messages()` **once per
+back-to-back receive burst** — the observer's two bootstrap messages, and later its two real posts,
+each drained off one live stream — matching how the real actor and `e2c_key_distribution` already
+do it. Between bursts (where the observer needs to *send*, which needs `&mut Manager` and would
+conflict with a still-open stream borrow) the stream is allowed to drop normally, which is safe
+there because nothing is expected to arrive on it in that gap. Verified across multiple consecutive
+runs post-fix — including runs that still show the underlying O12-style `Could not deliver response
+for id ...` / `Websocket closing: request handler failed` / `responder was canceled` log noise; that
+noise is expected and no longer fatal, because it can no longer land on a socket a *subsequent*
+`receive_one` call depended on.
+
+### O15. `a1_smoke`'s first send/receive round trip after a fresh boot can lose the message entirely — mitigated with a bounded retry, not yet root-caused
+
+**Status: mitigated, not fixed** (`crates/transports/transport-presage/examples/a1_smoke.rs`).
+Root cause undetermined; see below.
+
+**What.** Distinct from O12: `a1_smoke` occasionally fails its very first send/receive round trip
+of a fresh process, with the identified websocket getting a clean `code=1000 reason="OK"` close
+from the remote while `send_message`'s request is still awaiting its response
+(`ServiceError(WsClosing { reason: "WebSocket closing while waiting for a response" })`). Unlike
+O12 — where the PUT is proven to have already succeeded server-side regardless of what the client
+sees — here B's queue genuinely comes back empty (`Received::QueueEmpty`, no `DataMessage` ever
+arrives). Only observed on the *first* attempt of a run so far; a second attempt in the same
+process, or a wholly fresh `cargo run`, has always gone through cleanly.
+
+**Not yet root-caused.** Candidates, untested: JIT/connection-pool warm-up latency on the
+self-hosted test-server's very first identified-websocket round trip after `boot.sh` (a cold JVM
+has slower first-request latency, which could trip a client- or proxy-side liveness assumption); a
+duplicate-connection replacement policy on the server closing an "older" identified socket out from
+under an in-flight request; or something proxy-side in `tls-proxy.sh`'s Caddy container. Whether
+this tracks wall-clock time since `boot.sh` started (vs. simply "first `cargo run` of the process")
+hasn't been isolated — that's the first thing to check before trusting any theory here.
+
+**Mitigation, verified.** `a1_smoke` now retries the whole send/receive round trip up to 3 times
+(fresh plaintext + timestamp per attempt) before failing, instead of requiring a human to re-invoke
+the example. Verified: reproduced the failure on attempt 1, watched attempt 2 pass automatically
+within the *same* `cargo run` — a run that, pre-fix, would have required a second manual invocation.
+If it ever burns all 3 attempts, treat that as a real regression, not this flakiness.
+
+**To fix properly.** Needs the same level of source-verification O13/O14 got: instrument which side
+(client, proxy, or test-server) actually originates the `code=1000` close, and whether it correlates
+with wall-clock time since `boot.sh` started, before committing to a theory.
 
 ### D1. Polls carry no buttons, because a button press deanonymizes the voter
 

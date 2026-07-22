@@ -32,6 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use futures_util::pin_mut;
+use futures_util::Stream;
 use futures_util::StreamExt;
 use presage::libsignal_service::content::{ContentBody, DataMessage};
 use presage::model::identity::OnNewIdentity;
@@ -70,16 +71,36 @@ async fn send(
     Ok(())
 }
 
-/// Drain `receiver`'s queue until one `DataMessage` with a body arrives, and
-/// return its `(sender uuid, sender_identity_key, body)`. Ignores anything else
-/// (receipts, sync chatter) so the bootstrap round's replies don't need
-/// hand-crafted filtering.
+/// Drain a live `receive_messages()` stream until one `DataMessage` with a body
+/// arrives, and return its `(sender uuid, sender_identity_key, body)`. Ignores
+/// anything else (receipts, sync chatter) so the bootstrap round's replies don't
+/// need hand-crafted filtering.
+///
+/// Takes an already-open, already-pinned stream (see the call sites in `main`)
+/// rather than a `&mut Manager` that it opens `receive_messages()` on itself.
+/// That used to be this function's whole job, and it's what caused
+/// `FINDINGS.md` entry O14: presage's own doc comment on `receive_messages()`
+/// says opening it "initialises a *fresh* Signal websocket, which means any
+/// other use of the previous one will go into nirvana." Calling it fresh on
+/// every single message — as this function used to — meant every call after
+/// the first tore down the *previous* call's websocket while presage still had
+/// same-socket background bookkeeping in flight on it (a "newly seen contact"
+/// upsert, an account-attributes/prekey refresh, an envelope-delivery ack),
+/// turning a harmless in-flight response into a hard teardown
+/// (`Websocket closing: request handler failed`) that could silently orphan a
+/// message still sitting in the queue for the *next* call. A grace sleep before
+/// returning (still used to be here) masked most of it but not reliably — the
+/// bug is the repeated fresh-socket churn itself. The real fix, matching how
+/// `transport_presage::PresageTransport`'s actual actor thread does it
+/// (`receive_messages()` exactly once per Manager lifetime, drained
+/// continuously), is to open the stream once per "receive burst" — every
+/// message expected back-to-back on the same account with nothing else using
+/// that Manager in between — and hand this function the same live stream for
+/// each message in that burst, instead of a fresh one per message.
 async fn receive_one(
-    receiver: &mut Manager<SqliteStore, presage::manager::Registered>,
+    messages: &mut (impl Stream<Item = Received> + Unpin),
 ) -> Result<(uuid::Uuid, Option<Vec<u8>>, String)> {
     tokio::time::timeout(Duration::from_secs(45), async {
-        let messages = receiver.receive_messages().await.context("receive_messages")?;
-        pin_mut!(messages);
         while let Some(event) = messages.next().await {
             if let Received::Content(content) = event {
                 if let ContentBody::DataMessage(DataMessage {
@@ -90,7 +111,8 @@ async fn receive_one(
                         .metadata
                         .sender_identity_key
                         .map(|k| k.public_key_bytes().to_vec());
-                    return Ok((content.metadata.sender.raw_uuid(), key, text.clone()));
+                    let sender = content.metadata.sender.raw_uuid();
+                    return Ok((sender, key, text.clone()));
                 }
             }
         }
@@ -160,12 +182,45 @@ async fn main() -> Result<()> {
     );
     send(&mut member_a, observer_aci, "bootstrap from A").await?;
     send(&mut member_b, observer_aci, "bootstrap from B").await?;
-    let (_, _, _) = receive_one(&mut observer).await.context("observer receiving A's bootstrap")?;
-    let (_, _, _) = receive_one(&mut observer).await.context("observer receiving B's bootstrap")?;
+    {
+        // One burst: A's and B's bootstrap messages arrive back-to-back on the
+        // observer's queue, so drain both from the *same* live stream instead of
+        // reopening `receive_messages()` (and tearing down the websocket) between
+        // them — see the O14 note on `receive_one`.
+        let observer_messages = observer
+            .receive_messages()
+            .await
+            .context("observer receive_messages (bootstrap)")?;
+        pin_mut!(observer_messages);
+        let _ = receive_one(&mut observer_messages)
+            .await
+            .context("observer receiving A's bootstrap")?;
+        let _ = receive_one(&mut observer_messages)
+            .await
+            .context("observer receiving B's bootstrap")?;
+    }
     send(&mut observer, member_a_aci, "bootstrap reply to A").await?;
     send(&mut observer, member_b_aci, "bootstrap reply to B").await?;
-    let (_, _, _) = receive_one(&mut member_a).await.context("A receiving observer's reply")?;
-    let (_, _, _) = receive_one(&mut member_b).await.context("B receiving observer's reply")?;
+    {
+        let member_a_messages = member_a
+            .receive_messages()
+            .await
+            .context("member A receive_messages")?;
+        pin_mut!(member_a_messages);
+        let _ = receive_one(&mut member_a_messages)
+            .await
+            .context("A receiving observer's reply")?;
+    }
+    {
+        let member_b_messages = member_b
+            .receive_messages()
+            .await
+            .context("member B receive_messages")?;
+        pin_mut!(member_b_messages);
+        let _ = receive_one(&mut member_b_messages)
+            .await
+            .context("B receiving observer's reply")?;
+    }
     println!("      ✓ bootstrap round complete — both members now hold the observer's profile key");
 
     println!("[5/5] the real test: each member sends one more message, observer inspects both…");
@@ -175,8 +230,21 @@ async fn main() -> Result<()> {
     send(&mut member_b, observer_aci, plaintext_b.clone()).await?;
 
     let mut seen = Vec::new();
-    for _ in 0..2 {
-        seen.push(receive_one(&mut observer).await.context("observer receiving a real post")?);
+    {
+        // Same reasoning as the bootstrap burst above: both real posts land on the
+        // observer back-to-back, so one live stream for both, not one each.
+        let observer_messages = observer
+            .receive_messages()
+            .await
+            .context("observer receive_messages (real posts)")?;
+        pin_mut!(observer_messages);
+        for _ in 0..2 {
+            seen.push(
+                receive_one(&mut observer_messages)
+                    .await
+                    .context("observer receiving a real post")?,
+            );
+        }
     }
 
     let (a_result, b_result) = if seen[0].2 == plaintext_a {

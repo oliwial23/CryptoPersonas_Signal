@@ -112,57 +112,86 @@ async fn main() -> Result<()> {
     let mut b = register(db_b.to_str().unwrap(), &num_b).await?;
 
     let b_aci = b.registration_data().service_ids.aci;
-    let plaintext = format!("hello from A — e2 A1 smoke {suffix:04}");
 
-    println!("[3/4] A → B: {plaintext:?}");
-    let ts = now_millis();
-    let body = ContentBody::DataMessage(DataMessage {
-        body: Some(plaintext.clone()),
-        timestamp: Some(ts),
-        ..Default::default()
-    });
-    match a.send_message(ServiceId::Aci(b_aci.into()), body, ts).await {
-        Ok(()) => println!("      sent (ts={ts})"),
-        // The PUT /v1/messages itself returns 200 (delivery succeeds); presage can still
-        // surface an error from its post-send bookkeeping (save_message / self-sync
-        // profile fetch) racing the short-lived websocket teardown. Delivery is what we
-        // test here, so warn and let B's receive be the source of truth.
-        Err(e) => println!("      ⚠ send_message returned {e:?} — continuing to check delivery"),
+    // Observed in practice: the *first* send/receive round trip against a
+    // just-booted test-server occasionally has the identified websocket get a
+    // clean `code=1000` close from the remote while a request is still
+    // in-flight — a cold-connection race, not the already-tolerated O12
+    // post-send-bookkeeping one (that one still leaves the message delivered;
+    // this one can leave B's queue genuinely empty). It has not reproduced on
+    // a second attempt in the same process. Retry the whole round trip a
+    // bounded number of times instead of making the human re-run the example.
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut received: Option<String> = None;
+    let mut last_plaintext = String::new();
+    for attempt in 1..=MAX_ATTEMPTS {
+        let plaintext = format!("hello from A — e2 A1 smoke {suffix:04} (attempt {attempt})");
+        last_plaintext = plaintext.clone();
+
+        println!("[3/4] A → B (attempt {attempt}/{MAX_ATTEMPTS}): {plaintext:?}");
+        let ts = now_millis();
+        let body = ContentBody::DataMessage(DataMessage {
+            body: Some(plaintext.clone()),
+            timestamp: Some(ts),
+            ..Default::default()
+        });
+        match a.send_message(ServiceId::Aci(b_aci.into()), body, ts).await {
+            Ok(()) => println!("      sent (ts={ts})"),
+            // The PUT /v1/messages itself returns 200 (delivery succeeds); presage can still
+            // surface an error from its post-send bookkeeping (save_message / self-sync
+            // profile fetch) racing the short-lived websocket teardown. Delivery is what we
+            // test here, so warn and let B's receive be the source of truth.
+            Err(e) => println!("      ⚠ send_message returned {e:?} — continuing to check delivery"),
+        }
+
+        println!("[4/4] B draining its queue (attempt {attempt}/{MAX_ATTEMPTS})…");
+        let this_attempt = tokio::time::timeout(Duration::from_secs(45), async {
+            let messages = b.receive_messages().await.context("B.receive_messages")?;
+            pin_mut!(messages);
+            while let Some(event) = messages.next().await {
+                match event {
+                    Received::Content(content) => {
+                        if let ContentBody::DataMessage(DataMessage {
+                            body: Some(text), ..
+                        }) = &content.body
+                        {
+                            return Ok::<Option<String>, anyhow::Error>(Some(text.clone()));
+                        }
+                    }
+                    Received::QueueEmpty => {
+                        // Nothing (more) queued — if we get here without the message, it
+                        // was not delivered (this attempt).
+                        return Ok(None);
+                    }
+                    Received::Contacts => {}
+                }
+            }
+            Ok(None)
+        })
+        .await
+        .context("timed out waiting for B to receive")??;
+
+        if this_attempt.is_some() {
+            received = this_attempt;
+            break;
+        }
+        if attempt < MAX_ATTEMPTS {
+            println!(
+                "      ⚠ B's queue emptied without delivering the message (attempt \
+                 {attempt}/{MAX_ATTEMPTS}) — retrying with a fresh send…"
+            );
+        }
     }
 
-    println!("[4/4] B draining its queue…");
-    let received = tokio::time::timeout(Duration::from_secs(45), async {
-        let messages = b.receive_messages().await.context("B.receive_messages")?;
-        pin_mut!(messages);
-        while let Some(event) = messages.next().await {
-            match event {
-                Received::Content(content) => {
-                    if let ContentBody::DataMessage(DataMessage {
-                        body: Some(text), ..
-                    }) = &content.body
-                    {
-                        return Ok::<Option<String>, anyhow::Error>(Some(text.clone()));
-                    }
-                }
-                Received::QueueEmpty => {
-                    // Nothing (more) queued — if we get here without the message, it
-                    // was not delivered.
-                    return Ok(None);
-                }
-                Received::Contacts => {}
-            }
-        }
-        Ok(None)
-    })
-    .await
-    .context("timed out waiting for B to receive")??;
-
     match received {
-        Some(text) if text == plaintext => {
+        Some(text) if text == last_plaintext => {
             println!("\n✅ A1 SMOKE PASSED — B decrypted: {text:?}");
             Ok(())
         }
-        Some(text) => bail!("B received the wrong body: {text:?} (expected {plaintext:?})"),
-        None => bail!("B's queue emptied without delivering the message"),
+        Some(text) => bail!("B received the wrong body: {text:?} (expected {last_plaintext:?})"),
+        None => bail!(
+            "B's queue emptied without delivering the message, {MAX_ATTEMPTS} attempts in a row \
+             — this is no longer the known cold-connection flakiness, something is actually broken"
+        ),
     }
 }
