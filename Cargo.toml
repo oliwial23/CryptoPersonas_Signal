@@ -9,6 +9,7 @@ members = [
     "crates/personas-core",
     "crates/personas-group-crypto",
     "crates/personas-messenger",
+    "crates/personas-node",
     "crates/personas-server",
     "crates/personas-wire",
     "crates/transports/signal-cli-client",
