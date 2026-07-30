@@ -127,7 +127,7 @@ need **three terminal windows/tabs**, each left running:
 **Terminal 1 — boot the fake Signal server:**
 
 ```sh
-cd personas-main/deploy/signal-test-server
+cd deploy/signal-test-server
 ./boot.sh
 ```
 
@@ -145,7 +145,7 @@ that test-server mode never wires up to anything real). Ignore it.
 **Optional sanity check**, from any other terminal, once Terminal 1 says it's started:
 
 ```sh
-cd personas-main/deploy/signal-test-server
+cd deploy/signal-test-server
 ./verify.sh
 ```
 
@@ -210,8 +210,8 @@ stays up in the background same as the TLS proxy). Check with `./minio.sh status
 - The **shared phantom identity** check (B2/D1): two members register two fully
   independent accounts but with the same identity keypair (derived from the
   group secret), and an independent observer confirms both real accounts'
-  messages carry the *same* certificate-embedded identity key while still
-  showing *different* real uuids (not device linking):
+  messages carry the _same_ certificate-embedded identity key while still
+  showing _different_ real uuids (not device linking):
   ```sh
   cargo run -p transport-presage --example b2_shared_identity
   ```
@@ -260,7 +260,8 @@ already does.
 
 ```sh
 # Terminal 2:
-cd personas-main/deploy/signal-test-server && ./tls-proxy.sh down
+cd deploy/signal-test-server && ./tls-proxy.sh down
+cd deploy/signal-test-server && ./minio.sh down
 
 # Terminal 1: Ctrl-C
 ```
