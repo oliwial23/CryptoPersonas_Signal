@@ -1,0 +1,74 @@
+# Signal storage-service (groups backend) — personas test-server deployment.
+#
+# Dropwizard config for a LOCAL, single-tenant storage-service that serves the
+# GroupsV2 API (/v1/groups, /v2/groups) the modified Signal-Desktop client needs.
+# Runs plain HTTP on :8090; the test-server Caddy proxy terminates TLS on :8443
+# and path-routes the group/storage endpoints here (see caddy/Caddyfile).
+#
+# Datastore is a local Bigtable EMULATOR (see bigtable.sh) — no real GCP.
+#
+# __ZK_SERVER_SECRET__ is substituted by boot.sh with the chat server's OWN
+# groupsZkConfig.serverSecret (zkConfig-libsignal-0.42.serverSecret) so the two
+# services share one zkgroup ServerSecretParams and group-auth credentials the
+# chat server issues verify here. Desktop's serverPublicParams already derives
+# from the same secret.
+
+server:
+  applicationConnectors:
+    - type: http
+      port: 8090
+  adminConnectors:
+    - type: http
+      port: 8091
+
+logging:
+  level: INFO
+  appenders:
+    - type: console
+
+bigtable:
+  # Any non-empty ids; the emulator ignores project/instance identity. Table ids
+  # must match the tables bigtable.sh creates.
+  projectId: personas
+  instanceId: personas
+  contactManifestsTableId: contact-manifests
+  contactsTableId: contacts
+  groupsTableId: groups
+  groupLogsTableId: group-logs
+
+authentication:
+  # Storage-service (contact-manifest) credential secret — hex, 32 bytes. Groups
+  # auth is pure zkgroup and does NOT use this; it only gates the contacts
+  # StorageController, which the personas demo does not exercise. Placeholder.
+  # Quoted so YAML keeps it a hex string (not a number).
+  key: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+
+zkConfig:
+  # base64 ServerSecretParams — MUST equal the chat server's groupsZkConfig.serverSecret.
+  serverSecret: __ZK_SERVER_SECRET__
+
+cdn:
+  # Group-avatar upload policy signing. The demo posts no group avatars, so these
+  # are inert placeholders.
+  accessKey: personas-test
+  accessSecret: personas-test
+  bucket: personas-test-bucket
+  region: us-east-1
+
+group:
+  maxGroupSize: 1001
+  maxGroupTitleLengthBytes: 1024
+  maxGroupDescriptionLengthBytes: 8192
+  # hex, exactly 32 bytes — secret for the external group credential the service
+  # mints; unused by the demo. Placeholder. Quoted so YAML keeps it a hex string.
+  externalServiceSecret: "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+
+openTelemetry:
+  enabled: false
+  environment: personas-test
+  maxBucketCount: 0
+  logUrl: ""
+  maxBucketsPerMeter: {}
+
+warmup:
+  count: 1

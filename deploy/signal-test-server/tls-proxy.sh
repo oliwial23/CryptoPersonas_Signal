@@ -19,6 +19,11 @@ TLS="$HERE/.local/tls"
 NAME="personas-tls-proxy"
 LISTEN_PORT="${LISTEN_PORT:-8443}"
 UPSTREAM="${UPSTREAM:-host.docker.internal:8080}"
+# GroupsV2 + contact-storage endpoints are served by the separate storage-service
+# (deploy/storage-service), not the chat Signal-Server. Path-route them there so
+# Desktop's storageUrl (also 127.0.0.1:8443) transparently reaches it. If the
+# storage-service is not running these paths just fail as before.
+STORAGE_UPSTREAM="${STORAGE_UPSTREAM:-host.docker.internal:8090}"
 IMAGE="caddy:2"
 
 # Docker via Colima; sidestep the dangling Docker-Desktop credential helper.
@@ -69,6 +74,8 @@ cat > "$TLS/Caddyfile" <<EOF
 }
 https://:$LISTEN_PORT {
 	tls /certs/leaf.crt /certs/leaf.key
+	@storage path /v1/groups* /v2/groups* /v1/storage*
+	reverse_proxy @storage http://$STORAGE_UPSTREAM
 	reverse_proxy http://$UPSTREAM
 }
 EOF
