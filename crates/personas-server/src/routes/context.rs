@@ -50,6 +50,7 @@ pub async fn signal_new_thread(
         thread: input.thread,
         context: fresh_context(),
         ts: None,
+        topic_echoed: false,
     })?;
 
     Ok(line(entry)?)
@@ -82,6 +83,10 @@ pub async fn slack_new_thread(
         thread: input.thread,
         context: fresh_context(),
         ts: Some(sent.id.0),
+        // Left false: the first reply is what triggers the one reminder echo
+        // (FINDINGS O9) — Slack collapses threads, so the opening banner above is easy
+        // to miss once replies start arriving.
+        topic_echoed: false,
     })?;
 
     Ok(line(entry)?)

@@ -393,7 +393,8 @@ async fn open_slack(
 
     let sent = transport.send(msg).await?;
 
-    state.write().await.votes.votes.insert(
+    let mut st = state.write().await;
+    st.votes.votes.insert(
         vote_id,
         SlackPoll {
             timestamp: sent.id.0,
@@ -403,6 +404,7 @@ async fn open_slack(
             is_ban,
         },
     );
+    st.votes.flush()?;
 
     Ok(ok())
 }
@@ -468,10 +470,13 @@ pub async fn slack_vote(
         }
 
         *poll.counts.entry(input.vote.clone()).or_insert(0) += 1;
-        format!(
+        let announcement = format!(
             "🗳️ {name} has voted for *{}*!\nCurrent counts: {:?}",
             input.vote, poll.counts
-        )
+        );
+
+        st.votes.flush()?;
+        announcement
     };
 
     let transport = state.read().await.slack.transport.clone();

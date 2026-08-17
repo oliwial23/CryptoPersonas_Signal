@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
         vec![member_aci],
         secret,
         "e2c-key-distribution-smoke".to_string(),
+        None,
     )
     .await
     .context("starting creator transport")?;
@@ -109,6 +110,7 @@ async fn main() -> Result<()> {
         vec![creator_aci],
         received,
         "e2c-key-distribution-smoke".to_string(),
+        None,
     )
     .await
     .context("starting member transport")?;

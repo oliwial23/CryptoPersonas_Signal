@@ -783,12 +783,12 @@ mod e2e {
         let shared = PresageTransport::create_group_secret();
 
         let a_transport: Arc<dyn Transport> = Arc::new(
-            PresageTransport::start(db_a, vec![b_aci], shared.clone(), conv.clone())
+            PresageTransport::start(db_a, vec![b_aci], shared.clone(), conv.clone(), None)
                 .await
                 .unwrap(),
         );
         let b_transport: Arc<dyn Transport> = Arc::new(
-            PresageTransport::start(db_b, vec![a_aci], shared, conv.clone())
+            PresageTransport::start(db_b, vec![a_aci], shared, conv.clone(), None)
                 .await
                 .unwrap(),
         );

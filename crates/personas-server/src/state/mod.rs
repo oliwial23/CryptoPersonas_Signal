@@ -61,10 +61,8 @@ pub struct ServerState {
     /// Signal polls: a file, because a Signal vote arrives as a message and the tally has to
     /// survive a restart.
     pub polls: PollLog,
-    /// Slack polls: in memory, as they have always been. A restart forgets them — which is a
-    /// real limitation, not a design choice, and it is why a Slack poll's tally cannot be the
-    /// input to `AllowedToRevoke` the way the paper's ban vote needs to be. Serverless (d)
-    /// makes the tally a client-side count over the chat log and the problem goes away.
+    /// Slack polls: a file (FINDINGS O5), mirroring `polls` above. Signal polls always had
+    /// this; a Slack poll's tally used to live only in memory and be forgotten on restart.
     pub votes: VoteState,
     /// Badge requests awaiting an admin's approval.
     pub badges: BadgeLog,
@@ -120,7 +118,7 @@ impl ServerState {
                 contexts: ContextLog::open(data_dir.join("slack_contexts.jsonl"))?,
             },
             polls: PollLog::open(data_dir.join("polls.jsonl"))?,
-            votes: VoteState::default(),
+            votes: VoteState::open(data_dir.join("slack_votes.jsonl"))?,
             badges: BadgeLog::open(data_dir.join("badge_requests.jsonl"))?,
         })
     }

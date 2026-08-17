@@ -84,6 +84,22 @@ struct EpochResponse {
     epoch: String,
 }
 
+/// Upstream `User` panics (`assert!(self.scan_index.is_none())`) if any non-scan
+/// interaction is attempted while a callback sweep is unfinished — a member with more
+/// than one outstanding callback needs multiple `scan` calls to complete one sweep, and
+/// `scan_index` stays `Some` on disk in between. Turn that panic into a clear error.
+/// See FINDINGS O2.
+fn ensure_not_scanning(user: &User<F, MsgUser>) -> Result<()> {
+    if user.is_scanning() {
+        return Err(anyhow!(
+            "you have an unfinished callback scan ({} outstanding); run `scan` until it \
+             completes before doing anything else",
+            user.num_outstanding_callbacks()
+        ));
+    }
+    Ok(())
+}
+
 impl PersonaClient {
     /// The current epoch. Scans and pseudonymous posts are bound to it, so a callback
     /// can only be answered inside the window it was issued in.
@@ -107,11 +123,25 @@ impl PersonaClient {
         Ok(self.load_user()?.data.reputation.into_bigint().to_string())
     }
 
+    /// How many callbacks are still outstanding against this member's object — including
+    /// any left over from an unfinished sweep. Zero means `scan` has nothing to do and no
+    /// other command will trip the mid-sweep guard (`ensure_not_scanning`, FINDINGS O2).
+    pub fn outstanding_callbacks(&self) -> Result<usize> {
+        Ok(self.load_user()?.num_outstanding_callbacks())
+    }
+
+    /// Whether a callback sweep is unfinished — `scan` needs to be called again to
+    /// complete it before any other proving flow will succeed. See FINDINGS O2.
+    pub fn is_scanning(&self) -> Result<bool> {
+        Ok(self.load_user()?.is_scanning())
+    }
+
     /// Post a message: prove the standard predicate (under the rate limit, not banned)
     /// and mint the callback that lets the group act on this message later.
     pub fn gen_cb_for_msg(&self) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
+        ensure_not_scanning(&user)?;
         let pk = self.standard_pk();
 
         let start = SystemTime::now();
@@ -136,6 +166,7 @@ impl PersonaClient {
     pub fn gen_cb_for_badge_request(&self, index: u32, badge: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
+        ensure_not_scanning(&user)?;
         let pk = self.badge_request_pk();
         let epoch = self.epoch()?;
 
@@ -269,6 +300,7 @@ impl PersonaClient {
     pub fn pseudo_proof_with_msg(&self, claimed: F, context: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
+        ensure_not_scanning(&user)?;
         let pk = self.standard_pseudo_pk();
         let epoch = self.epoch()?;
 
@@ -291,6 +323,7 @@ impl PersonaClient {
     pub fn rate_pseudo_proof_with_msg(&self, claimed: F, context: F, i: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
+        ensure_not_scanning(&user)?;
         let pk = self.standard_pseudo_rate_pk();
 
         let pseudo = PseudonymArgsRate { context, claimed, i };
@@ -320,6 +353,7 @@ impl PersonaClient {
     pub fn pseudo_proof_vote(&self, claimed: F, context: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let user = self.load_user()?;
+        ensure_not_scanning(&user)?;
 
         let (pubkey, sig) = self
             .membership(&user)
@@ -352,6 +386,7 @@ impl PersonaClient {
     pub fn make_authorship_proof(&self, i1: usize, i2: usize) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let user = self.load_user()?;
+        ensure_not_scanning(&user)?;
 
         let (pubkey, sig) = self
             .membership(&user)
@@ -399,6 +434,7 @@ impl PersonaClient {
     pub fn make_badge_proof(&self, i: u32, badge: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let user = self.load_user()?;
+        ensure_not_scanning(&user)?;
 
         let (pubkey, sig) = self
             .membership(&user)

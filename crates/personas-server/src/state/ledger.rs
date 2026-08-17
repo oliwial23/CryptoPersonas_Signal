@@ -87,10 +87,6 @@ impl RecordLog {
             .map(|r| r.cb.as_str())
     }
 
-    pub fn contains(&self, id: &MessageId) -> bool {
-        self.rows.iter().any(|r| r.id == id.0)
-    }
-
     pub fn reputation_of(&self, cb_hex: &str) -> Result<i64> {
         self.rows
             .iter()
@@ -133,6 +129,11 @@ pub struct ThreadContext {
     /// has no ts; Slack replies into one, so it does.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
+    /// Whether the topic banner has already been echoed once into this thread
+    /// (FINDINGS O9). `#[serde(default)]` so rows written before this field existed still
+    /// parse — they read as not-yet-echoed, which just means one banner gets replayed.
+    #[serde(default)]
+    pub topic_echoed: bool,
 }
 
 pub struct ContextLog {
@@ -168,6 +169,24 @@ impl ContextLog {
             .iter()
             .find(|r| r.thread == thread)
             .expect("just pushed"))
+    }
+
+    /// If `ts` names a thread whose topic has not been echoed yet, marks it echoed and
+    /// returns the topic text to post; otherwise (unknown thread, or already echoed)
+    /// returns `None` and does nothing. Checking and marking happen together so two
+    /// near-simultaneous first replies into a thread cannot both see "not yet echoed"
+    /// and both post the banner. See FINDINGS O9.
+    pub fn topic_to_echo(&mut self, ts: &str) -> Result<Option<String>> {
+        let Some(row) = self.rows.iter_mut().find(|r| r.ts.as_deref() == Some(ts)) else {
+            return Ok(None);
+        };
+        if row.topic_echoed {
+            return Ok(None);
+        }
+        row.topic_echoed = true;
+        let topic = row.thread.clone();
+        write_jsonl(&self.path, &self.rows)?;
+        Ok(Some(topic))
     }
 
     /// The file the client downloads wholesale and parses line by line.
@@ -343,20 +362,42 @@ pub fn badge_name(index: &str) -> &'static str {
     }
 }
 
-/// Slack polls, in memory.
-#[derive(Debug, Default)]
+/// Slack polls, persisted so a tally survives a restart (FINDINGS O5).
+///
+/// `votes` stays public and keyed exactly as it always was (callers still do
+/// `state.votes.votes.insert/get/get_mut`) — the only new obligation on a caller that
+/// mutates a poll is to call [`VoteState::flush`] afterward, the same discipline
+/// `RecordLog`/`PollLog`/`BadgeLog` already impose via their own mutating methods.
 pub struct VoteState {
+    path: PathBuf,
     pub votes: HashMap<String, SlackPoll>,
 }
 
-#[derive(Debug)]
+impl VoteState {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let rows: Vec<(String, SlackPoll)> = read_jsonl(&path)?;
+        Ok(Self {
+            votes: rows.into_iter().collect(),
+            path,
+        })
+    }
+
+    /// Write every poll's current state back to disk. Cheap enough to call after every
+    /// mutation — the same tradeoff `RecordLog`/`PollLog`/`BadgeLog` already make.
+    pub fn flush(&mut self) -> Result<()> {
+        let rows: Vec<(&String, &SlackPoll)> = self.votes.iter().collect();
+        write_jsonl(&self.path, &rows)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SlackPoll {
     /// The Slack ts of the poll message.
     ///
     /// Nothing reads it — a Slack vote names the poll by its printed id, not by the message
     /// it was announced in. It is kept because it is the only link back from a poll to the
-    /// message that announced it, and a Slack poll that survives a restart (it does not, yet)
-    /// would need it.
+    /// message that announced it, and a Slack poll that survives a restart needs it.
     #[allow(dead_code)]
     pub timestamp: String,
     /// The field element voters derive their poll pseudonym from.

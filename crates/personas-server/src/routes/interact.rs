@@ -22,7 +22,7 @@ use personas_core::circuits::{FoldingProofData, MsgUser, NUM_SCANS_PER_FOLD, get
 use personas_core::{Args, CStore, Cr, F, H, OStore, Snark, Store};
 use personas_wire::{Kind, decode};
 use zk_callbacks::generic::bulletin::{JoinableBulletin, UserBul};
-use zk_callbacks::generic::object::{Com, Time};
+use zk_callbacks::generic::object::Com;
 use zk_callbacks::generic::scan::PubScanArgs;
 use zk_callbacks::generic::service::ServiceProvider;
 use zk_callbacks::generic::user::ExecutedMethod;
@@ -68,15 +68,11 @@ pub async fn standard(State(state): State<ServerLock>, body: Bytes) -> AppResult
 
     let mut st = state.write().await;
     let vk = st.keys.standard_verifying_key.clone();
+    let current = epoch(&st.db);
 
-    verify_and_store(
-        &mut st.db,
-        &vk,
-        exec,
-        F::from(0),
-        Time::from(0),
-        bulletin::INTERACTION,
-    )?;
+    // Live epoch, matching every other route (FINDINGS O3) — this is the same anonymous
+    // interaction `signal_anon`/`slack_anon` verify, just without a relay.
+    verify_and_store(&mut st.db, &vk, exec, F::from(0), current, bulletin::INTERACTION)?;
 
     Ok(ok())
 }

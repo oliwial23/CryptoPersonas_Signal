@@ -28,7 +28,6 @@ use personas_core::circuits::{BadgesArgs, PseudonymArgs, PseudonymArgsRate};
 use personas_core::{Args, Cr, F, Snark, VK, persona};
 use personas_wire::{Kind, decode};
 use serde::Deserialize;
-use zk_callbacks::generic::object::Time;
 use zk_callbacks::generic::user::ExecutedMethod;
 
 use transport_api::{Attachment, ConversationId, MessageId, Outgoing};
@@ -146,9 +145,11 @@ struct Verified {
 
 /// Verify a post of any flavour, append it to the bulletin.
 ///
-/// The public arguments and the epoch differ per flavour, and the epoch difference is
-/// inherited: an anonymous or rate-limited post files its callbacks at `Time::from(0)`, a
-/// pseudonymous one at the live epoch. See [`verify_and_store`].
+/// Every flavour files its callbacks at the live epoch (FINDINGS O3) — the old
+/// disagreement (anonymous/rate-limited posts at `Time::from(0)`, pseudonymous posts at
+/// the live epoch) was unobservable only because the sole callback in use is
+/// `expirable: false`, but would silently drop tickets the day an expirable one is
+/// introduced. See [`verify_and_store`].
 fn verify_post(
     st: &mut ServerState,
     flavour: Flavour,
@@ -158,26 +159,22 @@ fn verify_post(
     let vk = flavour.verifying_key(st);
     let mut reader = decode(flavour.kind(), proof)?;
     let exec: ExecutedMethod<F, Snark, Args, Cr, 1> = reader.pull()?;
+    let current = epoch(&st.db);
 
     let (result, start, millis) = bench::time(|| match flavour {
-        Flavour::Anon => verify_and_store(
-            &mut st.db,
-            &vk,
-            exec,
-            F::from(0),
-            Time::from(0),
-            INTERACTION,
-        )
-        .map(|callbacks| Verified {
-            callbacks,
-            persona: None,
-            context: None,
-        }),
+        Flavour::Anon => {
+            verify_and_store(&mut st.db, &vk, exec, F::from(0), current, INTERACTION).map(
+                |callbacks| Verified {
+                    callbacks,
+                    persona: None,
+                    context: None,
+                },
+            )
+        }
 
         Flavour::Pseudo => {
             let inputs = pub_inputs(&mut reader, 2)?;
             let (context, claimed) = (inputs[0], inputs[1]);
-            let current = epoch(&st.db);
 
             verify_and_store(
                 &mut st.db,
@@ -206,7 +203,7 @@ fn verify_post(
                 &vk,
                 exec,
                 PseudonymArgsRate { context, claimed, i },
-                Time::from(0),
+                current,
                 INTERACTION,
             )
             .map(|callbacks| Verified {

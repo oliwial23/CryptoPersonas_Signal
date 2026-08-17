@@ -119,76 +119,98 @@ Should be its own commit, before any demo (M0) that a human restarts.
 
 ### O2. `client scan` answers one callback, and interacting mid-sweep panics
 
-*Severity: medium. Pre-existing; a4 did not touch it.*
-
-A member with *k* outstanding callbacks needs *k* invocations of `client scan`. Interacting
-before the sweep completes trips `assert!(self.scan_index.is_none())` inside zk-callbacks, so
-the client **panics** —
+**Status: fixed.** A member with *k* outstanding callbacks needs *k* invocations of
+`exec_scanint` to complete one sweep — `scan_index` (zk-callbacks `generic/user.rs`) stays
+`Some` on the saved `User` between them, and any other interaction trips
+`assert!(self.scan_index.is_none())` and **panics**:
 
 ```
 Error: task 11 panicked with message "assertion failed: self.scan_index.is_none()"
 ```
 
-— rather than saying "you have N callbacks left to scan". Anyone who hits this will think the
-system is broken. The fix is client-side: loop until `num_outstanding_callbacks()` is zero, or
-report the remaining count. (The protocol behaviour is correct: this is only about the message.)
+Fixed two ways. `PersonaClient::scan` flows are now guarded — `flows.rs::ensure_not_scanning`
+checks `user.is_scanning()` before any non-scan proving call (`gen_cb_for_msg`,
+`gen_cb_for_badge_request`, `pseudo_proof_with_msg`, `rate_pseudo_proof_with_msg`,
+`pseudo_proof_vote`, `make_authorship_proof`, `make_badge_proof`) and returns a clear error
+naming the outstanding count instead of panicking. And the CLI's `scan` command
+(`personas-cli::signal::run`/`slack::run`) now loops the whole sweep itself — `k` `scan` proofs
+in one invocation, using `PersonaClient::outstanding_callbacks`/`is_scanning` to know when the
+sweep is done — instead of requiring a human to invoke `scan` exactly `k` times and stay out of
+the way in between. Verified against a local server: `join` → three `post`s → one `scan`
+invocation correctly ran three scan proofs back to back and left the object in a
+non-scanning state; a fresh member with nothing outstanding gets "nothing to scan" rather than
+attempting an empty scan proof.
 
 ### O3. The epoch a callback is filed at is inconsistent across routes
 
-*Severity: dormant today, latent trap tomorrow. Judged during a5; the investigation surfaced
-O10, which is the real problem. Preserved as-is in a4.*
+**Status: fixed.** `approve_interaction_and_store` takes the epoch that the interaction's
+callback tickets are stored at. The old routes disagreed:
 
-`approve_interaction_and_store` takes the epoch that the interaction's callback tickets are
-stored at. The old routes disagreed, and the disagreement is inherited:
+| route | epoch passed (old) | epoch passed (now) |
+|---|---|---|
+| anonymous post, reply | `Time::from(0)` | the live epoch |
+| rate-limited pseudonymous post | `Time::from(0)` | the live epoch |
+| pseudonymous post, reply-pseudo | the live epoch | the live epoch |
+| badge request | the live epoch | the live epoch |
+| scan | the live epoch | the live epoch |
+| `/api/interact/standard` (bench-only anon post) | `Time::from(0)` | the live epoch |
 
-| route | epoch passed |
-|---|---|
-| anonymous post, reply | `Time::from(0)` |
-| rate-limited pseudonymous post | `Time::from(0)` |
-| pseudonymous post, reply-pseudo | the live epoch |
-| badge request | the live epoch |
-| scan | the live epoch |
-
-**The disagreement is currently unobservable.** The only place a stored `expiration` is
+**The disagreement was unobservable before the fix.** The only place a stored `expiration` is
 consulted at scan time is inside `expirable`-gated branches (zk-callbacks `scan.rs:656/676` and
 the circuit at `823/840`), and our sole callback is `expirable: false` (`circuits.rs`), a flag
-the server enforces on post (`service.rs:204`). So whether a route files at `0` or the live
-epoch changes nothing a scan can see today. Unifying the routes is safe but a no-op.
+the server enforces on post (`service.rs:204`). So whether a route filed at `0` or the live
+epoch changed nothing a scan could see. Unifying the routes was therefore safe to land as a
+no-op: `routes/post.rs::verify_post` now computes `current = epoch(&st.db)` once and passes it
+to every flavour (`Anon`, `Pseudo`, `PseudoRate`); `routes/interact.rs::standard` does the same
+for the bench-only path. Guards the day any callback is made `expirable: true` — see the
+scenario this prevents, and why unifying was necessary, in the original write-up below.
 
-**It becomes a live bug the day any callback is made `expirable: true`.** The post-side check
-`cb.expiration == def.expiration + cur_time` (`service.rs:208`) fires regardless of the flag, so
-the `Time::from(0)` routes store `expiration = 10` (absolute) while the live-epoch routes store
-`10 + epoch`. A live-epoch scan would then read the `Time::from(0)` tickets as already expired
-(`cur_time > 10`) and **silently drop them** — exactly "a callback nobody can ever scan," landing
-on the anonymous and rate-limited paths. Unify the routes (or bind `expiration` relative to the
-scan epoch) *before* introducing any expirable callback. Flagged in `bulletin::verify_and_store`.
+**Why it would have become a live bug.** The post-side check `cb.expiration == def.expiration +
+cur_time` (`service.rs:208`) fires regardless of the `expirable` flag, so a `Time::from(0)`
+route stored `expiration = 10` (absolute) while a live-epoch route stored `10 + epoch`. A
+live-epoch scan would then have read the `Time::from(0)` tickets as already expired
+(`cur_time > 10`) and **silently dropped them** — "a callback nobody can ever scan," on exactly
+the anonymous and rate-limited paths.
 
-The deeper reason the inconsistency is invisible — that the epoch isn't cryptographically bound
-into a scan at all — is **O10**, and that one is not dormant.
+The deeper reason the inconsistency was invisible — that the epoch isn't cryptographically bound
+into a scan at all — is **O10**, and that one is not fixed by this.
 
 *Update (d2).* Serverless has no analogue: every record files its tickets at the epoch it was
 posted in, uniformly, so the `expiration == def.expiration + cur_time` check is consistent by
-construction. This is a fix by not inheriting, not a fix.
+construction. This was already a fix by not inheriting on the serverless side; O3 closes the
+same gap on the as-a-service side.
 
 ### O4. An emoji added by hand in the Slack UI changes nobody's reputation
 
-*Severity: low. Inherited; now explicit.*
-
-Only ratings that arrive through the personas layer count: `/api/react` and the 👍/👎 buttons.
-An emoji a human adds directly in Slack is announced ("Message has been marked for an increase
-in reputation") but is **not** counted — see F2 for why counting it would double every rating
-that came from `/api/react`. The announcement therefore lies a little. Either the announcement
-should go, or the UI reaction should be counted *and* `/api/react` should stop counting its own
-echo. Wants a decision.
+**Status: fixed — decided by the user 2026-08-17: remove the announcement, not count the
+reaction.** Only ratings that arrive through the personas layer count: `/api/react` and the
+👍/👎 buttons. An emoji a human adds directly in Slack was announced ("Message has been marked
+for an increase in reputation") but not counted — see F2 for why counting it would double every
+rating that came from `/api/react`. That announcement lied a little, and this was flagged as
+wanting a decision between two fixes: drop the announcement, or count the UI reaction and make
+`/api/react` stop counting its own echo. The smaller, safer change was chosen — counting the UI
+reaction would have added a new way for `/api/react` and a hand-added emoji to double-count each
+other, for a feature (reacting from inside Slack's own UI rather than through the personas CLI)
+nothing else depends on. `main.rs::events`' `Incoming::Reaction` arm no longer sends any
+message; the emoji is silently acknowledged and not counted, matching what actually happens to
+a member's reputation. `RecordLog::contains` (only used by the removed check) and the
+now-unreachable `emoji_of` helper were removed as dead code.
 
 ### O5. Slack polls are forgotten on restart
 
-*Severity: medium for the moderation story.*
+**Status: fixed.** Signal polls were a file; Slack polls were a `HashMap` in memory only, so a
+Slack ban poll's tally could not be the input to `AllowedToRevoke` — it might not exist by the
+time anyone acted on it. `state::VoteState` (`state/ledger.rs`) now mirrors `PollLog`'s
+open-on-boot/flush-on-mutation JSONL pattern (`SlackPoll` gained `Serialize`/`Deserialize`); the
+two mutation sites in `routes/polls.rs` (`open_slack`'s insert, `slack_vote`'s tally update)
+call `VoteState::flush` after mutating, same discipline `RecordLog`/`PollLog`/`BadgeLog` already
+use. Verified live: opened a Slack poll against a local server, confirmed the row landed in
+`slack_votes.jsonl`, killed and restarted the server on the same data directory, and confirmed
+`/api/slack/poll/context` still resolved the poll's context correctly.
 
-Signal polls are a file; Slack polls are a `HashMap` in memory, as they always have been. So a
-Slack ban poll's tally cannot be the input to `AllowedToRevoke` — it may not exist by the time
-anyone acts on it. Serverless (workstream d) dissolves this by making the tally a client-side
-count over the chat log.
+Serverless (workstream d) dissolves the underlying problem a different way, by making the tally
+a client-side count over the chat log — this fix is for the as-a-service deployment, which still
+needs its own durable state.
 
 ### O6. A folded scan silently drops `k mod N` callbacks
 
@@ -214,10 +236,28 @@ would need a follow-up `conversations.history` lookup.
 
 ### O9. Dropped: the Slack "🧩 Topic" banner
 
-The old socket handler echoed a thread's topic into the thread whenever someone replied. It
-guarded against echoing its own echo by inspecting the message's `block_id`s, which the
-transport abstraction does not expose — so a naive port loops forever. Dropped rather than
-half-ported. Cosmetic; restore with an echo-once-per-thread guard if it is missed.
+**Status: fixed.** The old socket handler echoed a thread's topic into the thread whenever
+someone replied. It guarded against echoing its own echo by inspecting the message's
+`block_id`s, which the transport abstraction does not expose — so a naive port loops forever.
+Dropped rather than half-ported, with the note "restore with an echo-once-per-thread guard if it
+is missed."
+
+Restored with exactly that guard, not the original "every reply" behaviour.
+`ThreadContext` (`state/ledger.rs`) gained a persisted `topic_echoed: bool`
+(`#[serde(default)]`, so existing `*_contexts.jsonl` rows still parse); `ContextLog::
+topic_to_echo(ts)` checks-and-marks it atomically under the state write lock, so two
+near-simultaneous first replies can't both post. `main.rs::events`' `Incoming::Message` arm
+(previously an unconditional `continue`) now calls it whenever a message's `reply_to` names a
+known thread, and posts `"🧵 *Topic:* {thread}"` threaded into it exactly once. The thread's
+*opening* message already announces the topic (`routes/context.rs::slack_new_thread`), so the
+new echo starts `topic_echoed: false` and is triggered by the first reply, not thread creation
+— a reminder for latecomers once a thread starts filling up, since Slack collapses threads by
+default.
+
+Verified live end to end: opened a thread, posted a rate-limited pseudonymous reply into it
+(`post-pseudo-rate`), confirmed the topic banner appeared exactly once, threaded correctly, and
+`topic_echoed` flipped to `true` in `slack_contexts.jsonl`; posted a second reply and confirmed
+no second banner and no loop.
 
 ### O10. A called-back callback (a ban) can be evaded forever by replaying a stale nonmembership range
 
@@ -312,16 +352,30 @@ response, so `send_message` returns `Err("Websocket closing while waiting for a 
 "responder was canceled")` even though the record was delivered. It is intermittent (timing-
 dependent) and depends only on the teardown race, not on anything the caller controls.
 
-**Current handling.** The A1 tests treat it as non-fatal: the receiver's `subscribe`/`ingest` is
-the source of truth, and delivery is confirmed there (`a1_smoke`, `a1_transport`,
-`e2e_record_converges_over_signal` all pass with it tolerated). `PresageTransport::send` still
-surfaces the error to its caller, so the messenger currently sees an occasional spurious send
-failure.
+**Status: fixed** in the production send path, `transport-presage/src/lib.rs::send_fanout` — the
+function `PresageTransport::send` actually calls. Chose the second of the two options below:
+classify "PUT succeeded, bookkeeping raced" as success, but **narrowly**, not with the blanket
+swallow-all-errors the bring-up-only `distribute_group_secret`/`receive_group_secret` helpers
+already used for this same race. `presage::Error::ServiceError(libsignal_service::prelude::
+ServiceError::WsClosing { .. })` — the exact typed variant `send_message`'s post-send bookkeeping
+surfaces when its response arrives after the caller has moved on — is now caught and logged as a
+warning, and the fan-out continues to the next member; every other error (unknown recipient, IO
+error, actually-failed delivery, ...) still aborts and is returned to the caller as before. Type
+match rather than string match, so it does not depend on presage's error-message text staying
+stable across versions.
 
-**To fix (A2-ish).** Either keep the send websocket alive for the bookkeeping (own a longer-lived
-message sender in the actor), or classify "PUT succeeded, bookkeeping raced" as success. The A2
-rework of the send path (personas AEAD under `mk`, §5 of the design doc) is the natural place to
-make send delivery-truthful rather than tied to presage's post-send housekeeping.
+**Previous handling, still true for the bring-up helpers.** The A1 tests, and
+`distribute_group_secret`/`receive_group_secret`, treat *any* `send_message`/`receive_messages`
+error as non-fatal: the receiver's own decode/decrypt is those functions' actual source of truth,
+so swallowing unconditionally there was already safe. `send_fanout` has no such independent
+receiver-side check available to its own caller, which is why its fix stayed narrow instead of
+copying that pattern.
+
+**Still open.** The other option named here — keeping the send websocket alive for the
+bookkeeping instead of tolerating the race after the fact — has not been done; it would touch
+presage's own internals rather than this crate. The A2 rework of the send path (personas AEAD
+under `mk`, §5 of the design doc) remains the natural place to revisit whether delivery can be
+made fully truthful rather than tied to presage's post-send housekeeping at all.
 
 ---
 
@@ -758,10 +812,12 @@ were updated to match.
   real send over each member's pairwise Double Ratchet session. That plumbing is e2c, unstarted.
 - **Re-key triggers (e2d).** `PprfContentCipher::rekey`/`install_rekey` expose the mechanism (install
   a fresh epoch, delete the old one wholesale — pinned by the new `rekey_excludes_the_old_epoch`
-  test) but nothing calls them from a ban/leave/epoch-boundary event yet. Until e2d wires the
-  triggers, a banned member who kept the group secret can still decrypt new content at the Signal
-  layer — their authorisation is still revoked at the proof layer regardless (design doc §7), so
-  this is a content-layer-only gap, the same one A1 always had.
+  test) but nothing calls them from a ban/leave/epoch-boundary event yet. *Update (D16): a blanket
+  cadence trigger is now wired — see D16 for why ban-specific exclusion stays open rather than being
+  closed alongside it.* Until a member is actually excluded, a banned member who kept the group
+  secret can still decrypt new content at the Signal layer within a re-key's cadence window — their
+  authorisation is still revoked at the proof layer regardless (design doc §7), so this is a
+  content-layer-only gap, the same one A1 always had, now bounded rather than unbounded.
 - **The AEAD primitive choice** (AES-256-GCM-SIV via RustCrypto's `aes-gcm-siv`, chosen here for its
   misuse resistance and because it needed no new primitive already absent from the dependency tree)
   is implemented but not yet the subject of an actual cryptographer sign-off — design doc §10 still
@@ -928,3 +984,68 @@ only if the observer sees two *different* `sender` uuids (not device linking) an
 against source (not guessed) for every claim above about how `sealed_sender_decrypt`, `IdentityKeyPair`,
 `PrivateKey::deserialize`, and `confirm_verification_code` actually work. Not yet independently run
 against the staging server — same caution as any unverified entry here applies until it is.
+
+### D16. e2d: a blanket cadence re-key, deliberately not ban-exclusion
+
+**Why not ban-exclusion.** The obvious reading of "re-key on ban" — redistribute a fresh secret to
+every member except the one who was banned — needs something that maps a banned *bulletin object*
+(the ZK layer's anonymous/pseudonymous identity) to a real `ServiceId` to leave out of the pairwise
+fan-out. That mapping does not exist anywhere in this system, and building one would mean
+deliberately linking an anonymous protocol identity to a real account — exactly what D15's shared
+ACI identity keypair exists to *prevent* even the group's own members from doing (§6: "recipients
+[i.e. other members] cannot attribute the account"). So this is not an unwired trigger sitting next
+to an otherwise-solved problem; it is a genuine, unresolved tension between two goals the design
+already committed to. Decided with the user 2026-08-17: implement the one trigger that has no such
+tension — a **blanket** cadence re-key, no exclusion — and leave ban-specific exclusion an explicit,
+disclosed limitation rather than force a resolution that would compromise anonymity to get it.
+
+**What's built.** `transport-presage/src/lib.rs`:
+
+- `Command::Rekey` — the actor generates the next epoch via `PprfContentCipher::rekey`, installs it
+  locally, and fans the wire form out to every member with `rekey_fanout`, which reuses a new shared
+  `fanout_message` helper (`send_fanout` and `rekey_fanout` differ only in what body they send —
+  encrypted content vs. a tagged `DistributedSecret`). `fanout_message` carries forward O12's
+  `WsClosing`-narrow tolerance, since it is the identical race on a different message.
+- `PresageTransport::start`'s new `rekey_period: Option<Duration>` — if `Some`, the actor runs a
+  `tokio::time::interval` inside its existing `tokio::select!` command loop (added; the loop was a
+  plain `while let Some(command) = cmd_rx.recv().await` before) and calls the same rekey-and-fan-out
+  on every tick, with no exclusion logic. The immediate first tick (`tokio::time::interval`'s default)
+  is consumed once before entering the loop, so cadence starts one full period after the secret this
+  actor just installed, not instantly. `None` disables it; `PresageTransport::rekey()` is still
+  callable manually either way, for a caller that wants to key off something other than a timer (e.g.
+  its own barrier/heartbeat).
+- The **receive side** needed a real fix, not just a sender-side addition: the live actor's ordinary
+  content receive loop had no path for a tagged key-distribution message at all — only the separate,
+  bring-up-only `receive_group_secret` function checked for `KEY_DISTRIBUTION_TAG`. A re-key sent to
+  an already-`start()`ed member would have silently fallen through to the content path, failed
+  `BASE64.decode` (the tag contains `:`, deliberately not valid base64), and been dropped as "not one
+  of ours" — indistinguishable in the logs from ordinary background noise. The receive loop now checks
+  the tag first and routes a match to `cipher.install_rekey(..)` instead of `cipher.decrypt(..)`.
+- `encode_key_distribution`/`decode_key_distribution` factor out the tag+base64+JSON wire format,
+  shared by `distribute_group_secret`/`receive_group_secret` (e2c, refactored to use them, behavior
+  unchanged) and the new e2d path — one wire format, one place it's defined, instead of two copies
+  that could silently drift apart.
+
+**What's still open.** Ban-specific exclusion, per the tension above — a banned member who kept a
+recent epoch's key can read content until the next scheduled cadence tick, not until a rekey targeted
+at them specifically; bounded now (by the cadence period) rather than unbounded, which is what this
+decision actually buys. Choosing an actual cadence period for a real deployment is a separate
+judgment call (shorter periods bound exposure more tightly but cost more Signal traffic and CPU per
+member) that this entry does not make. `leave` and `epoch boundary` (the other two triggers §5 names)
+are not wired either — `leave` doesn't have D16's tension (a member leaving is its own action, so
+*something* already knows who) but nothing calls `rekey()` from a leave event yet.
+
+**Build/test status.** Compiles clean across the workspace (`cargo check --workspace --all-targets`),
+clippy-clean on the changed code. Four new unit tests, all passing, exercising the pure logic without
+network access: `key_distribution_round_trips` (the wire format `encode`/`decode` agree with each
+other — a mismatch here would silently drop every re-key at the live receive loop's `decode_key_distribution`
+step, indistinguishable from ordinary content), `ordinary_content_is_not_a_key_distribution_message`
+(no false-positive tag match), `corrupt_key_distribution_payload_is_an_error_not_a_skip` (a
+tagged-but-malformed message is reported, not silently swallowed the same way as "not tagged at
+all"), and `tick_on_none_never_resolves` (the cadence-disabled `select!` branch never fires). The
+existing `pprf_cipher` unit tests (rekey/install_rekey semantics themselves, unmodified by this
+change) still pass. **Not run against a live Signal server** — unlike D14/D15, which have a real
+`cargo run --example` proof against the self-hosted staging server, this has not been exercised
+end-to-end over real Signal (two live actors, one blanket re-key, confirm the second can still
+decrypt post-rekey content). That is the natural next verification step before relying on this in a
+demo, and the same caution the newest end of this document already asks for applies here too.

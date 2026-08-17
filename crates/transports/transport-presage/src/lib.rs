@@ -92,14 +92,15 @@ use base64::Engine as _;
 use futures_util::{StreamExt as _, stream::BoxStream};
 use presage::Manager;
 use presage::libsignal_service::content::{ContentBody, DataMessage};
+use presage::libsignal_service::prelude::ServiceError;
 use presage::libsignal_service::protocol::ServiceId;
 use presage::manager::Registered;
 use presage::model::messages::Received;
 use presage_store_sqlite::SqliteStore;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use transport_api::{
     ConversationId, Incoming, MessageId, Outgoing, Result, Sent, Transport, TransportError,
 };
@@ -124,6 +125,32 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Serializes `secret` into the tagged wire body both [`PresageTransport::
+/// distribute_group_secret`] and the e2d re-key fan-out send. See
+/// [`decode_key_distribution`] for the receiving half.
+fn encode_key_distribution(secret: &DistributedSecret) -> anyhow::Result<String> {
+    let payload = serde_json::to_vec(secret)
+        .map_err(|e| anyhow::anyhow!("serializing the group secret: {e}"))?;
+    Ok(format!("{KEY_DISTRIBUTION_TAG}{}", BASE64.encode(&payload)))
+}
+
+/// If `body` is tagged as a key-distribution message, decodes the [`DistributedSecret`]
+/// it carries. Returns `None` if it isn't tagged at all (ordinary content or human
+/// chatter) so a caller can tell "not one of these" apart from "one of these, but
+/// corrupt" (`Some(Err(_))`).
+fn decode_key_distribution(body: &str) -> Option<anyhow::Result<DistributedSecret>> {
+    let b64 = body.strip_prefix(KEY_DISTRIBUTION_TAG)?;
+    Some(
+        BASE64
+            .decode(b64)
+            .map_err(|e| anyhow::anyhow!("decoding key-distribution payload: {e}"))
+            .and_then(|payload| {
+                serde_json::from_slice(&payload)
+                    .map_err(|e| anyhow::anyhow!("parsing the group secret: {e}"))
+            }),
+    )
+}
+
 /// A command the [`PresageTransport`] hands to its actor thread.
 enum Command {
     /// Encrypt `plaintext` under the PPRF-derived single-use message key and fan it
@@ -132,6 +159,17 @@ enum Command {
     Send {
         plaintext: Vec<u8>,
         reply: oneshot::Sender<std::result::Result<u64, anyhow::Error>>,
+    },
+    /// e2d — generate the next epoch's secret, install it locally, and fan it out to
+    /// every member over the pairwise channel (the same mechanism e2c's
+    /// `distribute_group_secret` uses). **Blanket**, not exclusion-based: every
+    /// current member gets it, including a member who was just banned at the ZK
+    /// layer. Ban-specific exclusion would need linking an anonymous bulletin object
+    /// to a real `ServiceId`, which this system deliberately does not do (see
+    /// FINDINGS.md, D13) — this only buys bounded forward secrecy via cadence, not
+    /// immediate post-ban read exclusion.
+    Rekey {
+        reply: oneshot::Sender<anyhow::Result<()>>,
     },
 }
 
@@ -320,9 +358,7 @@ impl PresageTransport {
             .await
             .map_err(|e| anyhow::anyhow!("loading the distributor account: {e}"))?;
 
-        let payload = serde_json::to_vec(secret)
-            .map_err(|e| anyhow::anyhow!("serializing the group secret: {e}"))?;
-        let body = format!("{KEY_DISTRIBUTION_TAG}{}", BASE64.encode(&payload));
+        let body = encode_key_distribution(secret)?;
 
         for member in members {
             let timestamp = now_millis();
@@ -398,14 +434,10 @@ impl PresageTransport {
                 else {
                     continue;
                 };
-                let Some(b64) = body.strip_prefix(KEY_DISTRIBUTION_TAG) else {
+                let Some(decoded) = decode_key_distribution(body) else {
                     continue; // not a key-distribution message — e.g. ordinary content
                 };
-                let payload = BASE64
-                    .decode(b64)
-                    .map_err(|e| anyhow::anyhow!("decoding key-distribution payload: {e}"))?;
-                let secret: DistributedSecret = serde_json::from_slice(&payload)
-                    .map_err(|e| anyhow::anyhow!("parsing the group secret: {e}"))?;
+                let secret = decoded?;
                 // Same reasoning as `distribute_group_secret`: presage runs "newly
                 // seen contact" bookkeeping in the background right after decrypting
                 // a first-contact message, and it can lose its response if `manager`
@@ -426,6 +458,10 @@ impl PresageTransport {
     /// - `group_secret` — the group's shared secret ([`create_group_secret`] once,
     ///   then the same [`DistributedSecret`] for every member).
     /// - `conversation` — the logical conversation id these records belong to.
+    /// - `rekey_period` — e2d's blanket cadence trigger: if `Some`, the actor
+    ///   re-keys and redistributes to every member on this period, with no
+    ///   exclusion (see [`Command::Rekey`]'s docs for why not). `None` disables it;
+    ///   [`rekey`](Self::rekey) is still callable manually either way.
     ///
     /// Spawns the actor thread and waits for it to load the [`Manager`] and install the
     /// cipher before returning, so a returned transport is ready to send/subscribe.
@@ -436,6 +472,7 @@ impl PresageTransport {
         members: Vec<ServiceId>,
         group_secret: DistributedSecret,
         conversation: impl Into<ConversationId>,
+        rekey_period: Option<Duration>,
     ) -> anyhow::Result<Self> {
         let store_url = store_url.into();
         let conversation = conversation.into();
@@ -474,10 +511,13 @@ impl PresageTransport {
                 local.block_on(
                     &rt,
                     actor_main(
-                        store_url,
-                        members,
-                        group_secret,
-                        actor_conv,
+                        ActorConfig {
+                            store_url,
+                            members,
+                            group_secret,
+                            conversation: actor_conv,
+                            rekey_period,
+                        },
                         cmd_rx,
                         actor_incoming,
                         ready_tx,
@@ -502,20 +542,50 @@ impl PresageTransport {
     pub fn conversation(&self) -> &ConversationId {
         &self.conversation
     }
+
+    /// e2d — manually trigger a blanket re-key: generate the next epoch's secret,
+    /// install it locally, and redistribute it to every member. Useful for a
+    /// caller that wants to key re-keying to something other than the built-in
+    /// cadence (e.g. its own barrier/heartbeat) without needing a new `Command`
+    /// variant. The same operation [`start`](Self::start)'s `rekey_period` cadence
+    /// runs automatically.
+    pub async fn rekey(&self) -> anyhow::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Rekey { reply })
+            .map_err(|_| anyhow::anyhow!("presage actor thread is gone"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("presage actor dropped the reply"))?
+    }
+}
+
+/// [`actor_main`]'s configuration, grouped so the function itself stays under
+/// clippy's argument-count lint — these five are set once at [`PresageTransport::
+/// start`] and never change again, unlike the channel endpoints next to them.
+struct ActorConfig {
+    store_url: String,
+    members: Vec<ServiceId>,
+    group_secret: DistributedSecret,
+    conversation: ConversationId,
+    rekey_period: Option<Duration>,
 }
 
 /// The actor: owns the [`Manager`] and the [`pprf_cipher`], runs the receive loop
 /// and the send-command loop on one current-thread runtime + `LocalSet`.
 async fn actor_main(
-    store_url: String,
-    members: Vec<ServiceId>,
-    group_secret: DistributedSecret,
-    conversation: ConversationId,
+    config: ActorConfig,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     incoming_tx: broadcast::Sender<Incoming>,
     ready_tx: oneshot::Sender<std::result::Result<(), anyhow::Error>>,
 ) {
     use presage::model::identity::OnNewIdentity;
+    let ActorConfig {
+        store_url,
+        members,
+        group_secret,
+        conversation,
+        rekey_period,
+    } = config;
 
     // Load the registered account and install the group secret's key schedule.
     let store = match SqliteStore::open(&store_url, OnNewIdentity::Trust).await {
@@ -565,6 +635,26 @@ async fn actor_main(
             else {
                 continue;
             };
+            // e2d: a re-key (this actor's own blanket cadence, or a manual
+            // `rekey()` call, on the *sender's* side) arrives here as an ordinary
+            // incoming message, tagged so it's distinguishable before any attempt
+            // to decrypt it as content. `KEY_DISTRIBUTION_TAG` is not valid
+            // base64, so pre-e2d this always fell through to the content path
+            // below and was silently dropped as "not one of ours" — see FINDINGS,
+            // D13.
+            if let Some(decoded) = decode_key_distribution(b64) {
+                match decoded {
+                    Ok(secret) => {
+                        let mut c = recv_cipher.lock().await;
+                        match c.install_rekey(secret) {
+                            Ok(()) => info!("installed a new epoch via an e2d re-key"),
+                            Err(e) => warn!(%e, "rejected an incoming re-key"),
+                        }
+                    }
+                    Err(e) => warn!(%e, "received a malformed key-distribution message — dropping"),
+                }
+                continue;
+            }
             let ciphertext = match BASE64.decode(b64) {
                 Ok(ct) => ct,
                 Err(_) => continue, // not one of ours (or human chatter)
@@ -614,14 +704,41 @@ async fn actor_main(
         warn!("presage receive stream ended");
     });
 
-    // Command loop: encrypt + fan out sends. Ends when the transport (and its cmd_tx)
-    // is dropped, which winds the thread down.
+    // e2d cadence: consume the immediate first tick (`tokio::time::interval` fires
+    // once right away by default) so re-keying starts one full period after the
+    // group secret this actor just installed, not at the same instant.
+    let mut rekey_interval = match rekey_period {
+        Some(period) => {
+            let mut iv = tokio::time::interval(period);
+            iv.tick().await;
+            Some(iv)
+        }
+        None => None,
+    };
+
+    // Command loop: encrypt + fan out sends, and (if configured) re-key on a
+    // cadence. Ends when the transport (and its cmd_tx) is dropped, which winds
+    // the thread down.
     let mut send_manager = manager;
-    while let Some(command) = cmd_rx.recv().await {
-        match command {
-            Command::Send { plaintext, reply } => {
-                let result = send_fanout(&mut send_manager, &cipher, &members, plaintext).await;
-                let _ = reply.send(result);
+    loop {
+        tokio::select! {
+            command = cmd_rx.recv() => {
+                let Some(command) = command else { break };
+                match command {
+                    Command::Send { plaintext, reply } => {
+                        let result = send_fanout(&mut send_manager, &cipher, &members, plaintext).await;
+                        let _ = reply.send(result);
+                    }
+                    Command::Rekey { reply } => {
+                        let result = rekey_fanout(&mut send_manager, &cipher, &members).await;
+                        let _ = reply.send(result);
+                    }
+                }
+            }
+            _ = tick(&mut rekey_interval) => {
+                if let Err(e) = rekey_fanout(&mut send_manager, &cipher, &members).await {
+                    warn!(error = %e, "e2d cadence re-key failed");
+                }
             }
         }
     }
@@ -634,6 +751,60 @@ async fn actor_main(
     recv_task.abort();
     let _ = recv_task.await;
     drop(send_manager);
+}
+
+/// Awaits `interval`'s next tick if it exists, otherwise never resolves — lets a
+/// `tokio::select!` branch be unconditionally present in the loop while still being
+/// a no-op when there is no cadence configured (`rekey_period: None`), without an
+/// `if` guard racing a panicking `unwrap` on the disabled branch.
+async fn tick(interval: &mut Option<tokio::time::Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Sends `body` to every member as an ordinary 1:1 Signal message under one shared
+/// timestamp (so recipients see it as one logical message). Shared by
+/// [`send_fanout`] (content) and [`rekey_fanout`] (e2d key distribution) — the only
+/// difference between the two is what `body` is.
+async fn fanout_message(
+    manager: &mut Manager<SqliteStore, Registered>,
+    members: &[ServiceId],
+    body: String,
+) -> anyhow::Result<u64> {
+    let timestamp = now_millis();
+
+    for member in members {
+        let content = ContentBody::DataMessage(DataMessage {
+            body: Some(body.clone()),
+            timestamp: Some(timestamp),
+            ..Default::default()
+        });
+        if let Err(e) = manager.send_message(*member, content, timestamp).await {
+            // FINDINGS O12: `send_message` does the PUT (delivery) and only then does
+            // post-send bookkeeping (self-sync, contact upsert) on the same websocket,
+            // in the background. If that bookkeeping's response arrives after the
+            // caller has moved on, presage surfaces it as `ServiceError::WsClosing`
+            // even though the message already delivered. Narrow to that exact variant
+            // — a genuinely different failure (unknown recipient, IO error, ...) still
+            // aborts the fan-out below, unlike the blanket swallow the bring-up-only
+            // `distribute_group_secret`/`receive_group_secret` helpers use.
+            if matches!(&e, presage::Error::ServiceError(ServiceError::WsClosing { .. })) {
+                warn!(
+                    error = %e,
+                    ?member,
+                    "fanout_message: post-send bookkeeping raced the websocket teardown \
+                     after delivery already succeeded — continuing"
+                );
+            } else {
+                return Err(anyhow::anyhow!("delivering to {member:?}: {e}"));
+            }
+        }
+    }
+    Ok(timestamp)
 }
 
 /// Encrypt `plaintext` under a fresh single-use PPRF message key and deliver it to
@@ -649,21 +820,25 @@ async fn send_fanout(
         let mut c = cipher.lock().await;
         c.encrypt(&plaintext)?
     };
-    let b64 = BASE64.encode(&ciphertext);
-    let timestamp = now_millis();
+    fanout_message(manager, members, BASE64.encode(&ciphertext)).await
+}
 
-    for member in members {
-        let body = ContentBody::DataMessage(DataMessage {
-            body: Some(b64.clone()),
-            timestamp: Some(timestamp),
-            ..Default::default()
-        });
-        manager
-            .send_message(*member, body, timestamp)
-            .await
-            .map_err(|e| anyhow::anyhow!("delivering to {member:?}: {e}"))?;
-    }
-    Ok(timestamp)
+/// e2d: generate the next epoch's secret, install it into this actor's own cipher,
+/// and fan the wire form out to every member exactly the way [`PresageTransport::
+/// distribute_group_secret`] does for the initial secret. Blanket, not
+/// exclusion-based — see [`Command::Rekey`]'s docs.
+async fn rekey_fanout(
+    manager: &mut Manager<SqliteStore, Registered>,
+    cipher: &Rc<Mutex<PprfContentCipher>>,
+    members: &[ServiceId],
+) -> anyhow::Result<()> {
+    let wire = {
+        let mut c = cipher.lock().await;
+        let mut rng = rand08::rngs::OsRng;
+        c.rekey(&mut rng)?
+    };
+    fanout_message(manager, members, encode_key_distribution(&wire)?).await?;
+    Ok(())
 }
 
 #[async_trait]
@@ -732,5 +907,65 @@ impl Transport for PresageTransport {
             }
         });
         Ok(stream.boxed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The e2d fan-out and the live actor's receive loop never round-trip a
+    /// `DistributedSecret` through a real Signal message in this test — that needs
+    /// the staging server (`b2_shared_identity`-style, not run here). What's
+    /// checked, without any network access: the wire encoding both sides actually
+    /// agree on, since a mismatch here would silently drop every re-key at the
+    /// `decode_key_distribution` step in the live receive loop (returns `None`,
+    /// indistinguishable from "ordinary content" — see the receive loop's comment).
+    #[test]
+    fn key_distribution_round_trips() {
+        let (_cipher, secret) = PprfContentCipher::create(&mut rand08::rngs::OsRng);
+
+        let body = encode_key_distribution(&secret).expect("encode");
+        assert!(body.starts_with(KEY_DISTRIBUTION_TAG));
+
+        let decoded = decode_key_distribution(&body)
+            .expect("tagged body must decode to Some(..)")
+            .expect("well-formed payload must parse");
+        // `DistributedSecret` deliberately derives neither `Debug` nor `PartialEq`
+        // (it's zeroized key material) — compare the public fields directly.
+        assert_eq!(decoded.epoch, secret.epoch);
+        assert_eq!(decoded.seed, secret.seed);
+    }
+
+    /// An ordinary content body (never tagged) must not be mistaken for a
+    /// key-distribution message — `decode_key_distribution` returning `Some` here
+    /// would route real content into `install_rekey` instead of `decrypt`.
+    #[test]
+    fn ordinary_content_is_not_a_key_distribution_message() {
+        assert!(decode_key_distribution("not tagged at all").is_none());
+        // Plausible A2 content: base64, no `:`, so it must not collide with the tag.
+        assert!(decode_key_distribution("aGVsbG8gd29ybGQ=").is_none());
+    }
+
+    /// A tagged-but-corrupt body must be reported as an error, not silently dropped
+    /// as "not one of these" — the live receive loop logs and continues either way,
+    /// but conflating the two would make a genuine wire-format regression as quiet
+    /// as ordinary background noise.
+    #[test]
+    fn corrupt_key_distribution_payload_is_an_error_not_a_skip() {
+        let malformed = format!("{KEY_DISTRIBUTION_TAG}not-valid-base64!!!");
+        assert!(decode_key_distribution(&malformed).expect("tagged, must be Some").is_err());
+    }
+
+    /// `tick(&mut None)` must never resolve — a `tokio::select!` branch built on it
+    /// (the disabled `rekey_period: None` case) has to lose every race to the
+    /// command branch, not fire spuriously.
+    #[tokio::test]
+    async fn tick_on_none_never_resolves() {
+        let mut none: Option<tokio::time::Interval> = None;
+        tokio::select! {
+            _ = tick(&mut none) => panic!("tick(&mut None) resolved"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
     }
 }

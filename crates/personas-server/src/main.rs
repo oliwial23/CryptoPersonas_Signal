@@ -193,50 +193,18 @@ async fn events(
 
     while let Some(event) = stream.next().await {
         match event {
-            // An emoji reaction is *acknowledged*, not counted.
+            // An emoji reaction is neither counted nor announced.
             //
             // This looks like an omission and is not. `/api/react` — the route a client calls
             // to rate a message — already records the rating and then asks the messenger to
             // add the emoji. The messenger duly reports that emoji back to us as a
             // `reaction_added` event. Counting it here as well would apply every rating
-            // twice. (The consequence, inherited from the as-a-service server: an emoji added
-            // by hand in the Slack UI is announced but changes no one's reputation. Only a
-            // rating that came through the personas layer counts. The rating buttons below
-            // are the in-app path that does.)
-            Incoming::Reaction {
-                conversation,
-                target,
-                emoji,
-                ..
-            } => {
-                let delta = match state::emoji_name(emoji_of(&emoji)) {
-                    "upvote" => 1,
-                    "downvote" => -1,
-                    // A flag or a ban suggestion is a prompt for a human to open a ban poll.
-                    // It changes nobody's standing on its own.
-                    _ => continue,
-                };
-
-                // A reaction to something the server never posted has no callback behind it.
-                if !state.read().await.channel(ns).records.contains(&target) {
-                    continue;
-                }
-
-                let notice = if delta > 0 {
-                    "Message has been marked for an increase in reputation"
-                } else {
-                    "Message has been marked for a decrease in reputation due to problematic \
-                     content"
-                };
-
-                let transport = state.read().await.channel(ns).transport.clone();
-                let mut msg = transport_api::Outgoing::new(conversation, notice);
-                msg.reply_to = Some(target.clone());
-
-                if let Err(e) = transport.send(msg).await {
-                    warn!("could not acknowledge the reaction on {target}: {e}");
-                }
-            }
+            // twice (FINDINGS F2). That leaves an emoji added by hand in the Slack UI inert —
+            // it changes no one's reputation — and this used to still send a "marked for an
+            // increase/decrease" notice on every `reaction_added` regardless, which lied about
+            // the hand-added case (FINDINGS O4). Only a rating that came through the personas
+            // layer counts; the rating buttons below are the in-app path that does.
+            Incoming::Reaction { .. } => continue,
 
             // The 👍/👎 buttons under a persona post. These *are* the personas layer's rating
             // path — no messenger reaction is added in response, so there is nothing to
@@ -278,19 +246,42 @@ async fn events(
                 }
             }
 
-            // A member's own message is not a rating. Serverless is what reads these.
-            Incoming::Message { .. } => continue,
-        }
-    }
-}
+            // A member's own message is not a rating — serverless is what reads these for
+            // content. As-a-service reads only one thing out of it: whether this is a
+            // reply into a thread whose topic hasn't been echoed back yet (FINDINGS O9).
+            Incoming::Message {
+                conversation,
+                reply_to,
+                ..
+            } => {
+                let Some(thread_ts) = reply_to else { continue };
 
-/// Slack reports reactions by shortname (`+1`), Signal by codepoint (`👍`). The ledger speaks
-/// codepoints.
-fn emoji_of(emoji: &str) -> &str {
-    match emoji {
-        "+1" | "thumbsup" => "👍",
-        "-1" | "thumbsdown" => "👎",
-        other => other,
+                let topic = state
+                    .write()
+                    .await
+                    .channel_mut(ns)
+                    .contexts
+                    .topic_to_echo(&thread_ts.0);
+
+                let topic = match topic {
+                    Ok(Some(topic)) => topic,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        warn!("could not record the thread topic echo: {e}");
+                        continue;
+                    }
+                };
+
+                let transport = state.read().await.channel(ns).transport.clone();
+                let mut msg =
+                    transport_api::Outgoing::new(conversation, format!("🧵 *Topic:* {topic}"));
+                msg.reply_to = Some(thread_ts);
+
+                if let Err(e) = transport.send(msg).await {
+                    warn!("could not echo the thread topic: {e}");
+                }
+            }
+        }
     }
 }
 

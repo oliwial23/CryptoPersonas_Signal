@@ -270,19 +270,39 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         }
 
         Command::Scan => {
-            println!("Scanning...");
+            // A sweep with k outstanding callbacks takes k `scan` proofs, one per
+            // callback (FINDINGS O2) — loop the whole sweep here instead of making the
+            // caller re-invoke `scan` k times and risk running another command
+            // mid-sweep, which panics upstream.
+            let total = personas.outstanding_callbacks()?;
+            if total == 0 {
+                println!("nothing to scan");
+            } else {
+                let mut i = 0;
+                loop {
+                    i += 1;
+                    println!("scanning ({i}/{total})...");
 
-            let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.scan()).await??;
+                    let pc = personas.clone();
+                    let proof = spawn_blocking(move || pc.scan()).await??;
 
-            let res = http
-                .post(url("api/interact/scan")?)
-                .body(proof)
-                .send()
-                .await?;
+                    let res = http
+                        .post(url("api/interact/scan")?)
+                        .body(proof)
+                        .send()
+                        .await?;
+                    show(res).await?;
 
-            show(res).await?;
-            sync_badges(personas);
+                    if !personas.is_scanning()? {
+                        break;
+                    }
+                }
+                println!(
+                    "scan complete; {} callback(s) now outstanding",
+                    personas.outstanding_callbacks()?
+                );
+                sync_badges(personas);
+            }
         }
 
         Command::ScanFolding => {
