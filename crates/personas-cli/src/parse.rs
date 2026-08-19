@@ -126,12 +126,46 @@ pub enum Command {
     GetContexts,
 
     /// Privacy Pass (FINDINGS O7): request one anonymous, unlinkable ticket and
-    /// redeem it in the same call. `-b` is the argument the redemption carries
-    /// (opaque; matches whatever a later callback would take).
-    PrivPassTicket {
-        #[arg(long = "arg", short = 'b', default_value = "0")]
-        arg: u64,
+    /// stash it locally. Separate from redeeming it — the redeem commands below
+    /// pull from this stash, possibly in a completely separate invocation later.
+    PrivPassRequest,
+
+    /// Privacy Pass (FINDINGS O7): redeem a previously-stashed ticket (see
+    /// `priv-pass-request`) for a badge. `-i` is 1 Faculty, 2 Student, 3
+    /// Industry — see `personas_core::privpass` for why this skips the usual
+    /// eligibility proof.
+    PrivPassBadge {
+        #[arg(long = "index", short = 'i')]
+        index: u32,
     },
+
+    /// Privacy Pass (FINDINGS O7): redeem a previously-stashed ticket (see
+    /// `priv-pass-request`) to post one message with no persona at all. `-t`
+    /// (Signal only) threads it as a reply.
+    PrivPassPost {
+        #[arg(long, short = 'm')]
+        message: String,
+        #[arg(long = "channel", short = 'g', alias = "group-id")]
+        channel: String,
+        #[arg(long = "timestamp", short = 't')]
+        reply_to: Option<u64>,
+    },
+
+    /// Privacy Pass (FINDINGS O7): redeem a previously-stashed ticket (see
+    /// `priv-pass-request`) to post one message under a fresh, ticket-derived
+    /// pseudonym. `-t` (Signal only) threads it as a reply.
+    PrivPassPseudoPost {
+        #[arg(long, short = 'm')]
+        message: String,
+        #[arg(long = "channel", short = 'g', alias = "group-id")]
+        channel: String,
+        #[arg(long = "timestamp", short = 't')]
+        reply_to: Option<u64>,
+    },
+
+    /// Privacy Pass (FINDINGS O7): redeem a previously-stashed ticket (see
+    /// `priv-pass-request`) for a fixed +1 reputation bump.
+    PrivPassReputation,
 
     /// Generate a new pseudonym.
     GenPseudo,

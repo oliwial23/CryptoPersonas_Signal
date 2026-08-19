@@ -29,7 +29,7 @@ use crate::bulletin::epoch;
 use crate::error::{AppError, AppResult, ok};
 use crate::state::{Namespace, ServerLock, ServerState};
 
-type Callback = CallbackCom<F, F, PlainTikCrypto<F>>;
+pub(crate) type Callback = CallbackCom<F, F, PlainTikCrypto<F>>;
 
 /// Invoke a callback with an argument.
 ///
@@ -37,7 +37,11 @@ type Callback = CallbackCom<F, F, PlainTikCrypto<F>>;
 /// object, and the circuit the member will later scan with enforces it. A service that
 /// invoked a ban ticket with a "make me an admin" argument would produce a callback no scan
 /// would accept.
-fn call(st: &mut ServerState, cb: Callback, arg: F) -> AppResult<()> {
+///
+/// `pub(crate)`: also used by `routes::privpass::redeem_badge`, which invokes the badge
+/// flag directly rather than going through `approve_badge`'s admin-approval step — see
+/// that route's docs for why that's an accepted, disclosed simplification for now.
+pub(crate) fn call(st: &mut ServerState, cb: Callback, arg: F) -> AppResult<()> {
     let called = st
         .db
         .call(cb, arg, FakeSigPrivkey::sk())

@@ -60,6 +60,49 @@ impl<U: UserData<F>> BatchUser<U> {
             valid_pointer: 0,
         }
     }
+
+    /// Rebuild a `BatchUser` from previously-exported bookkeeping (see the
+    /// `*_batched_callbacks`/`pointer`/`valid_pointer` accessors below), so a caller
+    /// can persist ticket-request state across separate process invocations instead
+    /// of requesting and redeeming within one call.
+    pub fn from_parts(
+        user: User<F, U>,
+        outstanding_batched_callbacks: Vec<(Fr, usize)>,
+        validated_batched_callbacks: Vec<G>,
+        pointer: usize,
+        valid_pointer: usize,
+    ) -> Self {
+        Self {
+            user,
+            outstanding_batched_callbacks,
+            validated_batched_callbacks,
+            pointer,
+            valid_pointer,
+        }
+    }
+
+    /// Tickets that have been blindly issued (`batch_issue_tickets`) but not yet
+    /// validated (`store_validated_tickets`) — each is `(blind factor, index into
+    /// `self.user`'s callback list)`.
+    pub fn outstanding_batched_callbacks(&self) -> &[(Fr, usize)] {
+        &self.outstanding_batched_callbacks
+    }
+
+    /// Tickets that have been validated and are ready to redeem
+    /// (`use_validated_ticket`) — the deblinded curve points.
+    pub fn validated_batched_callbacks(&self) -> &[G] {
+        &self.validated_batched_callbacks
+    }
+
+    /// How many of `outstanding_batched_callbacks` have already been validated.
+    pub fn pointer(&self) -> usize {
+        self.pointer
+    }
+
+    /// How many of `validated_batched_callbacks` have already been redeemed.
+    pub fn valid_pointer(&self) -> usize {
+        self.valid_pointer
+    }
 }
 
 impl<U: UserData<F>> Deref for BatchUser<U> {

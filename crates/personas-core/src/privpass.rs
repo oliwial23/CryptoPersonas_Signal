@@ -10,6 +10,11 @@
 //! tickets from one interaction at once — `BATCHSIZE > 1` — which would need a new
 //! interaction type with more than one callback; deliberately not built here.)
 //!
+//! Requesting and redeeming can be separate steps, in separate process invocations —
+//! see `load_stash`/`save_stash`. `batch-zkc` is a first-party crate in this
+//! workspace, not an external dependency, so the accessors and `BatchUser::from_parts`
+//! this needs live there directly rather than being worked around from here.
+//!
 //! `ark_grumpkin::Fq` is a literal re-export of `ark_bn254::Fr` (`pub use ark_bn254::
 //! {Fr as Fq, ...}` in `ark-grumpkin`, because Grumpkin is BN254's curve-cycle
 //! partner) — so `batch-zkc`'s field and [`F`] are the identical Rust type, not
@@ -18,6 +23,7 @@
 //! ordinary elliptic curve unrelated to that identity — nothing unusual there.
 
 use ark_ec::PrimeGroup;
+use ark_ff::PrimeField;
 use ark_grumpkin::{Fr as IssuerScalar, Projective as IssuerGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use rand::{CryptoRng, Rng, RngCore};
@@ -32,7 +38,9 @@ use zk_callbacks::generic::bulletin::PublicUserBul;
 use zk_callbacks::generic::object::{Com, Nul};
 use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
-use crate::circuits::{get_standard_interaction, MsgUser, StandInt};
+use crate::circuits::{
+    get_standard_interaction, MsgUser, StandInt, BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG,
+};
 use crate::params::ParamsError;
 use crate::{Args, ArgsVar, Cr, F, H, OStore, Snark, PK, VK};
 
@@ -185,6 +193,103 @@ pub fn request_ticket<Bul: PublicUserBul<F, MsgUser>>(
     )
 }
 
+// ---------------------------------------------------------------------------------------
+// Client-side ticket stash: persisting `PrivPassUser`'s bookkeeping — which of
+// `batch-zkc`'s `BatchUser` fields aren't part of `User` and so aren't already covered
+// by `PersonaClient::save_user`/`load_user` — so requesting a ticket and redeeming it
+// can be separate CLI invocations instead of one round trip. `Compress::No`, matching
+// `load_or_create_issuer_keys`/`ensure_batch_ticket_keys` above: this is an on-disk
+// artifact, not wire traffic, so the wire-encoding section below's `Compress::Yes`-style
+// convention doesn't apply.
+// ---------------------------------------------------------------------------------------
+
+/// Load a stashed [`PrivPassUser`] from `path`, wrapping `user` (already loaded the
+/// normal way, e.g. via `PersonaClient::load_user`) — or a fresh, empty stash if no
+/// file exists yet (nothing outstanding or validated).
+pub fn load_stash(
+    path: &Path,
+    user: zk_callbacks::generic::user::User<F, MsgUser>,
+) -> Result<PrivPassUser, ParamsError> {
+    if !path.exists() {
+        return Ok(PrivPassUser::create(user));
+    }
+    let bytes = fs::read(path)?;
+    let mut reader = &bytes[..];
+
+    let outstanding_len = read_u64(&mut reader)?;
+    let mut outstanding = Vec::with_capacity(outstanding_len as usize);
+    for _ in 0..outstanding_len {
+        let blind = IssuerScalar::deserialize_with_mode(&mut reader, Compress::No, Validate::Yes)?;
+        let index = read_u64(&mut reader)?;
+        outstanding.push((blind, index as usize));
+    }
+
+    let validated_len = read_u64(&mut reader)?;
+    let mut validated = Vec::with_capacity(validated_len as usize);
+    for _ in 0..validated_len {
+        let point = IssuerGroup::deserialize_with_mode(&mut reader, Compress::No, Validate::Yes)?;
+        validated.push(point);
+    }
+
+    let pointer = read_u64(&mut reader)? as usize;
+    let valid_pointer = read_u64(&mut reader)? as usize;
+
+    Ok(PrivPassUser::from_parts(
+        user,
+        outstanding,
+        validated,
+        pointer,
+        valid_pointer,
+    ))
+}
+
+/// Persist `batch_user`'s ticket-request bookkeeping to `path`. Its own `user` field
+/// is the caller's responsibility to save separately, the normal way — this only
+/// covers the bookkeeping `batch-zkc` adds on top.
+pub fn save_stash(path: &Path, batch_user: &PrivPassUser) -> Result<(), ParamsError> {
+    let mut bytes = Vec::new();
+
+    let outstanding = batch_user.outstanding_batched_callbacks();
+    bytes.extend_from_slice(&(outstanding.len() as u64).to_le_bytes());
+    for (blind, index) in outstanding {
+        blind.serialize_with_mode(&mut bytes, Compress::No)?;
+        bytes.extend_from_slice(&(*index as u64).to_le_bytes());
+    }
+
+    let validated = batch_user.validated_batched_callbacks();
+    bytes.extend_from_slice(&(validated.len() as u64).to_le_bytes());
+    for point in validated {
+        point.serialize_with_mode(&mut bytes, Compress::No)?;
+    }
+
+    bytes.extend_from_slice(&(batch_user.pointer() as u64).to_le_bytes());
+    bytes.extend_from_slice(&(batch_user.valid_pointer() as u64).to_le_bytes());
+
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    // Write beside the target and rename over it, matching every other on-disk store
+    // in this service — a crash mid-write must not leave a truncated stash behind.
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn read_u64(reader: &mut &[u8]) -> Result<u64, ParamsError> {
+    if reader.len() < 8 {
+        return Err(ParamsError::Serialization(
+            ark_serialize::SerializationError::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "stash file is shorter than expected — corrupt or truncated",
+            )),
+        ));
+    }
+    let (int_bytes, rest) = reader.split_at(8);
+    *reader = rest;
+    Ok(u64::from_le_bytes(int_bytes.try_into().unwrap()))
+}
+
 /// The server's side of a ticket request: check the blinding proof, then blind-sign
 /// the requested batch under the issuer key. **Must be called after** the standard
 /// interaction has already been appended to the bulletin (`verify_and_store`) — its
@@ -270,6 +375,58 @@ fn clone_redemption(r: &TicketRedemption) -> TicketRedemption {
 }
 
 // ---------------------------------------------------------------------------------------
+// Redeeming for a specific action. Deliberately not a free-form argument the redeemer
+// picks (that would let anyone self-grant any badge, or worse, self-ban/ban others, with
+// no eligibility check — see `docs/FINDINGS.md` O7's discussion) — each action here is
+// narrow and specific, matching how the rest of the service already works: `ban`,
+// `reputation`, `approve_badge` are separate routes, never one "invoke with any argument"
+// endpoint.
+// ---------------------------------------------------------------------------------------
+
+/// The three badges a ticket can be redeemed for — `1` Faculty, `2` Student, `3`
+/// Industry, matching `approve_badge`'s own numbering. Anything else is rejected.
+pub fn badge_flag(index: u32) -> Option<F> {
+    match index {
+        1 => Some(F::from(BADGE1_FLAG)),
+        2 => Some(F::from(BADGE2_FLAG)),
+        3 => Some(F::from(BADGE3_FLAG)),
+        _ => None,
+    }
+}
+
+/// A one-time pseudonym for a redeemed ticket, used only for `redeem_pseudo_post`.
+///
+/// Deliberately **not** derived from the member's own secret key the way a real
+/// persona is (`persona::pseudonym`) — that would require re-proving `claimed =
+/// H(sk, context)`, defeating the point of using the ticket as authorization instead.
+/// Instead it's derived from the ticket itself: unique per ticket (so two redemptions
+/// never collide), and — because a ticket only exists once it's been through blind
+/// issuance — unlinkable to whichever member requested it or to any of their other
+/// posts, including ones under this same mechanism.
+pub fn ticket_pseudonym(redemption: &TicketRedemption) -> F {
+    F::from_le_bytes_mod_order(&redemption_key(redemption))
+}
+
+/// What a post-shaped redemption submits: a redemption plus the message, channel,
+/// and (Signal only) an optional message timestamp to reply to. Shared by all four
+/// posting flavours (anon/pseudonymous × plain/reply) — which one a request means is
+/// decided by which route it's sent to, not by a field here. Bundled because
+/// `TicketRedemption` (from `batch-zkc`) has no room for extra fields and isn't ours
+/// to extend.
+pub struct PostRedemption {
+    pub redemption: TicketRedemption,
+    pub message: String,
+    pub channel: String,
+    pub reply_to: Option<u64>,
+}
+
+/// What `redeem_badge` submits: a redemption plus which badge (see [`badge_flag`]).
+pub struct BadgeRedemption {
+    pub redemption: TicketRedemption,
+    pub index: u32,
+}
+
+// ---------------------------------------------------------------------------------------
 // Wire encoding. None of `batch-zkc`'s own wrapper structs derive `CanonicalSerialize` —
 // only the zk-callbacks types they wrap (`ExecutedMethod`, `CallbackCom`) do — so each
 // field is serialized in a fixed order and read back in the same order, the same pattern
@@ -339,4 +496,124 @@ pub fn decode_redemption(bytes: &[u8]) -> Result<TicketRedemption, ark_serialize
         callback,
         mac,
     })
+}
+
+pub fn encode_post_redemption(r: &PostRedemption) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+    let mut bytes = encode_redemption(&r.redemption)?;
+    write_string(&mut bytes, &r.message);
+    write_string(&mut bytes, &r.channel);
+    bytes.push(if r.reply_to.is_some() { 1 } else { 0 });
+    if let Some(ts) = r.reply_to {
+        bytes.extend_from_slice(&ts.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+pub fn decode_post_redemption(
+    bytes: &[u8],
+) -> Result<PostRedemption, ark_serialize::SerializationError> {
+    use ark_serialize::SerializationError as SE;
+    let mut reader = bytes;
+    let data = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    let callback = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    let mac = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    let message = read_string(&mut reader)?;
+    let channel = read_string(&mut reader)?;
+    if reader.is_empty() {
+        return Err(SE::IoError(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "missing reply_to tag",
+        )));
+    }
+    let has_reply = reader[0] == 1;
+    reader = &reader[1..];
+    let reply_to = if has_reply {
+        if reader.len() < 8 {
+            return Err(SE::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "missing reply_to timestamp",
+            )));
+        }
+        Some(u64::from_le_bytes(reader[..8].try_into().unwrap()))
+    } else {
+        None
+    };
+    Ok(PostRedemption {
+        redemption: RedeemExecMethod {
+            data,
+            callback,
+            mac,
+        },
+        message,
+        channel,
+        reply_to,
+    })
+}
+
+pub fn encode_badge_redemption(
+    r: &BadgeRedemption,
+) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+    let mut bytes = encode_redemption(&r.redemption)?;
+    bytes.extend_from_slice(&r.index.to_le_bytes());
+    Ok(bytes)
+}
+
+pub fn decode_badge_redemption(
+    bytes: &[u8],
+) -> Result<BadgeRedemption, ark_serialize::SerializationError> {
+    use ark_serialize::SerializationError as SE;
+    let mut reader = bytes;
+    let data = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    let callback = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    let mac = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    if reader.len() < 4 {
+        return Err(SE::IoError(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "missing badge index",
+        )));
+    }
+    let index = u32::from_le_bytes(reader[..4].try_into().unwrap());
+    Ok(BadgeRedemption {
+        redemption: RedeemExecMethod {
+            data,
+            callback,
+            mac,
+        },
+        index,
+    })
+}
+
+/// A length-prefixed UTF-8 string, since neither `String` nor `batch-zkc`'s own types
+/// carry room for one — matches the fixed-order-fields convention every encoder above
+/// already uses.
+fn write_string(bytes: &mut Vec<u8>, s: &str) {
+    bytes.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(s.as_bytes());
+}
+
+fn read_string(reader: &mut &[u8]) -> Result<String, ark_serialize::SerializationError> {
+    use ark_serialize::SerializationError as SE;
+    if reader.len() < 8 {
+        return Err(SE::IoError(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "missing string length prefix",
+        )));
+    }
+    let (len_bytes, rest) = reader.split_at(8);
+    let len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+    if rest.len() < len {
+        return Err(SE::IoError(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "string shorter than its length prefix",
+        )));
+    }
+    let (s_bytes, rest) = rest.split_at(len);
+    let s = String::from_utf8(s_bytes.to_vec()).map_err(|_| {
+        SE::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not valid UTF-8",
+        ))
+    })?;
+    *reader = rest;
+    Ok(s)
 }

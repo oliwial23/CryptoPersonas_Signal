@@ -131,6 +131,13 @@ impl ClientConfig {
     pub fn badge_dir(&self) -> PathBuf {
         self.data_dir.join("badges")
     }
+
+    /// Privacy Pass (FINDINGS O7): tickets requested but not yet redeemed. Separate
+    /// from `user_file` — this covers only `batch-zkc`'s own bookkeeping, not the
+    /// `User` object itself.
+    pub fn privpass_stash(&self) -> PathBuf {
+        self.data_dir.join("privpass_stash.bin")
+    }
 }
 
 /// `Url::join` resolves relative to the base's *directory*, so a base without a

@@ -5,15 +5,19 @@
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
+use personas_core::circuits::arg_rep;
 use personas_core::privpass::{
-    clone_exec_meth, decode_redemption, decode_ticket_request, encode_validated_tickets,
-    issue_tickets, redemption_key, verify_redemption,
+    badge_flag, clone_exec_meth, decode_badge_redemption, decode_post_redemption,
+    decode_redemption, decode_ticket_request, encode_validated_tickets, issue_tickets,
+    redemption_key, ticket_pseudonym, verify_redemption,
 };
-use personas_core::F;
+use personas_core::{persona, F};
+use transport_api::{ConversationId, MessageId, Outgoing};
 
 use crate::bulletin::{self, bulk, epoch, verify_and_store};
 use crate::error::{AppError, AppResult, ok};
-use crate::state::ServerLock;
+use crate::routes::moderation::call;
+use crate::state::{Namespace, ServerLock};
 
 /// The batch-ticket proving key a client needs to build a [`TicketRequest`]
 /// (`personas_core::privpass::request_ticket`).
@@ -71,17 +75,22 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
     Ok((axum::http::StatusCode::OK, bytes).into_response())
 }
 
-/// Redeem a previously validated ticket. Anonymous: nothing here names which
-/// `issue` call produced it, or which member requested it.
-pub async fn redeem(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
-    let redemption = decode_redemption(&body)
-        .map_err(|e| AppError::BadRequest(format!("that is not a ticket redemption: {e}")))?;
+/// Redeem a ticket for a specific badge — `1` Faculty, `2` Student, `3` Industry,
+/// matching `approve_badge`'s own numbering. Not a free-form argument: unlike a real
+/// badge request, this skips `badge_pred`'s eligibility proof entirely, applying the
+/// flag on possession of a valid, unspent ticket alone — an accepted simplification
+/// for now (no admin gate), not something to read as "eligibility-checked."
+pub async fn redeem_badge(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+    let request = decode_badge_redemption(&body)
+        .map_err(|e| AppError::BadRequest(format!("that is not a badge redemption: {e}")))?;
+    let flag = badge_flag(request.index)
+        .ok_or_else(|| AppError::BadRequest("badge index must be 1, 2, or 3".into()))?;
+    let redemption = request.redemption;
 
     let mut st = state.write().await;
     if !verify_redemption(&st.privpass.issuer, &redemption) {
         return Err(AppError::Rejected("the ticket did not verify".into()));
     }
-
     let key = hex::encode(redemption_key(&redemption));
     if !st.privpass.spent.mark_spent(key)? {
         return Err(AppError::Rejected(
@@ -89,7 +98,100 @@ pub async fn redeem(State(state): State<ServerLock>, body: Bytes) -> AppResult<R
         ));
     }
 
-    tracing::info!("a privacy-pass ticket was redeemed");
+    call(&mut st, redemption.callback, flag)?;
+
+    tracing::info!("a privacy-pass ticket was redeemed for a badge");
+    Ok(ok())
+}
+
+/// Redeem a ticket to post one message, optionally threaded as a reply
+/// (Signal-only in practice — Slack callers never set `reply_to`, since Slack
+/// replies work by thread context, not a quoted message id, and nothing in the CLI
+/// exposes it there). `use_persona` picks a fresh, ticket-derived pseudonym (see
+/// `personas_core::privpass::ticket_pseudonym` for why it's derived from the ticket
+/// rather than chosen freely) or posts with none at all. Shared by all four
+/// posting routes; `ns` picks which channel/transport actually relays it.
+async fn redeem_post(
+    state: ServerLock,
+    ns: Namespace,
+    use_persona: bool,
+    body: Bytes,
+) -> AppResult<Response> {
+    let request = decode_post_redemption(&body)
+        .map_err(|e| AppError::BadRequest(format!("that is not a post redemption: {e}")))?;
+
+    let mut st = state.write().await;
+    if !verify_redemption(&st.privpass.issuer, &request.redemption) {
+        return Err(AppError::Rejected("the ticket did not verify".into()));
+    }
+    let key = hex::encode(redemption_key(&request.redemption));
+    if !st.privpass.spent.mark_spent(key)? {
+        return Err(AppError::Rejected(
+            "this ticket has already been redeemed".into(),
+        ));
+    }
+    drop(st);
+
+    let mut msg = Outgoing::new(ConversationId(request.channel), request.message);
+    if use_persona {
+        msg.persona = Some(persona::petname(ticket_pseudonym(&request.redemption)));
+    }
+    if let Some(ts) = request.reply_to {
+        msg.reply_to = Some(MessageId::from(ts));
+    }
+
+    let transport = state.read().await.channel(ns).transport.clone();
+    transport.send(msg).await?;
+
+    tracing::info!(use_persona, "a privacy-pass ticket was redeemed for a post");
+    Ok(ok())
+}
+
+pub async fn redeem_post_signal(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+    redeem_post(state, Namespace::Signal, false, body).await
+}
+
+pub async fn redeem_post_slack(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+    redeem_post(state, Namespace::Slack, false, body).await
+}
+
+pub async fn redeem_pseudo_post_signal(
+    State(state): State<ServerLock>,
+    body: Bytes,
+) -> AppResult<Response> {
+    redeem_post(state, Namespace::Signal, true, body).await
+}
+
+pub async fn redeem_pseudo_post_slack(
+    State(state): State<ServerLock>,
+    body: Bytes,
+) -> AppResult<Response> {
+    redeem_post(state, Namespace::Slack, true, body).await
+}
+
+/// Redeem a ticket for a small, fixed reputation bump (+1) — reusing `call()`, the
+/// same mechanism `reputation`'s own route uses, just with a fixed amount instead of
+/// the ledger's accumulated rating. Fixed rather than free-form for the same reason
+/// badge redemption is limited to three flags: an arbitrary caller-chosen amount
+/// would let anyone inflate their own reputation without limit.
+pub async fn redeem_reputation(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+    let redemption = decode_redemption(&body)
+        .map_err(|e| AppError::BadRequest(format!("that is not a redemption: {e}")))?;
+
+    let mut st = state.write().await;
+    if !verify_redemption(&st.privpass.issuer, &redemption) {
+        return Err(AppError::Rejected("the ticket did not verify".into()));
+    }
+    let key = hex::encode(redemption_key(&redemption));
+    if !st.privpass.spent.mark_spent(key)? {
+        return Err(AppError::Rejected(
+            "this ticket has already been redeemed".into(),
+        ));
+    }
+
+    call(&mut st, redemption.callback, arg_rep(1))?;
+
+    tracing::info!("a privacy-pass ticket was redeemed for a reputation bump");
     Ok(ok())
 }
 

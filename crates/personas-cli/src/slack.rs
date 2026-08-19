@@ -261,10 +261,49 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             show(res).await?;
         }
 
-        Command::PrivPassTicket { arg } => {
+        Command::PrivPassRequest => {
             let pc = personas.clone();
-            spawn_blocking(move || pc.privpass_round_trip(&[F::from(arg)])).await??;
-            println!("Requested and redeemed a Privacy Pass ticket");
+            spawn_blocking(move || pc.privpass_request()).await??;
+            println!("Requested and stashed a Privacy Pass ticket, ready to redeem");
+        }
+
+        Command::PrivPassBadge { index } => {
+            let pc = personas.clone();
+            spawn_blocking(move || pc.privpass_redeem_badge(index)).await??;
+            println!("Redeemed a stashed Privacy Pass ticket for badge {index}");
+        }
+
+        Command::PrivPassPost {
+            message,
+            channel,
+            reply_to,
+        } => {
+            if reply_to.is_some() {
+                bail!("-t/--timestamp (reply threading) is Signal-only");
+            }
+            let pc = personas.clone();
+            spawn_blocking(move || pc.privpass_redeem_post(message, channel, None)).await??;
+            println!("Redeemed a stashed Privacy Pass ticket for a post");
+        }
+
+        Command::PrivPassPseudoPost {
+            message,
+            channel,
+            reply_to,
+        } => {
+            if reply_to.is_some() {
+                bail!("-t/--timestamp (reply threading) is Signal-only");
+            }
+            let pc = personas.clone();
+            spawn_blocking(move || pc.privpass_redeem_pseudo_post(message, channel, None))
+                .await??;
+            println!("Redeemed a stashed Privacy Pass ticket for a pseudonymous post");
+        }
+
+        Command::PrivPassReputation => {
+            let pc = personas.clone();
+            spawn_blocking(move || pc.privpass_redeem_reputation()).await??;
+            println!("Redeemed a stashed Privacy Pass ticket for a reputation bump");
         }
 
         Command::GenPseudo => {
