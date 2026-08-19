@@ -14,6 +14,7 @@ pub mod badges;
 pub mod config;
 pub mod flows;
 pub mod params;
+pub mod privpass;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod state;

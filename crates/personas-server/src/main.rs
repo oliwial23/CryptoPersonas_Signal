@@ -25,6 +25,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use personas_config::{Config, SignalBackend, SlackBackend};
 use personas_core::params::{ensure_params, load_or_create_store};
+use personas_core::privpass::{ensure_batch_ticket_keys, load_or_create_issuer_keys};
 use tokio::signal;
 use tokio::sync::RwLock;
 use tracing::{info, info_span, warn};
@@ -64,6 +65,19 @@ async fn main() -> Result<()> {
     let artifacts = ensure_params(&mut rng, &db, &data_dir.join("params"))?;
     span.exit();
 
+    // Privacy Pass (FINDINGS O7): entirely additive, its own cache, never touches the keys
+    // or cache directory above.
+    let span = info_span!("privpass").entered();
+    let privpass_issuer = load_or_create_issuer_keys(&mut rng, &data_dir)?;
+    let obj_pubkey_bytes = {
+        let mut bytes = Vec::new();
+        ark_serialize::CanonicalSerialize::serialize_compressed(&db.obj_bul.get_pubkey(), &mut bytes)?;
+        bytes
+    };
+    let (privpass_batch_pk, privpass_batch_vk) =
+        ensure_batch_ticket_keys(&mut rng, &obj_pubkey_bytes, &data_dir.join("params"))?;
+    span.exit();
+
     let signal = signal_transport(&cfg);
     let slack = slack_transport(&cfg);
     info!(
@@ -79,6 +93,9 @@ async fn main() -> Result<()> {
         artifacts.folding,
         signal,
         slack,
+        privpass_issuer,
+        privpass_batch_pk,
+        privpass_batch_vk,
     )?));
 
     // Slack's socket-mode listener, and with it the 👍/👎 rating buttons and reaction events.

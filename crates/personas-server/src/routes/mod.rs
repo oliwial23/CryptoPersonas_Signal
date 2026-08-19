@@ -15,6 +15,7 @@ pub mod moderation;
 pub mod params;
 pub mod polls;
 pub mod post;
+pub mod privpass;
 
 use axum::Router;
 use axum::routing::{get, post as post_route};
@@ -83,6 +84,14 @@ pub fn router(state: ServerLock) -> Router {
             get(params::callback_nmemb_bulletin),
         )
         .route("/api/get_epoch", get(params::get_epoch))
+        // -- privacy pass (FINDINGS O7) -------------------------------------------------
+        .route("/api/privpass/issue", post_route(privpass::issue))
+        .route("/api/privpass/redeem", post_route(privpass::redeem))
+        .route("/api/privpass/pubkey", get(privpass::issuer_pubkey))
+        .route(
+            "/api/privpass/batch_proving_key",
+            get(privpass::batch_proving_key),
+        )
         // -- interactions that do not relay -------------------------------------------
         .route("/api/interact/standard", post_route(interact::standard))
         .route("/api/interact/scan", post_route(interact::scan))

@@ -5,6 +5,7 @@
 pub mod circuits;
 pub mod params;
 pub mod persona;
+pub mod privpass;
 pub mod timing;
 pub mod types;
 

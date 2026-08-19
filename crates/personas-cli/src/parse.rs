@@ -125,6 +125,14 @@ pub enum Command {
     /// Download all thread contexts from the server.
     GetContexts,
 
+    /// Privacy Pass (FINDINGS O7): request one anonymous, unlinkable ticket and
+    /// redeem it in the same call. `-b` is the argument the redemption carries
+    /// (opaque; matches whatever a later callback would take).
+    PrivPassTicket {
+        #[arg(long = "arg", short = 'b', default_value = "0")]
+        arg: u64,
+    },
+
     /// Generate a new pseudonym.
     GenPseudo,
 

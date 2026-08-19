@@ -88,4 +88,14 @@ impl PersonaClient {
     pub fn badge_pred_pk(&self) -> PK {
         self.fetch_pk("api/user/arbitrary_pred_proving_key3")
     }
+
+    /// Privacy Pass: blinding a requested ticket (FINDINGS O7).
+    pub fn privpass_batch_pk(&self) -> PK {
+        self.fetch_pk("api/privpass/batch_proving_key")
+    }
+
+    /// Privacy Pass: the issuer's VOPRF public key, needed to unblind a validated batch.
+    pub fn privpass_issuer_pubkey(&self) -> ark_grumpkin::Projective {
+        self.fetch_param("api/privpass/pubkey")
+    }
 }

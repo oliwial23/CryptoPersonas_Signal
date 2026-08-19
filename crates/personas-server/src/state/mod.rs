@@ -21,8 +21,8 @@
 mod ledger;
 
 pub use ledger::{
-    Ballot, BadgeLog, ContextLog, PollEntry, PollLog, RecordLog, SlackPoll, StoredBadge,
-    ThreadContext, VoteState, badge_name, emoji_for, emoji_name,
+    Ballot, BadgeLog, ContextLog, PollEntry, PollLog, RecordLog, SlackPoll, SpentTicketLog,
+    StoredBadge, ThreadContext, VoteState, badge_name, emoji_for, emoji_name,
 };
 
 use std::path::Path;
@@ -31,7 +31,19 @@ use std::sync::Arc;
 use anyhow::Result;
 use personas_core::Store;
 use personas_core::params::{FoldingParams, ServerKeys};
+use personas_core::privpass::IssuerKeys;
+use personas_core::{PK, VK};
 use transport_api::Transport;
+
+/// Privacy Pass: the issuer keypair, the (additive, separately-cached) batch-ticket
+/// Groth16 keys, and which tickets have already been redeemed. See `docs/FINDINGS.md`
+/// O7 and `personas_core::privpass`.
+pub struct PrivPassState {
+    pub issuer: IssuerKeys,
+    pub batch_proving_key: PK,
+    pub batch_verifying_key: VK,
+    pub spent: SpentTicketLog,
+}
 
 /// One messenger, and the server's memory of what it relayed there.
 ///
@@ -66,6 +78,8 @@ pub struct ServerState {
     pub votes: VoteState,
     /// Badge requests awaiting an admin's approval.
     pub badges: BadgeLog,
+
+    pub privpass: PrivPassState,
 }
 
 /// Which messenger's routes a request came in on.
@@ -93,6 +107,7 @@ impl ServerState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_dir: &Path,
         db: Store,
@@ -100,6 +115,9 @@ impl ServerState {
         folding_keys: FoldingParams,
         signal: Arc<dyn Transport>,
         slack: Arc<dyn Transport>,
+        privpass_issuer: IssuerKeys,
+        privpass_batch_proving_key: PK,
+        privpass_batch_verifying_key: VK,
     ) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
 
@@ -120,6 +138,12 @@ impl ServerState {
             polls: PollLog::open(data_dir.join("polls.jsonl"))?,
             votes: VoteState::open(data_dir.join("slack_votes.jsonl"))?,
             badges: BadgeLog::open(data_dir.join("badge_requests.jsonl"))?,
+            privpass: PrivPassState {
+                issuer: privpass_issuer,
+                batch_proving_key: privpass_batch_proving_key,
+                batch_verifying_key: privpass_batch_verifying_key,
+                spent: SpentTicketLog::open(data_dir.join("privpass_spent.jsonl"))?,
+            },
         })
     }
 }

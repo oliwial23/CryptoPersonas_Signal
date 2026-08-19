@@ -462,6 +462,45 @@ fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
         .collect())
 }
 
+/// Which Privacy Pass tickets have already been redeemed.
+///
+/// `verify_ticket` (`personas_core::privpass`) is a stateless well-formedness check — it
+/// carries no memory of past redemptions on its own, so replaying the same redemption would
+/// otherwise verify every time. Keyed by [`personas_core::privpass::redemption_key`], the
+/// canonical bytes of the redeemed callback entry: `verify_ticket` derives everything else
+/// deterministically from that plus the (fixed) issuer key, so the same ticket redeemed twice
+/// always produces the same key here.
+pub struct SpentTicketLog {
+    path: PathBuf,
+    spent: HashSet<String>,
+}
+
+impl SpentTicketLog {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let rows: Vec<String> = read_jsonl(&path)?;
+        Ok(Self {
+            spent: rows.into_iter().collect(),
+            path,
+        })
+    }
+
+    pub fn is_spent(&self, key: &str) -> bool {
+        self.spent.contains(key)
+    }
+
+    /// Marks `key` spent. Returns `false` (and does not write) if it already was — the
+    /// caller's cue to reject the redemption as a replay.
+    pub fn mark_spent(&mut self, key: String) -> Result<bool> {
+        if !self.spent.insert(key) {
+            return Ok(false);
+        }
+        let rows: Vec<&String> = self.spent.iter().collect();
+        write_jsonl(&self.path, &rows)?;
+        Ok(true)
+    }
+}
+
 fn write_jsonl<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

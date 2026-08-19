@@ -261,6 +261,12 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             show(res).await?;
         }
 
+        Command::PrivPassTicket { arg } => {
+            let pc = personas.clone();
+            spawn_blocking(move || pc.privpass_round_trip(&[F::from(arg)])).await??;
+            println!("Requested and redeemed a Privacy Pass ticket");
+        }
+
         Command::GenPseudo => {
             personas.gen_pseudo()?;
         }
