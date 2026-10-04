@@ -1,0 +1,32 @@
+[package]
+name = "personas-group-crypto"
+version.workspace = true
+edition.workspace = true
+
+# e2a — the content-layer group-key crypto for the modified Signal client.
+#
+# This crate owns the personas-side key schedule that lets group members post
+# *without attribution*: a freshly generated, deletable shared group secret (K2)
+# distributed out of band (over the pairwise Double Ratchet in the live client;
+# in-process in tests), and a GGM puncturable-PRF message-key schedule that
+# derives a per-message key from a random nonce and punctures it on consume.
+# That gives concurrency-safety (nonces don't collide) and *genuine* forward
+# secrecy (consumed keys are unrecoverable, old epoch secrets are deleted).
+#
+# It is deliberately transport-free and arkworks-free: no libsignal, no async,
+# no ZK. The sealed-sender delivery layer (e2c) lives in transport-presage; the
+# PersonaEnvelope + AEAD + ZK verify (e2b) build on top of the MessageKey this
+# crate hands out. Keeping it a standalone, dependency-light crate is what makes
+# it auditable as a single crypto unit (the e2a sign-off gate).
+
+[dependencies]
+sha2.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+zeroize = { version = "1", features = ["derive"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+rand_chacha.workspace = true
+serde_json.workspace = true

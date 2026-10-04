@@ -1,0 +1,47 @@
+[package]
+name = "personas-messenger"
+version.workspace = true
+edition.workspace = true
+
+# The serverless headless client (workstream d4). It ties a `Transport` (any
+# messenger: the mock today, `transport-presage`/real Signal under e2) to the d3
+# `Replica`: records ride as chat messages (carriage), incoming messages are
+# ingested and the log rendered, and a co-located `Member` produces the records
+# this client sends. Kept out of `personas-bulletin` so the crypto library stays
+# free of an async transport dependency.
+
+[dependencies]
+personas-core = { path = "../personas-core" }
+personas-bulletin = { path = "../personas-bulletin" }
+transport-api = { path = "../transports/transport-api" }
+
+zk-callbacks = { workspace = true, features = ["folding"] }
+ark-ff.workspace = true
+ark-r1cs-std.workspace = true
+ark-relations.workspace = true
+ark-serialize.workspace = true
+ark-snark.workspace = true
+ark-std.workspace = true
+
+async-trait.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+base64.workspace = true
+blake2.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+ciborium = "0.2"
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+transport-mock = { path = "../transports/transport-mock" }
+ark-bn254.workspace = true
+ark-groth16.workspace = true
+# e2 A1: the real-Signal convergence test (`e2e_record_converges_over_signal`) drives a
+# real `Record` through `PresageTransport` and ingests it. Dev-only + `#[ignore]` (needs
+# the self-hosted test-server + proxy up); does not touch the messenger's normal build.
+transport-presage = { path = "../transports/transport-presage" }
+tempfile = "3"

@@ -1,0 +1,15 @@
+[package]
+name = "transport-slack"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+transport-api = { path = "../transport-api" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+rsb_derive.workspace = true
+slack-morphism.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -1,0 +1,25 @@
+# --- Environment Files ---
+.env
+.env.*
+
+# --- Rust Build Artifacts ---
+/target/
+/**/target/
+
+# Rust debug/test output
+debug/
+/**/debug/
+
+# Optional: if this is a library, you might ignore Cargo.lock
+# Cargo.lock
+
+# --- Editor / OS Files ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- Application Data ---
+json_files/
+experiments/
+
+*.jsonl
