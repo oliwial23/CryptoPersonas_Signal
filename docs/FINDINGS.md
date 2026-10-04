@@ -1,0 +1,1051 @@
+# Findings
+
+A running log of bugs, quirks, and decisions that a reader would otherwise have to
+rediscover. Each entry says what is wrong (or what was decided), why it matters, and where to
+look. Entries are numbered so they can be cited from commits and reviews.
+
+Sections: **F** fixed, **O** open, **D** decisions that want a second opinion.
+
+---
+
+## F — Fixed
+
+### F1. A failed relay filed one member's callback against another member's message
+
+*Found and fixed in a4. Severity: high — silent misattribution of moderation power.*
+
+A poster commits to a callback ticket **before** their message has an id; the messenger only
+assigns one on delivery. So the two must be joined afterwards.
+
+The old code joined them like this: append a half-row (`{"callback_com": …, "type": "cb"}`) to
+`server/*_zkpair_log.jsonl`, relay the message, then re-read the file and rewrite **the last
+line of it** into a real row carrying the message id ([old `server.rs`, e.g.
+`forward_jsonrpc`]). Two things go wrong.
+
+- If the relay failed, the half-row stayed. The **next** member's post then rewrote *that* row
+  as its own — filing one member's callback against another member's message. A rating on the
+  second message would then be applied to the first member's object.
+- Two concurrent posts could interleave between the append and the rewrite, with the same
+  result.
+
+This was not hypothetical on this machine: without a `signal-cli` daemon **every** relay failed,
+so every post left a half-row behind.
+
+Fixed by never filing anything until the id exists: `routes/post.rs::relay` calls
+`RecordLog::record(&sent.id, cb)` after the transport returns. `state/ledger.rs::RecordLog`
+keys rows by message id rather than by file position.
+
+### F2. Every rating would have been applied twice
+
+*Introduced and caught during a4. Severity: high (had it shipped).*
+
+`/api/react` records a rating **and** asks the messenger to add the emoji. The messenger then
+reports that emoji back to us as a `reaction_added` event. The obvious thing — "a reaction
+event is a rating" — therefore counts every rating twice.
+
+The event listener now *acknowledges* reactions and does not count them; only ratings that came
+through the personas layer (`/api/react`, and the 👍/👎 buttons, which add no messenger
+reaction) count. See `main.rs::events`, which spells this out. Inherited consequence: see O4.
+
+### F3. A member could crash the server with a well-formed request
+
+*Fixed in a4. Severity: medium — remote DoS by any member.*
+
+Handlers read `pub_inputs[1]` straight off the wire. A proof carrying a shorter public-input
+vector than the route expected — for instance, the *right* record posted to the *wrong* route —
+panicked the handler. More generally the handlers `unwrap()`ed on deserialization (~500 unwraps
+across `server.rs`/`helpers.rs`).
+
+Now: `routes/post.rs::pub_inputs` checks the length; `personas-wire` refuses a record whose
+`kind` is not the one the route expects; everything fallible returns `AppError` (`error.rs`).
+
+### F4. The signal-cli shell-out panicked when signal-cli was not running
+
+*Fixed in a4 (by deleting it). Severity: medium.*
+
+The relay was 12 copies of `Command::new("signal-cli-client")` followed by
+`serde_json::from_str(&stdout).unwrap()`. With no daemon, stdout is empty and the parse
+panics. The binary being spawned was a crate **in this same workspace**; its JSON-RPC client is
+now called in process (`transport-signal-cli`), and an unreachable daemon is a typed
+`TransportError::NotConnected` naming the address and the command to start it.
+
+### F5. A missing benchmark stamp returned 409 and refused the post
+
+*Fixed in a4. Severity: low, but it made the system untestable.*
+
+The post handlers called `load_start_time(label)` and, if the file was absent, returned
+`409 Conflict` **instead of posting the message**. So posting with anything other than the
+benchmarked client — curl, a test, the mock transport — failed. Instrumentation that cannot
+measure something must not prevent it from happening: `bench.rs::close_latency` now warns and
+continues.
+
+### F6. A poll's id was unreachable
+
+*Fixed in a4, as a consequence of D1. Severity: medium (it made CLI voting impossible).*
+
+The vote id lived only in a Slack `block_id` and in button `action_id`s — invisible to a human.
+That was survivable while a button press carried it back. With buttons gone (D1), a member had
+no way to learn the id they must pass to their own client in order to vote. Polls now print
+their id and the command to vote with (`transport-slack::blocks::how_to_vote`,
+`transport-signal-cli::render_poll`).
+
+### F7. `BulNet::verify_in` fetched the wrong route
+
+*Fixed in a3, recorded here for completeness.* It requested `user/bulletin` instead of
+`api/user/bulletin` — a 404 into an `.unwrap()`. That path could never have worked.
+
+---
+
+## O — Open
+
+### O1. The bulletin's contents are not persisted
+
+*Severity: high for any demo that must survive a restart. The plan expected a4 to fix this; it
+does not.*
+
+The store's **keys** survive a restart (a2: genesis is rebuilt deterministically from
+`store_seed.bin`) and so does the params cache. The bulletin's **contents** — who joined, which
+callbacks were invoked, the epoch — live in memory and are lost. After a restart every client
+must `join` again; an existing `user.bin` fails every proof.
+
+Why it is not a one-liner: `CentralStore` is not `CanonicalSerialize` and its private keys are
+unreachable (the a2 finding). Persisting means replaying `obj_bul`, `callback_bul`,
+`nmemb_bul` and the epoch into a store that cannot be deserialized directly — the entries
+themselves *are* serializable (we serve them over `/api/user/bulletin`), so a replay-on-boot is
+plausible, but the nullifier set and the epoch have to come back consistently or proofs will
+fail in ways that look like corruption.
+
+Should be its own commit, before any demo (M0) that a human restarts.
+
+### O2. `client scan` answers one callback, and interacting mid-sweep panics
+
+**Status: fixed.** A member with *k* outstanding callbacks needs *k* invocations of
+`exec_scanint` to complete one sweep — `scan_index` (zk-callbacks `generic/user.rs`) stays
+`Some` on the saved `User` between them, and any other interaction trips
+`assert!(self.scan_index.is_none())` and **panics**:
+
+```
+Error: task 11 panicked with message "assertion failed: self.scan_index.is_none()"
+```
+
+Fixed two ways. `PersonaClient::scan` flows are now guarded — `flows.rs::ensure_not_scanning`
+checks `user.is_scanning()` before any non-scan proving call (`gen_cb_for_msg`,
+`gen_cb_for_badge_request`, `pseudo_proof_with_msg`, `rate_pseudo_proof_with_msg`,
+`pseudo_proof_vote`, `make_authorship_proof`, `make_badge_proof`) and returns a clear error
+naming the outstanding count instead of panicking. And the CLI's `scan` command
+(`personas-cli::signal::run`/`slack::run`) now loops the whole sweep itself — `k` `scan` proofs
+in one invocation, using `PersonaClient::outstanding_callbacks`/`is_scanning` to know when the
+sweep is done — instead of requiring a human to invoke `scan` exactly `k` times and stay out of
+the way in between. Verified against a local server: `join` → three `post`s → one `scan`
+invocation correctly ran three scan proofs back to back and left the object in a
+non-scanning state; a fresh member with nothing outstanding gets "nothing to scan" rather than
+attempting an empty scan proof.
+
+### O3. The epoch a callback is filed at is inconsistent across routes
+
+**Status: fixed.** `approve_interaction_and_store` takes the epoch that the interaction's
+callback tickets are stored at. The old routes disagreed:
+
+| route | epoch passed (old) | epoch passed (now) |
+|---|---|---|
+| anonymous post, reply | `Time::from(0)` | the live epoch |
+| rate-limited pseudonymous post | `Time::from(0)` | the live epoch |
+| pseudonymous post, reply-pseudo | the live epoch | the live epoch |
+| badge request | the live epoch | the live epoch |
+| scan | the live epoch | the live epoch |
+| `/api/interact/standard` (bench-only anon post) | `Time::from(0)` | the live epoch |
+
+**The disagreement was unobservable before the fix.** The only place a stored `expiration` is
+consulted at scan time is inside `expirable`-gated branches (zk-callbacks `scan.rs:656/676` and
+the circuit at `823/840`), and our sole callback is `expirable: false` (`circuits.rs`), a flag
+the server enforces on post (`service.rs:204`). So whether a route filed at `0` or the live
+epoch changed nothing a scan could see. Unifying the routes was therefore safe to land as a
+no-op: `routes/post.rs::verify_post` now computes `current = epoch(&st.db)` once and passes it
+to every flavour (`Anon`, `Pseudo`, `PseudoRate`); `routes/interact.rs::standard` does the same
+for the bench-only path. Guards the day any callback is made `expirable: true` — see the
+scenario this prevents, and why unifying was necessary, in the original write-up below.
+
+**Why it would have become a live bug.** The post-side check `cb.expiration == def.expiration +
+cur_time` (`service.rs:208`) fires regardless of the `expirable` flag, so a `Time::from(0)`
+route stored `expiration = 10` (absolute) while a live-epoch route stored `10 + epoch`. A
+live-epoch scan would then have read the `Time::from(0)` tickets as already expired
+(`cur_time > 10`) and **silently dropped them** — "a callback nobody can ever scan," on exactly
+the anonymous and rate-limited paths.
+
+The deeper reason the inconsistency was invisible — that the epoch isn't cryptographically bound
+into a scan at all — is **O10**, and that one is not fixed by this.
+
+*Update (d2).* Serverless has no analogue: every record files its tickets at the epoch it was
+posted in, uniformly, so the `expiration == def.expiration + cur_time` check is consistent by
+construction. This was already a fix by not inheriting on the serverless side; O3 closes the
+same gap on the as-a-service side.
+
+### O4. An emoji added by hand in the Slack UI changes nobody's reputation
+
+**Status: fixed — decided by the user 2026-08-17: remove the announcement, not count the
+reaction.** Only ratings that arrive through the personas layer count: `/api/react` and the
+👍/👎 buttons. An emoji a human adds directly in Slack was announced ("Message has been marked
+for an increase in reputation") but not counted — see F2 for why counting it would double every
+rating that came from `/api/react`. That announcement lied a little, and this was flagged as
+wanting a decision between two fixes: drop the announcement, or count the UI reaction and make
+`/api/react` stop counting its own echo. The smaller, safer change was chosen — counting the UI
+reaction would have added a new way for `/api/react` and a hand-added emoji to double-count each
+other, for a feature (reacting from inside Slack's own UI rather than through the personas CLI)
+nothing else depends on. `main.rs::events`' `Incoming::Reaction` arm no longer sends any
+message; the emoji is silently acknowledged and not counted, matching what actually happens to
+a member's reputation. `RecordLog::contains` (only used by the removed check) and the
+now-unreachable `emoji_of` helper were removed as dead code.
+
+### O5. Slack polls are forgotten on restart
+
+**Status: fixed.** Signal polls were a file; Slack polls were a `HashMap` in memory only, so a
+Slack ban poll's tally could not be the input to `AllowedToRevoke` — it might not exist by the
+time anyone acted on it. `state::VoteState` (`state/ledger.rs`) now mirrors `PollLog`'s
+open-on-boot/flush-on-mutation JSONL pattern (`SlackPoll` gained `Serialize`/`Deserialize`); the
+two mutation sites in `routes/polls.rs` (`open_slack`'s insert, `slack_vote`'s tally update)
+call `VoteState::flush` after mutating, same discipline `RecordLog`/`PollLog`/`BadgeLog` already
+use. Verified live: opened a Slack poll against a local server, confirmed the row landed in
+`slack_votes.jsonl`, killed and restarted the server on the same data directory, and confirmed
+`/api/slack/poll/context` still resolved the poll's context correctly.
+
+Serverless (workstream d) dissolves the underlying problem a different way, by making the tally
+a client-side count over the chat log — this fix is for the as-a-service deployment, which still
+needs its own durable state.
+
+### O6. A folded scan silently drops `k mod N` callbacks
+
+*Known; workstream c3 owns it.* `PersonaClient::fold` folds `k / NUM_SCANS_PER_FOLD` steps and
+ignores the remainder. **c1 landed the mechanism this needs** — the scan/fold circuits are now
+const-generic over the fold size and `dispatch_fold_size!` selects one at runtime (see D8) — but
+c1 deliberately left the client pinned to a single size, so the drop is unchanged until c3 does
+the greedy decomposition over the menu.
+
+### O7. `join` is ungated
+
+Anyone can join. What stops a banned member from rejoining is that they start over with no
+standing — which is also what stops anyone else. A real deployment gates this on an invite;
+that is workstream b's Privacy Pass ticket, and it is why tickets are a service-mode feature.
+
+### O8. Two Slack capabilities cannot be given a message id
+
+*Severity: low, documented at the call sites.* `files.completeUploadExternal` returns file ids,
+never the ts of the message Slack wraps the file in; `chat.postEphemeral` returns nothing at
+all. Both therefore return `Sent { id: MessageId("") }`. Nothing downstream rates a badge image
+or an ephemeral, so nothing breaks — but an attachment post that someone *does* want to rate
+would need a follow-up `conversations.history` lookup.
+
+### O9. Dropped: the Slack "🧩 Topic" banner
+
+**Status: fixed.** The old socket handler echoed a thread's topic into the thread whenever
+someone replied. It guarded against echoing its own echo by inspecting the message's
+`block_id`s, which the transport abstraction does not expose — so a naive port loops forever.
+Dropped rather than half-ported, with the note "restore with an echo-once-per-thread guard if it
+is missed."
+
+Restored with exactly that guard, not the original "every reply" behaviour.
+`ThreadContext` (`state/ledger.rs`) gained a persisted `topic_echoed: bool`
+(`#[serde(default)]`, so existing `*_contexts.jsonl` rows still parse); `ContextLog::
+topic_to_echo(ts)` checks-and-marks it atomically under the state write lock, so two
+near-simultaneous first replies can't both post. `main.rs::events`' `Incoming::Message` arm
+(previously an unconditional `continue`) now calls it whenever a message's `reply_to` names a
+known thread, and posts `"🧵 *Topic:* {thread}"` threaded into it exactly once. The thread's
+*opening* message already announces the topic (`routes/context.rs::slack_new_thread`), so the
+new echo starts `topic_echoed: false` and is triggered by the first reply, not thread creation
+— a reminder for latecomers once a thread starts filling up, since Slack collapses threads by
+default.
+
+Verified live end to end: opened a thread, posted a rate-limited pseudonymous reply into it
+(`post-pseudo-rate`), confirmed the topic banner appeared exactly once, threaded correctly, and
+`topic_echoed` flipped to `true` in `slack_contexts.jsonl`; posted a second reply and confirmed
+no second banner and no loop.
+
+### O10. A called-back callback (a ban) can be evaded forever by replaying a stale nonmembership range
+
+*Severity: high — defeats the moderation/reputation mechanism. Upstream soundness gap in
+zk-callbacks `d661879`, inherited; confirmed a divergence from the 2025/1969 construction (which
+binds the epoch). Not introduced by a4. Fix is a circuit change → external crypto-review gate.
+Found by following O3 during a5.*
+
+A scan proves, per in-progress callback ticket, either **membership** in the called-back set
+(apply the callback method — e.g. absorb a ban) or **nonmembership** (keep the ticket
+in-progress). The epoch is supposed to bound this: turning the epoch is what forces absorption
+(`moderation.rs:152–154`; `interact.rs:216–217` says a stale-epoch fold "would let a member
+re-absorb callbacks they have already" scanned away). But the epoch is never bound into the
+proof, so the forcing function does nothing.
+
+The centralized nonmembership store signs each not-called range as `sign_K(hash(lo, hi, epoch))`
+(`impls/centralized/ds/sigrange.rs`). In-circuit, `enforce_nonmembership_of` verifies that
+signature over `hash(range.0, range.1, extra_witness.epoch)` — where **`epoch` is a private
+witness**, never compared to the public `cur_time` the server pins (`sigrange.rs:296–318`).
+`epoch` occurs in all of `src/generic/` exactly once, in a doc comment. And `enforce_memb_nmemb`
+enforces only membership XOR nonmembership (`generic/bulletin.rs:1032–1044`), so a prover pairs a
+garbage membership witness (→ false) with a valid-but-stale range (→ true).
+
+The exploit, undetectable at verify time:
+
+1. Before being banned, the member GETs `api/callbacks/nmemb_bulletin` (the signed ranges are
+   served publicly, `personas-bulletin/src/http.rs:218`) and keeps the range covering their
+   callback ticket.
+2. The server bans them: the ticket is called, `update_epoch` re-splits the ranges to exclude it
+   and re-signs at the new epoch **with the same key** — `update_epoch` never rotates it; only
+   `rotate_key`, which the server never calls (`sigrange.rs:200–262`, `moderation.rs`).
+3. On the next scan the member supplies the archived range. It covers the tik ✓ and its signature
+   under `K` still verifies ✓ → nonmembership true; garbage membership witness → membership false;
+   XOR holds. The ticket is treated as not-called, so the ban is never absorbed. The ticket stays
+   in-progress, and the stale range stays valid, so they replay it on every future scan.
+
+The proof's public inputs (`new_object`, `old_nullifier`, `cur_time = live epoch`, cb coms) are
+identical to an honest scan's, so the server cannot distinguish it. This breaks bans and
+reputation callbacks alike.
+
+Fix direction (crypto-review gate, do **not** slip into a5): constrain `witness.epoch ==
+cur_time` in `enforce_nonmembership_of`, which forces per-epoch re-fetch of ranges and makes stale
+ones fail — combined with per-epoch key rotation so archived signatures cannot outlive their
+epoch. Both are upstream circuit changes. Until then, moderation is advisory against a motivated
+member.
+
+*Update (d2).* The **serverless** design routes around this structurally rather than patching the
+circuit. A Merkle bulletin's public data is a *root*, not a verification key, and a root cannot be
+a circuit constant — so `is_memb_data_const` must become `false`, which forces the roots into the
+proof's **public inputs**, where every replica pins them against roots it computed itself. A stale
+range has no root to hash up to. The general law, and the reason the object tree can safely do the
+opposite, is in [SERVERLESS_PROTOCOL.md](SERVERLESS_PROTOCOL.md) §5. **This does not fix service
+mode**, which stays on the signature stores and stays exposed; the upstream circuit fix is still
+owed.
+
+### O11. A callback ticket carries no authorization whatsoever
+
+*Severity: none as-a-service (the server is the sole writer of the callback bulletin). Structural
+for serverless. Found while writing d2.*
+
+Personas instantiates `Cr = NoSigOTP<F>` (`personas-core/src/types.rs:27`), and upstream every one
+of `FakeSigPubkey`, `FakeSigPrivkey`, `OTPEncKey` and `NoSigOTP` is a type alias for the *same*
+one-field-element struct, `PlainTikCrypto<F>` (`impls/centralized/crypto.rs`). It has
+`sk_to_pk(&self) -> self.clone()` — the public key **is** the private key — `type Sig = ()`,
+`verify(_, _) -> true`, and `encrypt(m) = m + k`. The service's signing key,
+`FakeSigPrivkey::sk()`, is **the constant zero** (`crypto.rs:182`). Upstream says so outright:
+*"As signatures are not necessary in the centralized setting, any private key can be used to
+verify tickets."*
+
+So a callback ticket `tik` is one field element that is at once the ticket's identity, the OTP key
+its argument is encrypted under, and the whole authority needed to invoke it. Nothing signs a
+call. **The only thing that stops anyone from invoking any callback today is that the server is
+the sole writer of the bulletin.**
+
+That is fine as-a-service and it is a load-bearing constraint on serverless, where the ticket
+travels in `cb_tik_list` to *every* member. Left naive, any member could ban anyone — or, worse,
+*burn* every ticket by calling it with a harmless argument the moment they see the post
+(`has_never_received_tik` permits one call, ever), permanently disarming moderation; the poster
+can do this to their own ticket. The d2 answer is that invocations are **derived from the log by
+rule and never sent as records**, so there is no message to forge. See
+[SERVERLESS_PROTOCOL.md](SERVERLESS_PROTOCOL.md) §6–§7.
+
+---
+
+### O12. presage's `send_message` can report an error *after* delivery already succeeded
+
+**What.** When `PresageTransport::send` fans a message out, presage's `send_message` does the
+`PUT /v1/messages` (which returns 200 — the message is queued for the recipient) and *then* does
+post-send bookkeeping (`save_message`, a self-sync, and a recipient/self profile fetch). That
+bookkeeping runs on a short-lived websocket that can close before the follow-up request gets a
+response, so `send_message` returns `Err("Websocket closing while waiting for a response" /
+"responder was canceled")` even though the record was delivered. It is intermittent (timing-
+dependent) and depends only on the teardown race, not on anything the caller controls.
+
+**Status: fixed** in the production send path, `transport-presage/src/lib.rs::send_fanout` — the
+function `PresageTransport::send` actually calls. Chose the second of the two options below:
+classify "PUT succeeded, bookkeeping raced" as success, but **narrowly**, not with the blanket
+swallow-all-errors the bring-up-only `distribute_group_secret`/`receive_group_secret` helpers
+already used for this same race. `presage::Error::ServiceError(libsignal_service::prelude::
+ServiceError::WsClosing { .. })` — the exact typed variant `send_message`'s post-send bookkeeping
+surfaces when its response arrives after the caller has moved on — is now caught and logged as a
+warning, and the fan-out continues to the next member; every other error (unknown recipient, IO
+error, actually-failed delivery, ...) still aborts and is returned to the caller as before. Type
+match rather than string match, so it does not depend on presage's error-message text staying
+stable across versions.
+
+**Previous handling, still true for the bring-up helpers.** The A1 tests, and
+`distribute_group_secret`/`receive_group_secret`, treat *any* `send_message`/`receive_messages`
+error as non-fatal: the receiver's own decode/decrypt is those functions' actual source of truth,
+so swallowing unconditionally there was already safe. `send_fanout` has no such independent
+receiver-side check available to its own caller, which is why its fix stayed narrow instead of
+copying that pattern.
+
+**Still open.** The other option named here — keeping the send websocket alive for the
+bookkeeping instead of tolerating the race after the fact — has not been done; it would touch
+presage's own internals rather than this crate. The A2 rework of the send path (personas AEAD
+under `mk`, §5 of the design doc) remains the natural place to revisit whether delivery can be
+made fully truthful rather than tied to presage's post-send housekeeping at all.
+
+---
+
+### O13. Every `receive_messages()` call races a doomed prekey refresh against process lifetime; `b2_shared_identity` is just the example that loses
+
+**Status: fixed** (`deploy/signal-test-server/minio.sh` + patches `0003-paged-kem-prekey-store-local-s3.patch`).
+The refresh itself no longer fails — verified below. Left under `O` rather than moved to the `F`
+section because fixing it did not make `b2_shared_identity` pass on its own; it uncovered a second,
+previously masked bug, **O14**, which is now also fixed — see that entry. `b2_shared_identity` runs
+green end to end as of both fixes.
+
+**What.** Running `cargo run -p transport-presage --example b2_shared_identity` against the local
+test-server (`docs/RUNNING_E2_LOCALLY.md` Track 2) fails at step 4 (the bootstrap round) with
+`Error: observer receiving B's bootstrap — timed out waiting to receive`, on every run (5/5
+observed, not intermittent). `a1_smoke` and `e2c_key_distribution` never show the failure (6/6 clean
+runs combined) — but, importantly, **not because they avoid the underlying bug**. See below.
+
+**Root cause, corrected twice — read this before trusting an earlier theory in this entry's git
+history.** `third_party/presage`'s `Manager::receive_messages()`
+(`presage/src/manager/registered.rs:~616`) unconditionally spawns a background task on *every* call,
+for *every* account, that re-sets account attributes and then calls `register_pre_keys` →
+`update_pre_key_bundle` → `PUT /v2/keys`. This is not conditional on prekey count, not triggered by a
+reconnect, and not specific to any one account in the example — it is fire-and-forget, started fresh
+every time `receive_messages()` is invoked.
+
+For the PQ (Kyber) keys, that upload routes through `KeysManager::storeKemOneTimePreKeys` →
+`PagedSingleUseKEMPreKeyStore`
+(`~/Repos/Signal-Server/service/src/main/java/.../storage/PagedSingleUseKEMPreKeyStore.java`).
+Unlike every other datastore in the test harness (DynamoDB/FoundationDB, both real Testcontainers),
+this one is backed by a real `S3AsyncClient` — Kyber public keys are large enough that Signal-Server
+pages them into S3 objects rather than DynamoDB rows. `test.yml`'s `pagedSingleUseKEMPreKeyStore`
+block (`bucket: preKeyBucket`, `region: us-west-2`) sets no `endpointOverride`, so this client always
+targets real AWS with placeholder credentials and always gets back a 403
+(`The AWS Access Key Id you provided does not exist in our records`), which `KeysController.setKeys`
+surfaces as an HTTP 500. Confirmed by reading `KeysController.setKeys`/`KeysManager` source directly:
+this part is a synchronous, deterministic dependency of the request path, not a race.
+
+**But whether the *background task* gets far enough to hit it is a race against the process exiting**
+— and that part *is* about timing, just not the timing anyone would guess. `a1_smoke`/
+`e2c_key_distribution` each decrypt one message and return almost immediately; the background refresh
+(two sequential requests, ~400ms in the logs) usually hasn't reached the S3 call before `main()`
+returns and the whole tokio runtime — background task included — is dropped. `b2_shared_identity`'s
+**observer** account has to stay connected through four sequential exchanges (two bootstrap + two
+real sends), which is enough wall-clock time for its copy of that same background task to run to
+completion and fail. It is the observer, not member B — traced by `local_address` in the decrypt
+spans, corrected after an earlier pass misattributed it. The observer registers via plain
+`PresageTransport::register`, not `register_as_phantom` — **it isn't one of the phantom-identity
+accounts at all**, which is itself evidence this has nothing to do with the shared-identity scheme.
+
+Two wrong theories preceded this one, in order: (1) a race with `asnTable`'s S3 poller (patches
+`README.md` 0002) — disproved by widening `asnTable`'s refresh interval and rebuilding; the failure
+still reproduced 4/4. (2) member B's websocket dropping and reconnecting — disproved by re-tracing a
+fresh run's `local_address` fields end to end instead of eyeballing nearby log lines.
+
+**Blast radius — wider than it looks.** This is not confined to `b2_shared_identity` or to anything
+resembling a reconnect. It is latent in *every* example and in the real `PresageTransport` actor:
+any account whose `receive_messages()` stream stays alive for a few hundred milliseconds will trigger
+the same background refresh and lose the same race. `a1_smoke`/`e2c_key_distribution` are not immune,
+they are just fast enough to usually win it (verified: grepped three-then-six fresh runs of each for
+`Uploading pre-keys`/`PUT /v2/keys` — zero hits so far, but "usually wins a race" is not "structurally
+can't lose it"; a slower machine, a busier bootstrap, or a longer-lived manager would flip this).
+Registration's own account-creation call does not go through this path (accounts register cleanly
+every time). Not a production concern — real Signal infrastructure has a real S3 bucket configured;
+this is a gap specific to Signal-Server's own `test-server` Maven profile, which upstream already
+documents as partial ("many features are non-functional, especially those that depend on external
+services").
+
+Unrelated to the shared-phantom-identity mechanism `b2_shared_identity` actually tests (D15) — doubly
+so, now that the failing account is confirmed to be the non-phantom observer.
+`GET /v1/certificate/delivery` (sealed-sender certificate issuance) succeeds in every run, including
+the failing ones. Steps 1–3 (independent registration under the shared ACI keypair, distinct uuids,
+certificate issuance) pass every time; only the later real-send comparison is blocked. That leaves
+D15's core claim — two independently-registered phantom accounts produce identical
+certificate-embedded identity keys on real sealed-sender sends — without a locally-automated,
+end-to-end green run (still true after the fix below — see O14).
+
+**Fix, verified.** `deploy/signal-test-server/minio.sh` runs a local MinIO container on
+`127.0.0.1:9100`, credentialed with the exact static `accessKey`/`secretAccess` pair
+`test-secrets-bundle.yml` already supplies everywhere (no credential plumbing to change). Patch
+`0003-paged-kem-prekey-store-local-s3.patch` does three things: points
+`pagedSingleUseKEMPreKeyStore.endpointOverride` at it, enables path-style S3 addressing on that
+store's `S3AsyncClient` (`WhisperServerService.java` — a plain localhost endpoint doesn't resolve
+under virtual-hosted-style addressing, which is what the client defaults to), and lowercases the
+bucket name from `preKeyBucket` to `prekey-bucket` (the original name is invalid under S3's
+bucket-naming rules — real AWS would have rejected it too with `InvalidBucketName`; test-server's
+placeholder credentials just always failed auth first, so upstream never noticed). Confirmed against
+4 fresh `b2_shared_identity` runs post-fix: `Uploading pre-keys` for both ACI and PNI now completes
+with no error every time (previously: `failed to register pre-keys, this is problematic and should
+never happen!` / HTTP 500, every time). `a1_smoke`/`e2c_key_distribution` still pass cleanly
+afterward — no regression.
+
+---
+
+### O14. A pre-existing websocket-teardown race — same family as O12, different request — was always there; O13 just always killed the run first
+
+**Status: fixed** (`crates/transports/transport-presage/examples/b2_shared_identity.rs` —
+`receive_one` and its call sites in `main`). Verified across multiple consecutive post-fix runs,
+including runs that still show the underlying O12-style log noise (see "Fix, verified" below).
+
+**What.** Fixing O13 did not make `b2_shared_identity` pass. It still fails identically —
+`Error: observer receiving B's bootstrap — timed out waiting to receive` — on 4/4 post-fix runs.
+What changed is *why*: the prekey refresh that used to 500 now succeeds cleanly every time, which
+means this failure was always here, one layer down, masked because O13 reliably ended the run at
+almost the same point before this could matter.
+
+**What actually happens (traced from a clean post-O13-fix run).** The observer's
+`receive_messages()` decrypts member A's first message fine. Immediately after, its own automatic
+prekey-count-check response (`Ok(WebSocketResponseMessage { status: 200/204, body:
+{"count":0,"pqCount":0}, .. })` or similar) arrives too late — `Could not deliver response for id
+...` — and `SignalWebSocket: Websocket closing: request handler failed` tears the connection down.
+Presage logs `failed to upsert newly seen contact!` and (now successfully) starts the prekey
+refresh. But whatever reads B's subsequent message never sees it: the run sits idle until the
+45-second `receive_one` timeout, with nothing in between but `could not generate response to a
+Signal request; responder was canceled` lines around the 45s mark.
+
+This is architecturally the same shape of bug as O12 — a response to a request riding the
+identified websocket arrives after the channel that was waiting for it has already been torn
+down/replaced — just on a different request (an automatic count-check inside `receive_messages()`'s
+background task, not `send_message`'s post-send bookkeeping) and with a worse outcome: O12's send
+path is proven non-fatal (the receiver's own decrypt is the source of truth, and delivery is
+confirmed independently). Here, nothing re-established the observer's ability to receive after the
+teardown within the test's window.
+
+**Root cause, confirmed.** It's the test harness, not presage's reconnect or the test-server's
+timing. `b2_shared_identity.rs`'s `receive_one` helper called `receiver.receive_messages().await`
+**fresh on every invocation** — once per message it wanted, not once per `Manager`.
+`third_party/presage`'s own doc comment on `receive_messages()`
+(`presage/src/manager/registered.rs:~607`) says exactly what that costs: "we initialise a *fresh*
+Signal websocket, which means any other use of the previous one will go into nirvana." Every call
+after the first tore down the *previous* call's websocket — and, per the trace above, that previous
+call could still have same-socket background bookkeeping in flight on it when it did. Confirmed by
+reading `SignalWebSocketProcess::process_frame`/`::run()`
+(`third_party/libsignal-service-rs/src/websocket/mod.rs`): a *response* whose `oneshot` receiver has
+already been dropped just logs `Could not deliver response for id ...` and moves on harmlessly; but
+an incoming *request* frame whose `request_sink` receiver has been dropped — because the
+`MessagePipe`/stream reading from it was dropped when the previous `receive_one` call returned —
+fails `self.request_sink.send(...).await`, and the `?` on that call ends
+`SignalWebSocketProcess::run()` with `Err(WsClosing { reason: "request handler failed" })`: exactly
+the `SignalWebSocket: Websocket closing: request handler failed` seen in the logs. The real
+`PresageTransport` actor and `e2c_key_distribution`'s `subscribe()`-based receive loop were never
+exposed to this because both call `receive_messages()` exactly once per `Manager` lifetime and drain
+it continuously — `b2_shared_identity`'s `receive_one` was the only call site in the codebase
+re-opening it per message.
+
+An intermediate fix (a short grace sleep between finding a message and returning, mirroring the
+existing O12 workaround already in `PresageTransport::receive_group_secret`) reduced how often this
+hit but did not eliminate it — confirmed by it recurring on a subsequent run even with the sleep in
+place, timing out on B's bootstrap message again. The sleep only narrows the window in which the
+*next* call's fresh socket can clobber the current one's in-flight state; it doesn't stop the
+fresh-socket churn that causes it.
+
+**Fix, verified.** Stopped opening `receive_messages()` per message. `receive_one` now takes an
+already-open, already-pinned stream (`&mut (impl Stream<Item = Received> + Unpin)`) instead of a
+`&mut Manager` that it opens a stream on internally. `main` opens `receive_messages()` **once per
+back-to-back receive burst** — the observer's two bootstrap messages, and later its two real posts,
+each drained off one live stream — matching how the real actor and `e2c_key_distribution` already
+do it. Between bursts (where the observer needs to *send*, which needs `&mut Manager` and would
+conflict with a still-open stream borrow) the stream is allowed to drop normally, which is safe
+there because nothing is expected to arrive on it in that gap. Verified across multiple consecutive
+runs post-fix — including runs that still show the underlying O12-style `Could not deliver response
+for id ...` / `Websocket closing: request handler failed` / `responder was canceled` log noise; that
+noise is expected and no longer fatal, because it can no longer land on a socket a *subsequent*
+`receive_one` call depended on.
+
+### O15. `a1_smoke`'s first send/receive round trip after a fresh boot can lose the message entirely — mitigated with a bounded retry, not yet root-caused
+
+**Status: mitigated, not fixed** (`crates/transports/transport-presage/examples/a1_smoke.rs`).
+Root cause undetermined; see below.
+
+**What.** Distinct from O12: `a1_smoke` occasionally fails its very first send/receive round trip
+of a fresh process, with the identified websocket getting a clean `code=1000 reason="OK"` close
+from the remote while `send_message`'s request is still awaiting its response
+(`ServiceError(WsClosing { reason: "WebSocket closing while waiting for a response" })`). Unlike
+O12 — where the PUT is proven to have already succeeded server-side regardless of what the client
+sees — here B's queue genuinely comes back empty (`Received::QueueEmpty`, no `DataMessage` ever
+arrives). Only observed on the *first* attempt of a run so far; a second attempt in the same
+process, or a wholly fresh `cargo run`, has always gone through cleanly.
+
+**Not yet root-caused.** Candidates, untested: JIT/connection-pool warm-up latency on the
+self-hosted test-server's very first identified-websocket round trip after `boot.sh` (a cold JVM
+has slower first-request latency, which could trip a client- or proxy-side liveness assumption); a
+duplicate-connection replacement policy on the server closing an "older" identified socket out from
+under an in-flight request; or something proxy-side in `tls-proxy.sh`'s Caddy container. Whether
+this tracks wall-clock time since `boot.sh` started (vs. simply "first `cargo run` of the process")
+hasn't been isolated — that's the first thing to check before trusting any theory here.
+
+**Mitigation, verified.** `a1_smoke` now retries the whole send/receive round trip up to 3 times
+(fresh plaintext + timestamp per attempt) before failing, instead of requiring a human to re-invoke
+the example. Verified: reproduced the failure on attempt 1, watched attempt 2 pass automatically
+within the *same* `cargo run` — a run that, pre-fix, would have required a second manual invocation.
+If it ever burns all 3 attempts, treat that as a real regression, not this flakiness.
+
+**To fix properly.** Needs the same level of source-verification O13/O14 got: instrument which side
+(client, proxy, or test-server) actually originates the `code=1000` close, and whether it correlates
+with wall-clock time since `boot.sh` started, before committing to a theory.
+
+### D1. Polls carry no buttons, because a button press deanonymizes the voter
+
+*Decided by the user during a4.*
+
+A vote is proof-carrying: the voter proves they are an unbanned member voting under a pseudonym
+derived from that poll's context. A messenger button press carries **no proof**, and the server
+cannot make one (a proof needs the voter's `user.bin`). The old code faked it by spawning the
+`slack-client` binary on every click, against whatever `slack-client/user.bin` sat next to the
+server — so every click voted as one shared identity, and the second click by *anyone* was
+rejected as "already voted".
+
+Worse, the press is a deanonymization channel: it tells the server "Slack user U clicked"
+*before* the pseudonymous proof arrives, so correlating the two by timing links the pseudonym to
+the account. That is exactly what the pseudonym exists to prevent.
+
+So: no vote buttons anywhere. Polls display their id; members vote from their own client, with
+their own key. The 👍/👎 **rating** buttons stay — a rating needs no proof and says nothing
+about who its subject is.
+
+### D2. `Compress::Yes` for records, not for proving keys
+
+*Deviates from the plan, which said "everywhere".*
+
+Records (proofs, scans, callbacks) are compressed: point compression nearly halves a proof
+(2×G1 + 1×G2), a record is stored forever, and in serverless mode **every member** downloads
+it, so the saving is per-member.
+
+Proving keys and bulletin dumps are **not**. The client refetches them on every CLI invocation
+(no client-side cache, `Validate::No` deliberately), over localhost, and `bench/*.py` spawns the
+client hundreds of times. Compressing tens of megabytes of curve points would put a modular
+square root per point on every client start, to save bandwidth that costs nothing. Note field
+elements do not compress at all, so a public-input-only payload pays the envelope's ~15 bytes
+for no saving — a fine trade for knowing what a record *is*, but not compression.
+
+Reversible in one place if you disagree: `personas_wire::RECORD_COMPRESS` and
+`personas_wire::raw::COMPRESS`.
+
+### D3. The server falls back to the mock transport
+
+With no `SLACK_BOT_TOKEN` / `SIGNAL_BOT_NUMBER`, the server used to **exit**. It now relays to
+an in-process chat log and says so. `PERSONAS_TRANSPORT=mock` forces it even when credentials
+are present, so a test or a demo can be sure it will not talk to a real messenger.
+
+This is what makes the system runnable on a fresh checkout — and it is what made the ban and
+reputation paths reachable locally for the first time (with no daemon, every relay failed, so
+the timestamp→callback row was never written and `/api/cb` had nothing to return).
+
+### D4. `/api/slack/vote` is synchronous
+
+It used to spawn verification onto a background task and answer `{"status":"received"}` before
+checking anything — so a voter whose proof was rejected learned about it from a message in the
+channel, and the CLI that sent it exited 0. The caller now gets the verdict it asked for.
+
+### D5. Config lives in its own crate, not `personas-core::config`
+
+*Deviates from the plan, which named `personas-core::config`. Decided in a5.*
+
+The layered config (figment + toml + the legacy env vars) is `personas-config`, a dedicated
+crate, rather than a module of `personas-core`. `personas-core` is the circuit/crypto crate that
+every proving path compiles; adding figment, toml, and their transitive parser trees to it would
+put a config dependency on the critical build path for no benefit. `personas-config` depends on
+nothing cryptographic and is depended on only by the binaries and the thin client config. Every
+built-in default equals the value the pre-a5 code hardcoded, and the old `PERSONAS_*` /
+`SIGNAL_*` / `SLACK_*` env vars still work, so this is transparent to anything that set them.
+
+### D6. The flat `personas` CLI keeps the Signal flag letters; Slack's short flags changed
+
+*Decided in a5, when the two client binaries merged.*
+
+`personas` is one flat command set; the configured transport picks the route family and request
+shape. The two old CLIs had assigned the same short letters to different meanings (Slack's `-c`
+was *channel*; Signal's `-c` was *thread*), so a single schema cannot honor both. The Signal
+letters win, because `bench/*.py` depends on them and is the only automated acceptance test —
+`-g` is the channel/group everywhere (Slack's `-c` for channel is gone), `-c` is the thread
+everywhere, `-t` is the (now string) timestamp. Commands that exist on only one transport
+(`reply`/`reply-pseudo`/`single-rep` on Signal; `get-rep`/`request-badge`/`approve-badge` on
+Slack) live in the one enum and error clearly against the other side. Poll and vote take a
+superset of flags (`-m` vs `-q`+`--option*`; `-t`/`-e` vs `--vote-id`/`--vote`), validated per
+transport. The Slack path has no bench, so it is covered only by the a5 mock smoke test.
+
+### D7. Serverless: banned members may still vote and rate (spite-downvoting tolerated)
+
+*Decided by the user 2026-07-14, during the d2 redline. Applies to the serverless design only.*
+
+In serverless mode a vote and a rating both carry a `pseudonym_pred` proof, which establishes
+bulletin membership and a pseudonym derivation but **deliberately does not check `banned`** (the
+predicate never reads the field; only the four *post* predicates do). So a banned member keeps a
+voice in moderating their own chat — including the ability to downvote out of spite.
+
+This is a **committed choice, not a default.** The alternative — a `banned == 0` variant of
+`pseudonym_pred` and a new proving/verifying key set — was considered and declined, because for the
+applications in view a banned member retaining a rating/voting voice is acceptable and spite
+ratings are not a threat worth a circuit change. What a ban *does* still prevent is posting
+anonymously or pseudonymously (the post predicates enforce `banned == 0`), which is the property
+that matters. Recorded so a future reader surprised by "a banned user just downvoted me" knows it
+was intended. Revisit only if a deployment's threat model makes spite ratings load-bearing. See
+`SERVERLESS_PROTOCOL.md` §8, §10.
+
+### D8. The fold-size menu is a closed compile-time set, not an arbitrary runtime N
+
+*Landed by workstream c1 (2026-07-15).* The scan and fold circuits are const-generic over `N`, the
+number of callback scans a single proof accounts for (`NF<N>`, `PubScan<_, N>`, `ScanInt<_, N>`,
+`scan_predicate<_, N>`, `exec_scanint::<_, N>`, all in `personas-core::circuits`). Const generics
+are a compile-time property, so a proof can only ever be produced for an `N` the binary was
+*monomorphized* for. That set is fixed in one place — `FOLD_SIZES` (currently `[1, 2, 4, 8, 16]`) —
+and `dispatch_fold_size!(n, N => …, fallback)` maps a runtime `n` to the matching monomorphization,
+falling through to `fallback` for anything off the menu. This is the deliberate decision: **the menu
+is closed.** Supporting a new fold size means adding it to `FOLD_SIZES` *and* the macro's match arms
+(a unit test panics if they drift) and recompiling — you cannot ask for an arbitrary `N` at runtime,
+and c2/c3/c4 (per-`N` param cache, client auto-select, verify-side dispatch) all pick from this
+closed set. Each menu size also multiplies keygen and param-cache cost, so the menu is kept short on
+purpose. c1 made the layer generic but left every concrete caller pinned to `NUM_SCANS_PER_FOLD`
+(= 1) via const-generic type-alias defaults, so behavior is byte-identical to before until a later
+workstream opts a caller into a different size.
+
+### D9. The barrier cadence buckets records by the provider's `serverReceivedTimestamp`
+
+*Landed by workstream d5 (2026-07-15); accepted by the cryptographer "for now, but make a note of
+it."* A record's settlement barrier (the bucket its ticket settles in, its ban poll closes in) is a
+deterministic function of a **service-assigned** receive timestamp — Signal's
+`serverReceivedTimestamp`, surfaced as `transport_api::Incoming::Message::received_at` and bucketed
+by `personas_messenger::Heartbeat` as `(received_at − genesis) / period`. See `docs/D5_HEARTBEAT.md`
+and `SERVERLESS_PROTOCOL.md` §14 / sign-off item 11.
+
+**Why not the alternatives.** (a) *The device clock* — each replica bucketing by its own wall clock
+at the instant it received the record — forks honest replicas on ordinary delivery jitter across a
+barrier boundary (A sees a record in barrier *k*, B sees the same record 2 s later in barrier *k+1*;
+they settle its ticket at different times, roots diverge). (b) *The sender-set message id*
+(`dataMessage.timestamp`) is forgeable — a member could backdate a record into an old barrier (the
+same reason §4 orders by prefix, not by that field). The provider's stamp is assigned once and
+delivered identically to every recipient, so the record→barrier map is identical everywhere and
+convergence is **exact** (`e2e_skewed_delivery_still_converges_exactly` is the proof: four replicas,
+skewed arrival + out-of-step heartbeats, identical roots). The device clock still advances the
+monotone "how far has now got" counter (`Messenger::tick`), but that only settles late at worst
+(bounded by `W`), never at a barrier a peer disagrees with.
+
+**Why it adds no meaningful trust.** The provider is already inside the trust boundary for delivery
+(§4: delay, withhold, censor). Stamping a coarse bucket is within powers it already has (it could
+move a record across a boundary by delaying delivery), and it still cannot forge a proof, mint a
+member, or invoke a callback. The stamp is used only for cadence — never for ordering (prefix-order,
+§4) or proof acceptance (self-computed roots, §5).
+
+**The residual caveat (the thing to revisit).** A malicious provider that hands *different
+recipients different* stamps for the same message is a fork vector. But it is the same class as
+selective delivery/censorship, which §4 already declares out of scope ("Censorship resistance is a
+messenger property we do not try to add"). If that is ever pursued, cross-checking the provider's
+timestamp — e.g. members gossiping the stamp each saw — is where this would be hardened.
+
+### D10. The staging Signal-Server needs a one-line auth relaxation so presage can register
+
+**Context.** e2 A1's send/receive wiring runs the modified client (`transport-presage`, on presage)
+against our *own* isolated Signal-Server in upstream `test-server` mode — not production. presage
+registers a new account over the **authenticated** `/v1/websocket/` using the provisional
+`(e164, registration-password)` **before the account exists**, so Signal-Server's
+`WebSocketAccountAuthenticator` finds no account and stock-throws `InvalidCredentialsException` →
+HTTP 403 at the upgrade. Registration cannot proceed.
+
+**Decision.** Patch that one authenticator to return the account lookup's `Optional` directly
+(empty ⇒ an *unauthenticated* upgrade) instead of throwing. The upgrade's `Authorization` header is
+still forwarded onto the `POST /v1/registration` request frame
+(`WebSocketResourceProvider.getCombinedHeaders` merges upgrade + frame headers, and `Authorization`
+is not in `EXCLUDED_UPGRADE_REQUEST_HEADERS`), so `RegistrationController` still reads the basic-auth
+and creates the account. After registration presage reconnects with now-valid credentials and
+authenticates normally. Lives as `deploy/signal-test-server/patches/0001-*.patch`, applied
+idempotently by `boot.sh`.
+
+**Why it is acceptable.** The server is single-tenant, ephemeral, and only ever holds our own test
+accounts; the relaxation only affects the *upgrade-time* hard-fail, and authenticated resources
+(send/receive) still reject an unauthenticated connection at the resource layer. **Not for
+production** — it would let any bad credential open an unauthenticated socket there. This is a
+staging-only accommodation, orthogonal to the personas protocol.
+
+### D11. The modified Signal client pins the rustls TLS backend explicitly
+
+**What broke.** libsignal-service's `PushService::new` builds its `reqwest` client for rustls
+(`tls_built_in_root_certs(false)` + a manual `add_root_certificate`) but never *forces* the backend.
+The workspace `reqwest` is declared with default features (which enable `default-tls` = native-tls).
+In any build that also pulls another reqwest user with those defaults — e.g. `personas-bulletin`,
+so the `personas-messenger` convergence test — Cargo unifies reqwest to compile **both** backends,
+and reqwest's builder default flips to native-tls. The client then speaks the wrong TLS stack and
+every request fails as an opaque "reqwest error". The standalone `transport-presage` examples never
+showed it because their graph is pure-rustls.
+
+**Decision.** Add `.use_rustls_tls()` to the vendored `PushService::new` builder — deterministic
+regardless of feature unification, a no-op when only rustls is compiled in. (Alternative — set
+`default-features = false` on the workspace reqwest — was rejected: it would change the *as-a-service*
+`personas-client`/`personas-bulletin` HTTP path's TLS backend, a wider blast radius than pinning the
+one client that actually cares.)
+
+### D12. `PresageTransport` drives presage on a dedicated actor thread
+
+**Why.** presage is awkward to place behind the `Transport` trait (which is `Send + Sync` with
+`Send` futures): `receive_messages` uses `tokio::task::spawn_local` (so it needs a `LocalSet`, i.e. a
+current-thread driver), while libsignal pumps its websockets with `tokio::spawn` (so it needs
+**worker threads**). A plain current-thread runtime starves the pumps and connections drop
+mid-request; a plain multi-thread runtime has no `LocalSet` for `spawn_local`.
+
+**Decision.** `PresageTransport::start` spawns one **dedicated OS thread** that runs a *multi-thread*
+Tokio runtime and drives a `LocalSet` on it (`LocalSet::block_on`) — mirroring presage-cli's
+`#[tokio::main]` + `run_until`. That thread **owns** the registered `Manager` and the content cipher
+(originally `GroupContentCipher`, now `PprfContentCipher` — see D13); the `Transport` (on the
+caller's runtime) talks to it over `Send` channels (a command channel for sends, a broadcast channel
+for decoded `Incoming`). The cipher never crosses a thread boundary. Two further sharp edges are
+handled there: the thread needs a large stack (32 MiB — presage's receive future overflows the
+2 MiB default), and the `Manager` clones must be dropped *inside* the runtime before it tears down
+(sqlx's pool `Drop` needs a Tokio context, else a teardown panic). Callers using this transport must
+run on a **multi-thread** runtime for the same `tokio::spawn`-pump reason (`#[tokio::test]` defaults
+to current-thread and must opt into `flavor = "multi_thread"`).
+
+### D13. Phase A2 replaces the Phase A1 content cipher: `PprfContentCipher` (K2/PPRF) is what `PresageTransport` runs
+
+**What changed.** `transport-presage/src/content_cipher.rs` (Phase A1 — one shared, non-rotating
+`SenderKeyRecord`, Signal's own `group_encrypt`/`group_decrypt`) is no longer what
+`PresageTransport::send`/`subscribe` call. A new module, `transport-presage/src/pprf_cipher.rs`,
+wraps `e2a`'s `personas_group_crypto::KeyManager` directly: `send` derives a fresh single-use `mk`
+via `KeyManager::seal` (random nonce, puncture on the way out — even the sender cannot recover it
+afterward), AEAD-seals the record bytes under it with AES-256-GCM-SIV, and prepends the
+`MessageTag {epoch, nonce}` in the clear (`[epoch: u64 LE][nonce: 16 bytes][ciphertext]`); `subscribe`
+reverses it via `KeyManager::open`, puncturing on receipt too. This is design doc §5's A2, and it is
+what lifts A1's two accepted limitations (§4): concurrent sends from different members no longer
+collide (independent random nonces, not a shared chain counter), and a message's key is genuinely
+gone after one use (forward secrecy), not just hash-ratcheted forward.
+
+**What did not change.** `content_cipher.rs`/`GroupContentCipher` is left in the tree, unused by the
+transport, as the A1 reference implementation and its own characterization tests (why full private
+state is distributed rather than an SKDM, the accepted concurrency limitation, etc.) are still worth
+having on file. `PresageTransport::create_shared_key` became `create_group_secret` (returns a
+`personas_group_crypto::DistributedSecret` instead of a `content_cipher::SharedSenderKey`); callers
+in `transport-presage`'s examples and `personas-messenger`'s `e2e_record_converges_over_signal` test
+were updated to match.
+
+**What is deliberately still open, not touched by this change.**
+
+- **Real pairwise distribution of the group secret (e2c).** `PprfContentCipher::create` hands back
+  the `DistributedSecret` wire bytes exactly the way A1's `GroupContentCipher::create` handed back
+  `SharedSenderKey` bytes — for the caller to distribute. Today that is still the bring-up stand-in
+  (the caller passes the bytes directly, e.g. `shared.clone()` in the account-gated examples), not a
+  real send over each member's pairwise Double Ratchet session. That plumbing is e2c, unstarted.
+- **Re-key triggers (e2d).** `PprfContentCipher::rekey`/`install_rekey` expose the mechanism (install
+  a fresh epoch, delete the old one wholesale — pinned by the new `rekey_excludes_the_old_epoch`
+  test) but nothing calls them from a ban/leave/epoch-boundary event yet. *Update (D16): a blanket
+  cadence trigger is now wired — see D16 for why ban-specific exclusion stays open rather than being
+  closed alongside it.* Until a member is actually excluded, a banned member who kept the group
+  secret can still decrypt new content at the Signal layer within a re-key's cadence window — their
+  authorisation is still revoked at the proof layer regardless (design doc §7), so this is a
+  content-layer-only gap, the same one A1 always had, now bounded rather than unbounded.
+- **The AEAD primitive choice** (AES-256-GCM-SIV via RustCrypto's `aes-gcm-siv`, chosen here for its
+  misuse resistance and because it needed no new primitive already absent from the dependency tree)
+  is implemented but not yet the subject of an actual cryptographer sign-off — design doc §10 still
+  lists "confirm the AEAD primitive choice" as open, and this decision doesn't close it, only
+  proposes an answer.
+- **The delivery-layer phantom certificate (B2/D1, §6)** is untouched — this is purely the content
+  layer. Every message under the new cipher still rides inside a real per-account sealed-sender
+  envelope, so a recipient still learns the real sending account, same as before this change.
+
+**Build/test status.** Written in a sandbox with no `cargo`/`rustc`, so it went unverified at the time
+of writing. Since then, built and run on a real machine against a real (private, self-hosted staging)
+Signal-Server: `cargo run -p transport-presage --example a1_smoke` passes (confirms the
+registration/TLS/messaging plumbing this change rides on top of is unaffected), and
+`cargo test -p personas-messenger --release -- --ignored --nocapture e2e_record_converges_over_signal`
+passes — a real Groth16 ban-poll record travels over real Signal encrypted under this cipher, and the
+observer's `Replica::ingest` verifies and folds it. `pprf_cipher`'s own in-process unit tests
+(round trip, concurrent non-collision, replay rejection, re-key exclusion, tamper detection) have not
+been separately confirmed to pass in isolation but exercise the same code paths the e2e test does.
+Not independently crypto-reviewed — see the open items above (AEAD choice sign-off, e2c, e2d, B2).
+
+### D14. e2c: real pairwise distribution of the K2 group secret over the Double Ratchet
+
+**What was open.** Every earlier example and the `personas-messenger` e2e test installed the K2 group
+secret by handing `DistributedSecret` wire bytes across directly in a Rust variable
+(`PresageTransport::create_group_secret`'s return value, passed straight to `start`) — a bring-up
+stand-in explicitly flagged as such everywhere it appeared (D13, `SERVERLESS_SIGNAL_DESIGN.md` §5
+step 2). The design has always called for this to travel over the pairwise Double Ratchet instead
+(`group.rs`'s own module doc: "hands its `DistributedSecret` wire form to every other member over the
+pairwise Double Ratchet").
+
+**What is built.** `PresageTransport::distribute_group_secret` / `receive_group_secret`
+(`transport-presage/src/lib.rs`). The key realization: this needs no new cryptographic mechanism.
+Sending the secret as the body of one ordinary 1:1 Signal message — `Manager::send_message`, the exact
+same call the content path already uses — already runs Signal's full pairwise handshake (X3DH on first
+contact, the Double Ratchet on every message after) inside `libsignal-service-rs`/`libsignal`. The
+group secret's raw seed is therefore encrypted end-to-end by the time it leaves the process, satisfying
+`GroupSecret::to_wire`'s documented requirement without building a second encryption layer on top. What
+this function actually adds is small: JSON-serializing `DistributedSecret` (already
+`Serialize`/`Deserialize`), and a body-prefix tag (`KEY_DISTRIBUTION_TAG = "personas/group-secret/v1:"`,
+not valid base64) so a receiver can tell a key-distribution message apart from ordinary content
+ciphertext with a `starts_with` check, before ever attempting to parse or decrypt it as either.
+
+`receive_group_secret` drives `receive_messages` directly on a freshly loaded `Manager` (not through the
+actor thread — there is no cipher to install into yet, that's the whole point of this call), filters for
+the tag, and returns the decoded secret or times out.
+
+**Proof structure.** `transport-presage/examples/e2c_key_distribution.rs`: a creator and a member
+register two wholly independent accounts (no shared process state beyond ACIs), the creator distributes
+a fresh secret to the member, the member recovers it with `receive_group_secret` and the example asserts
+the recovered `epoch`/`seed` match byte-for-byte, and then — the part that actually matters — both sides
+`PresageTransport::start` with their own copy (creator's original, member's received) and exchange one
+real PPRF-encrypted content message end to end. That last step is what distinguishes this from merely
+checking the bytes match: it proves the *received* secret installs a `KeyManager` that genuinely
+interoperates with the creator's, not just that transit preserved the bytes.
+
+**What's still open.** This finding is unrelated to B2 (D1, §6 — the shared phantom sealed-sender
+identity), which was open at the time this was written and is now built — see D15. The e2d re-key
+triggers (when to call `rekey`) remain open.
+
+**Build/test status.** Run against the staging server: **`e2c_key_distribution` passes.** The member's
+received `epoch`/`seed` matched the creator's byte-for-byte, and both sides' `KeyManager`s — one
+installed from the original secret, one from the pairwise-delivered copy — interoperated end to end (the
+member decrypted the creator's real content message).
+
+The first real run showed an `ERROR ... Websocket closing: request handler failed` / `failed to upsert
+newly seen contact!` pair mid-run (presage's background "newly seen contact" bookkeeping losing its
+response because `distribute_group_secret`/`receive_group_secret` dropped their short-lived `Manager`
+immediately after use, tearing the websocket down mid-bookkeeping) — the same intermittent race already
+documented as O12, non-fatal, delivery and decryption already succeeded either way. Mitigated (not a
+presage patch, just not racing the teardown): both functions now `tokio::time::sleep` 300ms after their
+last network call, before `manager` drops, giving that background call time to land. Confirmed on a
+second real run: that specific error pair no longer appears. A milder, different-shaped one
+(`could not generate response to a Signal request; responder was canceled. continuing.`) still shows up
+occasionally — same request/response-losing-its-pairing family, but presage itself logs it as
+non-blocking ("continuing") rather than cascading into a bookkeeping failure, and it hasn't affected a
+pass/fail result. Left alone rather than chased further.
+
+### D15. B2/D1 realized as a shared ACI identity keypair — a `presage` fork, not certificate substitution
+or device linking
+
+**Why the two earlier approaches don't work.** Certificate substitution alone (attach the phantom's
+`SenderCertificate` while continuing to encrypt under a member's own identity key) is not an
+implementation gap — it is cryptographically incoherent. Checked directly against
+`signalapp/libsignal`'s `sealed_sender_decrypt` (`rust/protocol/src/sealed_sender.rs`): the recipient
+decrypts using the Double Ratchet session stored under `ProtocolAddress::new(cert.sender_uuid(),
+cert.sender_device_id())` — the address the *certificate* names, not whatever the sender actually used.
+Attach a certificate naming the phantom while encrypting under a different identity key, and the
+recipient looks up a session keyed to a different ratchet chain entirely; decryption fails outright, it
+doesn't just misattribute. Device linking (D14) sidesteps this correctly — a linked device genuinely
+receives the phantom's real identity key during linking — but leaks a persistent per-member `device_id`
+tag (`docs/FINDINGS.md`'s D14/D15 history, both reverted in this session before this entry).
+
+**The unblocking insight (credit: external/professor review, not found independently at first).** The
+identity keypair backing an account's Double Ratchet sessions is not fixed to "whatever was randomly
+generated at registration" — it is just a Curve25519 keypair, freely choosable, and nothing requires it
+to be unique per account. So: give every member their own, completely independent real Signal account
+(own phone number, uuid, device id, prekeys, sessions) — except register with the **same** ACI identity
+keypair instead of a random one. Signal's server, seeing an ordinary registration, legitimately signs
+that account's own `SenderCertificate` — which now embeds the same public identity key as every other
+member's. Nothing about certificate issuance or session establishment changes; `Manager::send_message`
+and every existing `PresageTransport` code path are untouched.
+
+**Why this doesn't collide.** X3DH still mixes in each member's own distinct signed-prekey and
+one-time-prekey (fetched from *that account's own* published bundle) even though the identity-key input
+is shared, so two members' sessions with a given recipient stay entirely independent ratchet chains —
+unlike sharing a sender-key chain (A1's own accepted limitation) or sharing a device id (D14's rotation
+attempt), which collide because they share *mutable, sequentially-advanced* state. A shared identity key
+is static input to independent handshakes, not shared mutable state.
+
+**What's built.**
+
+- `crates/personas-group-crypto/src/group.rs`: `DistributedSecret::derive_phantom_identity_seed` — HKDF
+  over `(seed, epoch)`, domain-separated (`personas/phantom-identity-seed/v1`) from the epoch-key and
+  message-key derivations so the three can never be confused. Returns raw bytes — the crate stays
+  libsignal-free by design (its own module doc). Epoch-scoped like the rest of the secret: a re-key
+  produces a *different* phantom identity, which is semantically right (a banned member shouldn't stay
+  bound to the shared identity any more than they stay able to decrypt) but costly — an identity-key
+  change means re-registration, not just installing a new `KeyManager`. Three new unit tests: determinism
+  across members, difference across epochs/secrets, domain-separation from the epoch key.
+- `third_party/presage` (**newly vendored** — mirrors the existing `libsignal-service-rs` vendoring
+  pattern: cloned at the same pinned rev already used elsewhere in this workspace,
+  `63482efd0cbdc0780baf0650517c7d55f1cac05d`, root workspace Cargo.toml stripped so it doesn't create a
+  nested-workspace conflict, patched in via `[patch."https://github.com/whisperfish/presage"]`). The
+  actual fork, in `presage/src/manager/confirmation.rs`: `Manager::confirm_verification_code` always
+  called `IdentityKeyPair::generate(&mut rng)` inline with no seam to override it. Refactored into a
+  private `confirm_verification_code_impl(self, code, aci_identity_key_pair: Option<IdentityKeyPair>)`,
+  with the original public method delegating with `None` (unchanged behavior for every existing caller)
+  and a new `confirm_verification_code_with_identity` delegating with `Some(...)`. PNI identity is
+  unaffected — still always random — since PNI is unrelated to what this scheme shares.
+- `third_party/libsignal-service-rs`'s `cipher.rs`/`content.rs`: `Metadata` gains
+  `sender_identity_key: Option<PublicKey>`, populated only on sealed-sender deliveries. The private
+  `sealed_sender_decrypt` helper already had the validated `UnidentifiedSenderMessageContent` (and thus
+  `usmc.sender()?.key()?`, the certificate's embedded key) in scope and was simply discarding it after
+  building `SealedSenderDecryptionResult` — changed its return type to also hand back the key, no new
+  decrypt call needed. Every other `Metadata` construction/destructuring site in both vendored trees
+  (9 total across `libsignal-service-rs` and `presage`/`presage-store-sqlite`) updated to set/ignore the
+  new field — the SQLite persistence layer doesn't have a column for it yet, so a message reloaded from
+  disk reports `None` regardless of how it originally arrived; a real limitation, not silently patched
+  over.
+- `transport-presage/src/lib.rs`: `PresageTransport::register_as_phantom` (derive the seed, build the
+  `IdentityKeyPair` via `PrivateKey::deserialize` + `.public_key()`, call the forked confirmation method)
+  and the receive loop now reports `content.metadata.sender_identity_key` (base64, `phantom:` prefix)
+  in place of the uuid whenever it's present, falling back to the real uuid otherwise — sealed sender
+  itself is conditional here (`Manager::send_message` only attempts it once the sender's store already
+  holds the recipient's profile key, which presage learns automatically from one prior identified
+  message in each direction), so the fallback is a real, not theoretical, path.
+
+**What's still open.** Making sealed-sender delivery *reliably* engaged — today it depends on an earlier
+identified round trip having happened in each direction; nothing forces that ahead of time. The e2d
+re-key triggers, and what rotating the phantom identity on re-key would actually require operationally
+(re-registration is not something that can happen silently). Interop with real, unmodified Signal clients
+is untested and unspecified given the shared-identity-key deviation from Signal's normal one-key-per-
+account trust model — flagged as a new §10 sign-off item, not something this document can resolve alone.
+
+**Proof structure.** `transport-presage/examples/b2_shared_identity.rs`: two members register
+independently via `register_as_phantom` with the same group secret; an independent observer registers
+normally; a bootstrap round (each member → observer, observer → each member) lets profile keys exchange
+so the real test sends go out sealed-sender; each member then sends the observer one more message. Passes
+only if the observer sees two *different* `sender` uuids (not device linking) and two *identical*
+`sender_identity_key` values (the actual property this scheme needs).
+
+**Build/test status.** Written and reasoned against `signalapp/libsignal` v0.94.4 and the exact pinned
+`presage`/`libsignal-service-rs` revisions already used elsewhere in this workspace, checked directly
+against source (not guessed) for every claim above about how `sealed_sender_decrypt`, `IdentityKeyPair`,
+`PrivateKey::deserialize`, and `confirm_verification_code` actually work. Not yet independently run
+against the staging server — same caution as any unverified entry here applies until it is.
+
+### D16. e2d: a blanket cadence re-key, deliberately not ban-exclusion
+
+**Why not ban-exclusion.** The obvious reading of "re-key on ban" — redistribute a fresh secret to
+every member except the one who was banned — needs something that maps a banned *bulletin object*
+(the ZK layer's anonymous/pseudonymous identity) to a real `ServiceId` to leave out of the pairwise
+fan-out. That mapping does not exist anywhere in this system, and building one would mean
+deliberately linking an anonymous protocol identity to a real account — exactly what D15's shared
+ACI identity keypair exists to *prevent* even the group's own members from doing (§6: "recipients
+[i.e. other members] cannot attribute the account"). So this is not an unwired trigger sitting next
+to an otherwise-solved problem; it is a genuine, unresolved tension between two goals the design
+already committed to. Decided with the user 2026-08-17: implement the one trigger that has no such
+tension — a **blanket** cadence re-key, no exclusion — and leave ban-specific exclusion an explicit,
+disclosed limitation rather than force a resolution that would compromise anonymity to get it.
+
+**What's built.** `transport-presage/src/lib.rs`:
+
+- `Command::Rekey` — the actor generates the next epoch via `PprfContentCipher::rekey`, installs it
+  locally, and fans the wire form out to every member with `rekey_fanout`, which reuses a new shared
+  `fanout_message` helper (`send_fanout` and `rekey_fanout` differ only in what body they send —
+  encrypted content vs. a tagged `DistributedSecret`). `fanout_message` carries forward O12's
+  `WsClosing`-narrow tolerance, since it is the identical race on a different message.
+- `PresageTransport::start`'s new `rekey_period: Option<Duration>` — if `Some`, the actor runs a
+  `tokio::time::interval` inside its existing `tokio::select!` command loop (added; the loop was a
+  plain `while let Some(command) = cmd_rx.recv().await` before) and calls the same rekey-and-fan-out
+  on every tick, with no exclusion logic. The immediate first tick (`tokio::time::interval`'s default)
+  is consumed once before entering the loop, so cadence starts one full period after the secret this
+  actor just installed, not instantly. `None` disables it; `PresageTransport::rekey()` is still
+  callable manually either way, for a caller that wants to key off something other than a timer (e.g.
+  its own barrier/heartbeat).
+- The **receive side** needed a real fix, not just a sender-side addition: the live actor's ordinary
+  content receive loop had no path for a tagged key-distribution message at all — only the separate,
+  bring-up-only `receive_group_secret` function checked for `KEY_DISTRIBUTION_TAG`. A re-key sent to
+  an already-`start()`ed member would have silently fallen through to the content path, failed
+  `BASE64.decode` (the tag contains `:`, deliberately not valid base64), and been dropped as "not one
+  of ours" — indistinguishable in the logs from ordinary background noise. The receive loop now checks
+  the tag first and routes a match to `cipher.install_rekey(..)` instead of `cipher.decrypt(..)`.
+- `encode_key_distribution`/`decode_key_distribution` factor out the tag+base64+JSON wire format,
+  shared by `distribute_group_secret`/`receive_group_secret` (e2c, refactored to use them, behavior
+  unchanged) and the new e2d path — one wire format, one place it's defined, instead of two copies
+  that could silently drift apart.
+
+**What's still open.** Ban-specific exclusion, per the tension above — a banned member who kept a
+recent epoch's key can read content until the next scheduled cadence tick, not until a rekey targeted
+at them specifically; bounded now (by the cadence period) rather than unbounded, which is what this
+decision actually buys. Choosing an actual cadence period for a real deployment is a separate
+judgment call (shorter periods bound exposure more tightly but cost more Signal traffic and CPU per
+member) that this entry does not make. `leave` and `epoch boundary` (the other two triggers §5 names)
+are not wired either — `leave` doesn't have D16's tension (a member leaving is its own action, so
+*something* already knows who) but nothing calls `rekey()` from a leave event yet.
+
+**Build/test status.** Compiles clean across the workspace (`cargo check --workspace --all-targets`),
+clippy-clean on the changed code. Four new unit tests, all passing, exercising the pure logic without
+network access: `key_distribution_round_trips` (the wire format `encode`/`decode` agree with each
+other — a mismatch here would silently drop every re-key at the live receive loop's `decode_key_distribution`
+step, indistinguishable from ordinary content), `ordinary_content_is_not_a_key_distribution_message`
+(no false-positive tag match), `corrupt_key_distribution_payload_is_an_error_not_a_skip` (a
+tagged-but-malformed message is reported, not silently swallowed the same way as "not tagged at
+all"), and `tick_on_none_never_resolves` (the cadence-disabled `select!` branch never fires). The
+existing `pprf_cipher` unit tests (rekey/install_rekey semantics themselves, unmodified by this
+change) still pass. **Not run against a live Signal server** — unlike D14/D15, which have a real
+`cargo run --example` proof against the self-hosted staging server, this has not been exercised
+end-to-end over real Signal (two live actors, one blanket re-key, confirm the second can still
+decrypt post-rekey content). That is the natural next verification step before relying on this in a
+demo, and the same caution the newest end of this document already asks for applies here too.

@@ -1,0 +1,5 @@
+# zk-callbacks (hkailad/callbacks @ d661879) uses #![feature(generic_const_exprs,
+# associated_type_defaults, type_alias_impl_trait)] and therefore requires nightly.
+[toolchain]
+channel = "nightly-2026-07-12"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,31 @@
+# The Node/Electron native addon (workstream e2): a napi-rs cdylib exposing the
+# transport-agnostic personas ZK engine (Messenger = Replica + Member over record
+# bytes) to Signal-Desktop. No Signal crypto here — delivery is Desktop's own
+# libsignal. Built at the workspace's pinned nightly; N-API is ABI-stable, so one
+# .node loads in both standalone Node (the convergence test) and Electron.
+[package]
+name = "personas-node"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+personas-messenger = { path = "../personas-messenger" }
+personas-bulletin = { path = "../personas-bulletin" }
+personas-core = { path = "../personas-core" }
+transport-api = { path = "../transports/transport-api" }
+transport-mock = { path = "../transports/transport-mock" }
+
+napi = { version = "2", default-features = false, features = ["napi8"] }
+napi-derive = "2"
+
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+hex = { workspace = true }
+ark-serialize = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

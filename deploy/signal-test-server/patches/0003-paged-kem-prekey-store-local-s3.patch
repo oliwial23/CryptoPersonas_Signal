@@ -1,0 +1,43 @@
+diff --git a/service/src/main/java/org/whispersystems/textsecuregcm/WhisperServerService.java b/service/src/main/java/org/whispersystems/textsecuregcm/WhisperServerService.java
+index 111397894..f6e93552d 100644
+--- a/service/src/main/java/org/whispersystems/textsecuregcm/WhisperServerService.java
++++ b/service/src/main/java/org/whispersystems/textsecuregcm/WhisperServerService.java
+@@ -348,6 +348,7 @@ import software.amazon.awssdk.regions.Region;
+ import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+ import software.amazon.awssdk.services.s3.S3AsyncClient;
++import software.amazon.awssdk.services.s3.S3Configuration;
+ 
+ public class WhisperServerService extends Application<WhisperServerConfiguration> {
+ 
+@@ -550,6 +551,12 @@ public class WhisperServerService extends Application<WhisperServerConfiguration
+         .credentialsProvider(awsCredentialsProvider)
+         .region(Region.of(config.getPagedSingleUseKEMPreKeyStore().region()))
+         .endpointOverride(config.getPagedSingleUseKEMPreKeyStore().endpointOverride())
++        // personas local test-server — path-style addressing so this can be pointed at a
++        // local S3-compatible mock (MinIO) via endpointOverride; virtual-hosted-style
++        // (bucket.endpoint) doesn't resolve against a plain localhost endpoint. No effect
++        // when endpointOverride is unset (real AWS accepts path-style too). See
++        // docs/FINDINGS.md O13 and deploy/signal-test-server/minio.sh.
++        .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
+         .build();
+     KeysManager keysManager = new KeysManager(
+         new SingleUseECPreKeyStore(dynamoDbAsyncClient, config.getDynamoDbTables().getEcKeys().getTableName()),
+diff --git a/service/src/test/resources/config/test.yml b/service/src/test/resources/config/test.yml
+index bc8fe7962..5769d1544 100644
+--- a/service/src/test/resources/config/test.yml
++++ b/service/src/test/resources/config/test.yml
+@@ -163,8 +163,12 @@ dynamoDbTables:
+     tableName: verification_sessions_test
+ 
+ pagedSingleUseKEMPreKeyStore:
+-  bucket: preKeyBucket # S3 Bucket name
++  # personas: was `preKeyBucket` — invalid per S3 bucket-naming rules (no uppercase). Real
++  # AWS would reject this too (InvalidBucketName); the test-server's placeholder credentials
++  # just fail auth first, so upstream never noticed. Lowercased for the local MinIO mock.
++  bucket: prekey-bucket # S3 Bucket name
+   region: us-west-2    # AWS region
++  endpointOverride: http://127.0.0.1:9100 # personas: local MinIO, see deploy/signal-test-server/minio.sh
+ 
+ cacheCluster: # Redis server configuration for cache cluster
+   type: local

@@ -1,0 +1,15 @@
+[package]
+name = "personas-config"
+version.workspace = true
+edition.workspace = true
+
+# The layered configuration for every personas binary: built-in defaults, an optional
+# `deploy/profiles/<name>.toml`, the legacy `PERSONAS_*` / `SIGNAL_*` / `SLACK_*` env vars,
+# and CLI overrides on top. It resolves scalars (bind address, api url, data dirs, which
+# messenger backs each route family); the server and client each read the slice they need.
+[dependencies]
+anyhow.workspace = true
+figment = { version = "0.10", features = ["toml"] }
+serde.workspace = true
+thiserror.workspace = true
+url = { workspace = true, features = ["serde"] }
