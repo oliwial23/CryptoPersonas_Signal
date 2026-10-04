@@ -1,0 +1,65 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.module-CallingScreenSharingController {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  padding-block: 9vh;
+  padding-inline: 3.3vw;
+  overflow: hidden;
+  align-items: center;
+  justify-content: space-between;
+
+  &__text {
+    @include mixins.font-body-2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 73vw;
+  }
+
+  &__button {
+    height: 82vh;
+    padding-block: 18vh;
+    padding-inline: 3.5vw;
+    line-height: 45.5vh;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__buttons {
+    align-items: center;
+    display: flex;
+    margin-inline-start: 1.25vw;
+    -webkit-app-region: no-drag;
+  }
+
+  &__close {
+    @include mixins.button-reset;
+    & {
+      margin-inline-start: 2.5vw;
+      cursor: pointer;
+    }
+    &::before {
+      content: '';
+      display: block;
+      width: 4.5vw;
+      height: 45.5vh;
+      @include mixins.color-svg(
+        '../images/icons/v3/x/x.svg',
+        variables.$color-gray-25
+      );
+    }
+    &:focus {
+      outline: none;
+      @include mixins.keyboard-mode {
+        @include mixins.axo-focus-ring;
+      }
+    }
+  }
+}

@@ -1,0 +1,244 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.module-SafetyNumberChangeDialog {
+  // Used to ensure that a set of spans reverse order under RTL
+  &__rtl-span {
+    display: inline-block;
+  }
+
+  &__shield-icon {
+    margin-inline: auto;
+
+    height: 24px;
+    width: 24px;
+    @include mixins.light-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/safety_number/safety_number.svg',
+        variables.$color-gray-90
+      );
+    }
+    @include mixins.dark-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/safety_number/safety_number.svg',
+        variables.$color-white
+      );
+    }
+  }
+
+  &__title {
+    @include mixins.font-body-1-bold;
+
+    text-align: center;
+    margin-top: 8px;
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-90;
+    }
+    @include mixins.dark-theme {
+      color: variables.$color-white;
+    }
+  }
+
+  &__message {
+    @include mixins.font-body-2;
+
+    text-align: center;
+    margin-top: 8px;
+    margin-bottom: 24px;
+    padding-inline: 4px;
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+    }
+
+    @include mixins.dark-theme {
+      color: variables.$color-gray-25;
+    }
+
+    &--narrow {
+      padding-inline: 38px;
+    }
+  }
+
+  &__contacts {
+    list-style-type: none;
+    padding: 0px;
+    margin-block-end: 0px;
+  }
+
+  &__row {
+    $row: &;
+
+    align-items: center;
+    display: flex;
+    flex-direction: row;
+    margin-bottom: 16px;
+
+    &__story-name {
+      @include mixins.font-body-1-bold;
+      flex-grow: 1;
+      margin-inline-end: auto;
+    }
+
+    &--wrapper {
+      flex-grow: 1;
+      margin-inline-start: 12px;
+    }
+
+    &--name {
+      @include mixins.font-body-1;
+
+      @include mixins.dark-theme {
+        color: variables.$color-white;
+      }
+    }
+
+    &--subtitle {
+      @include mixins.font-subtitle;
+
+      @include mixins.light-theme {
+        color: variables.$color-gray-60;
+      }
+
+      @include mixins.dark-theme {
+        color: variables.$color-gray-25;
+      }
+    }
+
+    &__view {
+      @include mixins.button-reset;
+      @include mixins.button-secondary-blue-text;
+
+      & {
+        opacity: 0;
+        transition: opacity 150ms cubic-bezier(0.17, 0.17, 0, 1);
+      }
+
+      // Using keyboard/mouse classes directly; mixins were doing weird things
+      .mouse-mode #{$row}:hover & {
+        opacity: 1;
+      }
+      .keyboard-mode #{$row}:focus-within & {
+        opacity: 1;
+      }
+
+      & {
+        border-radius: 4px;
+        padding-block: 8px;
+        padding-inline: 14px;
+      }
+    }
+
+    &__chevron__option {
+      padding-block: 10px;
+      padding-inline: 15px;
+
+      .ContextMenu__popper--single-item & {
+        padding-block: 10px;
+        padding-inline: 15px;
+      }
+
+      &--container {
+        align-items: center;
+      }
+    }
+
+    &__chevron__button {
+      @include mixins.button-reset;
+
+      & {
+        display: flex;
+        align-items: center;
+
+        flex-grow: 0;
+        flex-shrink: 0;
+
+        padding: 10px;
+        height: 16px;
+        width: 16px;
+
+        justify-content: center;
+        border-radius: 4px;
+        border: 2px solid transparent;
+
+        opacity: 0;
+        transition: opacity 150ms cubic-bezier(0.17, 0.17, 0, 1);
+      }
+
+      // Using keyboard/mouse classes directly; mixins were doing weird things
+      .mouse-mode #{$row}:hover & {
+        opacity: 1;
+      }
+      .keyboard-mode #{$row}:focus-within & {
+        opacity: 1;
+      }
+
+      @include mixins.keyboard-mode {
+        &:focus {
+          border-color: variables.$color-ultramarine;
+        }
+      }
+      @include mixins.dark-keyboard-mode {
+        &:focus {
+          border-color: variables.$color-ultramarine-light;
+        }
+      }
+
+      &::before {
+        content: '';
+        display: block;
+        height: 16px;
+        width: 16px;
+        flex-shrink: 0;
+
+        @include mixins.light-theme {
+          @include mixins.color-svg(
+            '../images/icons/v3/chevron/chevron-down.svg',
+            variables.$color-gray-60
+          );
+        }
+        @include mixins.dark-theme {
+          @include mixins.color-svg(
+            '../images/icons/v3/chevron/chevron-down.svg',
+            variables.$color-gray-25
+          );
+        }
+      }
+    }
+  }
+
+  &__menu-icon {
+    &--delete {
+      @include mixins.light-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/x/x-circle.svg',
+          variables.$color-gray-90
+        );
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/x/x-circle.svg',
+          variables.$color-gray-05
+        );
+      }
+    }
+    &--verify {
+      @include mixins.light-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/safety_number/safety_number.svg',
+          variables.$color-gray-90
+        );
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/safety_number/safety_number.svg',
+          variables.$color-gray-05
+        );
+      }
+    }
+  }
+}

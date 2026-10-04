@@ -1,0 +1,56 @@
+# TODO: Partially duplicated from `.gitignore`. Remove once Prettier
+# supports `.gitignore`: https://github.com/prettier/prettier/issues/2294
+
+# Generated files
+build/**/*.js
+build/**/*.json
+app/**/*.js
+config/local-*.json
+config/local.json
+dist/**
+libtextsecure/components.js
+stylesheets/*.css
+ts/**/*.js
+ts/protobuf/*.d.ts
+ts/protobuf/*.js
+stylesheets/manifest.css
+stylesheets/tailwind.css
+ts/util/lint/exceptions.json
+storybook-static
+build/locale-display-names.json
+build/country-display-names.json
+build/compact-locales/**/*.json
+release/**
+pnpm-lock.yaml
+
+# Third-party files
+node_modules/**
+packages/*/node_modules/**
+packages/lame/wrapper.mjs
+packages/lame/lame-*/
+packages/windows-ucv/dist/**
+danger/node_modules/**
+sticker-creator/node_modules/**
+components/**
+scripts/emoji-datasource/emoji-datasource.json
+
+# Assets
+/images/
+/fixtures/
+
+# Version control
+**/.git
+
+# Github workflows
+.github/**
+
+# Managed by package manager (`bower` and `yarn`/`npm`):
+/bower.json
+/package.json
+
+preload.bundle.*
+preload.wrapper.js
+bundles/**
+
+# Sticker Creator has its own prettier config
+sticker-creator/**

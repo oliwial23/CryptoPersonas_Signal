@@ -1,0 +1,372 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+@keyframes progress-animation {
+  0% {
+    background-position: 100%;
+  }
+  100% {
+    background-position: -100%;
+  }
+}
+
+.LeftPaneDialog {
+  $default-background-color: variables.$color-ultramarine;
+  $default-text-color: variables.$color-white;
+  $error-background-color: variables.$color-accent-red;
+  $error-text-color: $default-text-color;
+  $warning-background-color: variables.$color-accent-yellow;
+  $warning-text-color: variables.$color-black;
+
+  background: $default-background-color;
+  color: $default-text-color;
+  cursor: inherit;
+  display: flex;
+  min-height: 64px;
+  padding-block: 12px;
+  padding-inline: 16px 14px;
+  width: 100%;
+  position: relative;
+
+  font-size: 13px;
+  line-height: 18px;
+  letter-spacing: -0.0025em;
+  font-weight: 400;
+
+  &__retry {
+    @include mixins.button-reset;
+    & {
+      @include mixins.font-body-1-bold;
+    }
+  }
+
+  &--clickable {
+    cursor: pointer;
+  }
+
+  &__container {
+    display: flex;
+    align-items: center;
+    flex-grow: 1;
+  }
+
+  &--width-narrow &__container {
+    justify-content: center;
+  }
+
+  &__container-close {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  &__spinner-container {
+    margin-inline-end: 18px;
+  }
+
+  &__spinner {
+    &__arc {
+      background-color: variables.$color-black;
+
+      // Needed for specificity
+      @include mixins.dark-theme {
+        background-color: variables.$color-black;
+      }
+    }
+
+    &__circle {
+      background-color: variables.$color-accent-yellow;
+    }
+  }
+
+  &__icon-container {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    margin-inline-end: 18px;
+    position: relative;
+  }
+
+  &--width-narrow &__icon-container {
+    margin-inline-end: 0;
+  }
+
+  &__icon {
+    width: 100%;
+    height: 100%;
+    background-color: variables.$color-white;
+    -webkit-mask-size: contain;
+
+    @media (forced-colors: active) {
+      background-color: CanvasText;
+    }
+
+    &--relink {
+      -webkit-mask: url('../images/icons/v3/link/link-slash.svg') no-repeat
+        center;
+    }
+
+    &--network {
+      -webkit-mask: url('../images/icons/v3/wifi/wifi-error.svg') no-repeat
+        center;
+    }
+
+    &--update {
+      -webkit-mask: url('../images/icons/v3/refresh/refresh.svg') no-repeat
+        center;
+    }
+
+    &--warning {
+      -webkit-mask: url('../images/icons/v3/error/error-triangle.svg') no-repeat
+        center;
+    }
+
+    &--error {
+      -webkit-mask: url('../images/icons/v3/error/error-circle.svg') no-repeat
+        center;
+    }
+  }
+
+  &__icon-background {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    outline-width: 5px;
+    outline-offset: -1px; // avoids a gap between background-color and outline
+    outline-style: solid;
+    &--warning {
+      outline-color: $warning-background-color;
+      background-color: $warning-background-color;
+      .LeftPaneDialog__icon {
+        background-color: $warning-text-color;
+        @media (forced-colors: active) {
+          background-color: CanvasText;
+        }
+      }
+    }
+  }
+
+  &__action-text {
+    @include mixins.button-reset;
+    & {
+      text-decoration: none;
+      color: variables.$color-white-alpha-80;
+    }
+  }
+
+  &__close-button {
+    @include mixins.button-reset;
+
+    & {
+      border-radius: 4px;
+      float: inline-end;
+      height: 20px;
+      width: 20px;
+    }
+
+    &::before {
+      -webkit-mask: url('../images/icons/v3/x/x.svg') no-repeat center;
+      background-color: variables.$color-white;
+      content: '';
+      display: block;
+      width: 100%;
+      height: 100%;
+
+      @media (forced-colors: active) {
+        background-color: CanvasText;
+        @include mixins.dark-theme {
+          background-color: CanvasText;
+        }
+      }
+    }
+
+    &:hover,
+    &:focus {
+      background-color: variables.$color-white-alpha-20;
+    }
+    &:active {
+      background-color: variables.$color-white-alpha-20;
+    }
+
+    @media (forced-colors: active) {
+      &:hover,
+      &:focus,
+      &:active {
+        background-color: none;
+      }
+      @include mixins.dark-theme {
+        &:hover,
+        &:focus,
+        &:active {
+          background-color: none;
+        }
+      }
+    }
+  }
+
+  &__message {
+    width: 100%;
+  }
+
+  &__message,
+  &__tooltip {
+    max-width: 250px;
+
+    h3 {
+      @include mixins.font-body-1-bold;
+      padding: 0px;
+      margin: 0px;
+    }
+    span {
+      @include mixins.font-body-1;
+      display: inline-block;
+    }
+    a {
+      font-weight: bold;
+      text-decoration: none;
+    }
+  }
+
+  &__tooltip {
+    --tooltip-background-color: #{$default-background-color};
+    --tooltip-text-color: #{$default-text-color};
+    min-width: 280px;
+    text-align: inherit;
+  }
+
+  &,
+  &__tooltip {
+    &--error {
+      background-color: $error-background-color;
+      color: $error-text-color;
+
+      @include mixins.any-theme {
+        --tooltip-background-color: #{$error-background-color};
+        --tooltip-text-color: #{$error-text-color};
+      }
+
+      a {
+        color: $error-text-color;
+      }
+
+      .LeftPaneDialog__action-text {
+        color: $error-text-color;
+      }
+    }
+
+    &--info {
+      width: unset;
+      margin-inline: 10px;
+      margin-block-end: 6px;
+      margin-block-start: 2px;
+      border-radius: 10px;
+      color: inherit;
+
+      @include mixins.light-theme {
+        background-color: variables.$color-white;
+        --tooltip-background-color: #{variables.$color-white};
+        border: 1px solid variables.$color-gray-20;
+      }
+      @include mixins.dark-theme {
+        background: variables.$color-gray-75;
+        border: 1px solid variables.$color-gray-60;
+      }
+      .LeftPaneDialog__close-button::before {
+        @include mixins.light-theme {
+          background-color: variables.$color-gray-45;
+        }
+        @include mixins.dark-theme {
+          background-color: variables.$color-gray-20;
+        }
+      }
+    }
+
+    &--info &__action-text {
+      @include mixins.button-reset;
+      & {
+        @include mixins.font-subtitle-bold;
+        @include mixins.light-theme {
+          color: variables.$color-ultramarine;
+        }
+        @include mixins.dark-theme {
+          color: variables.$color-ultramarine-light;
+        }
+      }
+    }
+
+    &--warning {
+      background-color: $warning-background-color;
+      color: $warning-text-color;
+
+      @include mixins.any-theme {
+        --tooltip-background-color: #{$warning-background-color};
+        --tooltip-text-color: #{$warning-text-color};
+      }
+
+      a {
+        color: $warning-text-color;
+      }
+
+      .LeftPaneDialog__icon {
+        background-color: $warning-text-color;
+
+        @media (forced-colors: active) {
+          background-color: CanvasText;
+        }
+      }
+
+      .LeftPaneDialog__close-button::before {
+        background-color: $warning-text-color;
+
+        @media (forced-colors: active) {
+          background-color: CanvasText;
+        }
+      }
+
+      .LeftPaneDialog__action-text {
+        color: $warning-text-color;
+      }
+    }
+  }
+
+  &__progress {
+    &--container {
+      background: variables.$color-white-alpha-20;
+      border-radius: 2px;
+      height: 4px;
+      max-width: 210px;
+      overflow: hidden;
+      width: 100%;
+      margin-block: 10px 6px;
+      margin-inline: 0;
+    }
+
+    &--bar {
+      animation: progress-animation 2s linear infinite;
+      background: linear-gradient(
+        90deg,
+        variables.$color-white-alpha-40,
+        variables.$color-white-alpha-60,
+        variables.$color-white-alpha-90,
+        variables.$color-white-alpha-60,
+        variables.$color-white-alpha-40
+      );
+      background-size: 200% 100%;
+      border-radius: 2px;
+      display: block;
+      height: 100%;
+      width: 100%;
+      &:dir(ltr) {
+        /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+        transform: translateX(-100%);
+      }
+      &:dir(rtl) {
+        /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+        transform: translateX(100%);
+      }
+      transition: transform 500ms ease-out;
+    }
+  }
+}

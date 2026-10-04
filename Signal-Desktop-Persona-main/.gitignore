@@ -1,0 +1,51 @@
+node_modules
+node_modules_bkp
+.sass-cache
+coverage/*
+build/curve25519_compiled.js
+build/compact-locales
+build/*.policy
+build/emoji-data.json
+stylesheets/*.css.map
+/dist
+.DS_Store
+config/local.json
+config/local-*
+*.provisionprofile
+release/
+/dev-app-update.yml
+.nyc_output/
+
+/sql/
+/start.sh
+.stylelintcache
+tsconfig.tsbuildinfo
+.smartling-source.sh
+
+# generated files
+libtextsecure/components.js
+stylesheets/*.css
+!stylesheets/tailwind-config.css
+/storybook-static/
+preload.bundle.*
+preload.wrapper.js
+bundles/
+ts/sql/mainWorker.bundle.js.LICENSE.txt
+build/ICUMessageParams.d.ts
+
+# React / TypeScript
+build/**/*.js
+app/*.js
+ts/**/*.js
+!ts/windows/main/tsx.js
+ts/protobuf/*.d.ts
+
+# CSS Modules
+**/*.scss.d.ts
+
+# Editors
+/.idea
+/.vscode
+/.zed
+*.sublime*
+*.map

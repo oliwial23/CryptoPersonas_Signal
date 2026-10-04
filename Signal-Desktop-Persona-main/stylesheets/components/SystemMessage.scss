@@ -1,0 +1,285 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+@mixin system-message-icon($url) {
+  @include mixins.light-theme {
+    -webkit-mask: url($url) no-repeat center;
+    -webkit-mask-size: 100%;
+  }
+  @include mixins.dark-theme {
+    -webkit-mask: url($url) no-repeat center;
+    -webkit-mask-size: 100%;
+  }
+}
+
+.SystemMessage {
+  @include mixins.font-body-2;
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 16px;
+  padding-bottom: 10px;
+  padding-top: 10px;
+
+  color: var(--axo-color-label-secondary);
+
+  &__contents {
+    max-width: 400px;
+    text-align: center;
+
+    p {
+      display: block;
+      margin-block-start: 0;
+      margin-block-end: 4px;
+      margin-inline-start: 0;
+      margin-inline-end: 0;
+
+      &:first-child {
+        display: inline-block;
+      }
+
+      &:last-child {
+        margin-block-end: 0;
+      }
+    }
+
+    &--has-icon::before {
+      content: '';
+      display: inline-block;
+      height: 16px;
+      margin-inline-end: 8px;
+      width: 16px;
+      vertical-align: text-top;
+
+      background-color: var(--axo-color-label-secondary);
+    }
+
+    &--icon-audio-incoming::before {
+      @include system-message-icon(
+        '../images/icons/v3/phone/phone-compact.svg'
+      );
+    }
+
+    &--icon-audio-missed::before {
+      @include system-message-icon(
+        '../images/icons/v3/phone/phone-compact.svg'
+      );
+    }
+
+    &--icon-audio-outgoing::before {
+      @include system-message-icon(
+        '../images/icons/v3/phone/phone-compact.svg'
+      );
+    }
+
+    &--icon-group::before {
+      @include system-message-icon(
+        '../images/icons/v3/group/group-compact.svg'
+      );
+    }
+
+    &--icon-group-access::before {
+      @include system-message-icon(
+        '../images/icons/v3/megaphone/megaphone-compact.svg'
+      );
+    }
+
+    &--icon-group-add::before {
+      @include system-message-icon(
+        '../images/icons/v3/person/person-plus-compact.svg'
+      );
+    }
+
+    &--icon-group-approved::before {
+      @include system-message-icon(
+        '../images/icons/v3/person/person-check-compact.svg'
+      );
+    }
+
+    &--icon-group-avatar::before {
+      @include system-message-icon(
+        '../images/icons/v3/photo/photo-square-compact.svg'
+      );
+    }
+
+    &--icon-group-decline::before {
+      @include system-message-icon(
+        '../images/icons/v3/person/person-x-compact.svg'
+      );
+    }
+
+    &--icon-group-edit::before {
+      @include system-message-icon('../images/icons/v3/edit/edit-compact.svg');
+    }
+
+    &--icon-group-leave::before {
+      @include system-message-icon(
+        '../images/icons/v3/leave/leave-compact.svg'
+      );
+    }
+
+    &--icon-group-remove::before {
+      @include system-message-icon(
+        '../images/icons/v3/person/person-minus-compact.svg'
+      );
+    }
+
+    &--icon-group-summary::before {
+      @include system-message-icon('../images/icons/v3/info/info-compact.svg');
+    }
+
+    &--icon-group-terminate::before {
+      @include system-message-icon(
+        '../images/icons/v3/group/group-x-inline.svg'
+      );
+      & {
+        width: 24px;
+      }
+    }
+
+    &--icon-info::before {
+      @include system-message-icon('../images/icons/v3/info/info-compact.svg');
+    }
+
+    &--icon-phone::before {
+      @include system-message-icon(
+        '../images/icons/v3/phone/phone-compact.svg'
+      );
+    }
+
+    &--icon-profile::before {
+      @include system-message-icon(
+        '../images/icons/v3/person/person-compact.svg'
+      );
+    }
+
+    &--icon-safety-number::before {
+      @include system-message-icon(
+        '../images/icons/v3/safety_number/safety_number-compact.svg'
+      );
+    }
+
+    &--icon-session-refresh::before {
+      @include system-message-icon('../images/icons/v3/refresh/refresh.svg');
+    }
+
+    &--icon-thread::before {
+      @include system-message-icon(
+        '../images/icons/v3/thread/thread-compact.svg'
+      );
+    }
+
+    &--icon-timer::before {
+      @include system-message-icon(
+        '../images/icons/v3/timer/timer-compact.svg'
+      );
+    }
+
+    &--icon-timer-disabled::before {
+      @include system-message-icon(
+        '../images/icons/v3/timer/timer-slash-compact.svg'
+      );
+    }
+
+    &--icon-unsupported::before {
+      @include system-message-icon(
+        '../images/icons/v3/error/error-circle-compact.svg'
+      );
+    }
+
+    &--icon-unsupported--can-process::before {
+      @include system-message-icon(
+        '../images/icons/v3/check/check-circle-compact.svg'
+      );
+    }
+
+    &--icon-verified::before {
+      @include system-message-icon(
+        '../images/icons/v3/safety_number/safety_number-compact.svg'
+      );
+    }
+
+    &--icon-verified-not::before {
+      @include system-message-icon(
+        '../images/icons/v3/safety_number/safety_number-compact.svg'
+      );
+    }
+
+    &--icon-video::before {
+      @include system-message-icon(
+        '../images/icons/v3/video/video-compact.svg'
+      );
+    }
+
+    &--icon-video-incoming::before {
+      @include system-message-icon(
+        '../images/icons/v3/video/video-compact.svg'
+      );
+    }
+
+    &--icon-video-missed::before {
+      @include system-message-icon(
+        '../images/icons/v3/video/video-compact.svg'
+      );
+    }
+
+    &--icon-video-outgoing::before {
+      @include system-message-icon(
+        '../images/icons/v3/video/video-compact.svg'
+      );
+    }
+
+    &--icon-warning::before {
+      @include system-message-icon(
+        '../images/icons/v3/error/error-circle-compact.svg'
+      );
+    }
+
+    &--icon-payment-event::before {
+      @include system-message-icon('../images/icons/v3/payment/payment.svg');
+    }
+
+    &--icon-merge::before {
+      @include system-message-icon(
+        '../images/icons/v3/merge/merge-compact.svg'
+      );
+    }
+
+    &--icon-thread::before {
+      @include system-message-icon('../images/icons/v3/thread/thread.svg');
+    }
+
+    &--icon-spam::before {
+      @include system-message-icon('../images/icons/v3/spam/spam.svg');
+    }
+
+    &--icon-block::before {
+      @include system-message-icon('../images/icons/v3/block/block.svg');
+    }
+  }
+
+  &--error {
+    .SystemMessage__contents::before {
+      background: var(--axo-color-label-destructive);
+    }
+  }
+
+  &--danger {
+    color: var(--axo-color-label-destructive);
+    .SystemMessage__contents::before {
+      background: var(--axo-color-label-destructive);
+    }
+  }
+
+  &__button-container {
+    margin-top: 12px;
+  }
+
+  .module-expire-timer {
+    vertical-align: middle;
+  }
+}

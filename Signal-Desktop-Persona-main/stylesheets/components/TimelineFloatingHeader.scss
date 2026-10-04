@@ -1,0 +1,36 @@
+// Copyright 2022 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.TimelineFloatingHeader {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  inset-inline-start: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 10px;
+  transition: opacity 0.25s ease-out;
+  width: 100%;
+  // padding to accommodate scrollbar width
+  padding-inline-end: 14px;
+  z-index: variables.$z-index-above-above-base;
+
+  &--visible {
+    opacity: 1;
+  }
+
+  &--hidden {
+    opacity: 0;
+  }
+
+  &__spinner-container {
+    @include mixins.timeline-floating-header-node;
+    & {
+      margin-top: 12px;
+      padding: 6px;
+    }
+  }
+}

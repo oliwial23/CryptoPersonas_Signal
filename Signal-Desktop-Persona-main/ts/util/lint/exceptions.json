@@ -1,0 +1,322 @@
+[
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/core/editor.js",
+    "line": "      innerHTML",
+    "reasonCategory": "usageTrusted",
+    "updated": "2025-01-10T05:52:01.516Z",
+    "reasonDetail": "Reading contents of DOM"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/core/editor.js",
+    "line": "    const [start, end] = outerHTML.split(`>${innerHTML}<`);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2025-01-10T05:52:01.516Z",
+    "reasonDetail": "Reading contents of DOM"
+  },
+  {
+    "rule": "DOM-outerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/core/editor.js",
+    "line": "      outerHTML,",
+    "reasonCategory": "usageTrusted",
+    "updated": "2025-01-10T05:52:01.516Z",
+    "reasonDetail": "Reading contents of DOM"
+  },
+  {
+    "rule": "DOM-outerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/core/editor.js",
+    "line": "    const [start, end] = outerHTML.split(`>${innerHTML}<`);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2025-01-10T05:52:01.516Z",
+    "reasonDetail": "Reading contents of DOM"
+  },
+  {
+    "rule": "DOM-outerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/core/editor.js",
+    "line": "  return blot.domNode instanceof Element ? blot.domNode.outerHTML : '';",
+    "reasonCategory": "usageTrusted",
+    "updated": "2025-01-10T05:52:01.516Z",
+    "reasonDetail": "Reading contents of DOM"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/core/quill.js",
+    "line": "    this.container.innerHTML = '';",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/core/quill.js",
+    "line": "    const html = this.container.innerHTML.trim();",
+    "reasonCategory": "usageTrusted",
+    "updated": "2025-01-10T05:52:01.516Z",
+    "reasonDetail": "Reading contents of DOM"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/dist/quill.core.js",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-22T02:55:11.616Z"
+  },
+  {
+    "rule": "DOM-outerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/dist/quill.core.js",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-22T02:55:11.616Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/dist/quill.js",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-22T02:55:11.616Z"
+  },
+  {
+    "rule": "DOM-outerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/dist/quill.js",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-22T02:55:11.616Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/modules/normalizeExternalHTML/normalizers/msWord.js",
+    "line": "      li.innerHTML = listItem.element.innerHTML;",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-10T05:52:01.516Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/modules/normalizeExternalHTML/normalizers/msWord.js",
+    "line": "  const html = doc.documentElement.innerHTML;",
+    "reasonCategory": "usageTrusted",
+    "updated": "2025-01-10T05:52:01.516Z",
+    "reasonDetail": "Reading contents of DOM"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/modules/syntax.js",
+    "line": "    container.innerHTML = highlight(this.options.hljs, language, text);",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-10T05:52:01.516Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/themes/base.js",
+    "line": "          button.innerHTML = icons[name][''] + icons[name].rtl;",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-10T05:52:01.516Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/themes/base.js",
+    "line": "          button.innerHTML = icons[name];",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/themes/base.js",
+    "line": "            button.innerHTML = icons[name][value];",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/ui/color-picker.js",
+    "line": "    this.label.innerHTML = label;",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/ui/icon-picker.js",
+    "line": "      if (this.label.innerHTML === item.innerHTML) return;",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2025-01-10T05:52:01.516Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/ui/icon-picker.js",
+    "line": "      item.innerHTML = icons[item.getAttribute('data-value') || ''];",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/ui/icon-picker.js",
+    "line": "    this.label.innerHTML = item.innerHTML;",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/ui/picker.js",
+    "line": "    label.innerHTML = DropdownIcon;",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/@signalapp/quill-cjs/ui/tooltip.js",
+    "line": "    this.root.innerHTML = this.constructor.TEMPLATE;",
+    "reasonCategory": "usageTrusted",
+    "updated": "2020-10-13T18:36:57.012Z",
+    "reasonDetail": "necessary for quill"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/google-libphonenumber/dist/libphonenumber.js",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2021-02-16T19:08:17.452Z",
+    "reasonDetail": "Debug capabilities"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/google-libphonenumber/dist/libphonenumber.js",
+    "line": "goog.dom.safe.unsafeSetInnerHtmlDoNotUseOrElse=function(a,b){if(goog.dom.safe.isInnerHtmlCleanupRecursive_())for(;a.lastChild;)a.removeChild(a.lastChild);a.innerHTML=goog.html.SafeHtml.unwrapTrustedHTML(b)};",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2021-02-16T19:08:17.452Z",
+    "reasonDetail": "Debug capabilities"
+  },
+  {
+    "rule": "DOM-outerHTML",
+    "path": "node_modules/google-libphonenumber/dist/libphonenumber.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2021-02-16T19:08:17.452Z",
+    "reasonDetail": "Escapes HTML, HTML comes from a constant"
+  },
+  {
+    "rule": "eval",
+    "path": "node_modules/google-libphonenumber/dist/libphonenumber.js",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2021-02-16T19:08:17.452Z",
+    "reasonDetail": "Transpilation logic"
+  },
+  {
+    "rule": "eval",
+    "path": "node_modules/google-libphonenumber/dist/libphonenumber.js",
+    "reasonCategory": "notExercisedByOurApp",
+    "updated": "2021-02-16T19:08:17.452Z",
+    "reasonDetail": "Used to load dependencies; parent function loadModuleFromSource_ is used in one place only."
+  },
+  {
+    "rule": "eval",
+    "path": "node_modules/google-libphonenumber/dist/libphonenumber.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2021-02-16T19:08:17.452Z",
+    "reasonDetail": "Hard-coded string used for testing capabilities."
+  },
+  {
+    "rule": "eval",
+    "path": "node_modules/pino/test/fixtures/eval/index.js",
+    "line": "eval(`",
+    "reasonCategory": "testCode",
+    "updated": "2024-06-24T19:19:28.335Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/react-blurhash/docs/demo.f335462148ad584661d8.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2024-11-14T18:53:33.345Z"
+  },
+  {
+    "rule": "DOM-innerHTML",
+    "path": "node_modules/react-blurhash/docs/demo.f335462148ad584661d8.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2024-11-14T18:53:33.345Z"
+  },
+  {
+    "rule": "React-dangerouslySetInnerHTML",
+    "path": "node_modules/react-blurhash/docs/demo.f335462148ad584661d8.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2024-11-14T18:53:33.345Z"
+  },
+  {
+    "rule": "React-dangerouslySetInnerHTML",
+    "path": "node_modules/react-blurhash/docs/demo.f335462148ad584661d8.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2024-11-14T18:53:33.345Z"
+  },
+  {
+    "rule": "React-ref",
+    "path": "node_modules/react-blurhash/docs/demo.f335462148ad584661d8.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2024-11-14T18:53:33.345Z"
+  },
+  {
+    "rule": "React-ref",
+    "path": "node_modules/react-blurhash/docs/demo.f335462148ad584661d8.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2024-11-14T18:53:33.345Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-blurhash/docs/demo.f335462148ad584661d8.js",
+    "reasonCategory": "usageTrusted",
+    "updated": "2024-11-14T18:53:33.345Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/react-intl.iife.js",
+    "line": "    const cacheRef = React8.useRef(createIntlCache());",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/react-intl.iife.js",
+    "line": "    const prevConfigRef = React8.useRef(void 0);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/react-intl.iife.js",
+    "line": "    const intlRef = React8.useRef(void 0);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/react-intl.iife.js",
+    "line": "    const updateTimer = React9.useRef(void 0);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/src/components/provider.js",
+    "line": "\tconst cacheRef = React.useRef(createIntlCache());",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/src/components/provider.js",
+    "line": "\tconst prevConfigRef = React.useRef(undefined);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/src/components/provider.js",
+    "line": "\tconst intlRef = React.useRef(undefined);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  },
+  {
+    "rule": "React-useRef",
+    "path": "node_modules/react-intl/src/components/relative.js",
+    "line": "\tconst updateTimer = React.useRef(undefined);",
+    "reasonCategory": "usageTrusted",
+    "updated": "2026-04-03T05:59:27.141Z"
+  }
+]

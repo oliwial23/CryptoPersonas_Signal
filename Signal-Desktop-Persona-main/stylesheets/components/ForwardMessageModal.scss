@@ -1,0 +1,65 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.module-ForwardMessageModal {
+  flex-direction: column;
+  margin-block: 0;
+  margin-inline: auto;
+  max-width: 360px;
+  width: 95%;
+
+  .module-conversation-list {
+    // remove horizontal padding so ListTiles extend to the edges
+    padding: 0;
+  }
+
+  &--link-preview {
+    border-bottom: 1px solid variables.$color-gray-15;
+    padding-block: 12px;
+    padding-inline: 16px;
+
+    @include mixins.dark-theme() {
+      border-color: variables.$color-gray-60;
+    }
+  }
+
+  &__list-wrapper {
+    flex-grow: 1;
+    overflow: hidden;
+  }
+
+  &__main-body {
+    display: flex;
+    flex-direction: column;
+    min-height: 300px;
+  }
+
+  &__no-candidate-contacts {
+    flex-grow: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  // Disable vertical scrolling on the modal pages
+  // since the elements inside are scrollable themselves
+  .module-Modal__body {
+    overflow-y: hidden;
+  }
+
+  &__footer {
+    @include mixins.font-body-2;
+    display: flex;
+    align-items: center;
+    flex-grow: 1;
+    justify-content: space-between;
+  }
+
+  // Disable cursor since images are non-clickable
+  .module-image__image {
+    cursor: inherit;
+  }
+}

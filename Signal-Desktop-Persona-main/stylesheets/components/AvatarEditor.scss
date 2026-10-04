@@ -1,0 +1,111 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.AvatarEditor {
+  &__top-buttons__container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  &__top-buttons {
+    display: flex;
+  }
+
+  &__button {
+    @include mixins.button-reset;
+    & {
+      align-items: center;
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      font-size: 9px;
+      justify-content: center;
+      line-height: 14px;
+      margin-block: 0;
+      margin-inline: 8px;
+      min-height: 44px;
+      min-width: 60px;
+      padding-block: 0;
+      padding-inline: 8px;
+    }
+
+    @include mixins.light-theme {
+      background-color: variables.$color-gray-05;
+      color: variables.$color-black;
+    }
+
+    @include mixins.dark-theme {
+      background-color: variables.$color-gray-65;
+      color: variables.$color-gray-05;
+    }
+
+    &::before {
+      content: '';
+      display: block;
+      height: 18px;
+      width: 18px;
+    }
+
+    @mixin button-icon($icon) {
+      @include mixins.light-theme {
+        @include mixins.color-svg($icon, variables.$color-black);
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg($icon, variables.$color-gray-05);
+      }
+    }
+
+    &--photo::before {
+      @include button-icon('../images/icons/v3/album/album-tilt.svg');
+    }
+
+    &--text::before {
+      @include button-icon('../images/icons/v2/text-24.svg');
+    }
+
+    &:focus {
+      outline: none;
+      @include mixins.keyboard-mode {
+        @include mixins.axo-focus-ring;
+      }
+    }
+  }
+
+  &__avatars {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  &__divider {
+    border: none;
+    border-bottom: 1px solid variables.$color-gray-15;
+    margin-bottom: 24px;
+    margin-top: 20px;
+
+    @include mixins.light-theme {
+      border-color: variables.$color-gray-15;
+    }
+
+    @include mixins.dark-theme {
+      border-color: variables.$color-gray-75;
+    }
+  }
+
+  &__preview {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    width: 100%;
+  }
+
+  &__avatar-selector-title {
+    @include mixins.font-body-1-bold;
+    margin-bottom: 14px;
+  }
+}

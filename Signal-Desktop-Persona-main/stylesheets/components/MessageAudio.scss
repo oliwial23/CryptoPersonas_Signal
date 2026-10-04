@@ -1,0 +1,175 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+$audio-attachment-button-size: 36px;
+$audio-attachment-button-margin-big: 12px;
+$audio-attachment-button-margin-small: 4px;
+
+.module-message__audio-attachment {
+  display: flex;
+  flex-direction: column;
+  margin-top: 2px;
+  /**
+   * Players for audio or video content should always be left-to-right.
+   * This overrides the default direction of the surrounding elements.
+   */
+  /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+  direction: ltr;
+
+  .PlaybackButton {
+    @media (min-width: 0px) and (max-width: 799px) {
+      margin-inline-end: $audio-attachment-button-margin-small;
+    }
+  }
+}
+
+.module-message__audio-attachment__button-and-waveform {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 5px;
+}
+
+/* The separator between audio and text */
+.module-message__audio-attachment--with-content-below {
+  border-bottom: 1px solid variables.$color-white-alpha-20;
+  padding-bottom: 12px;
+  margin-bottom: 7px;
+
+  &.module-message__audio-attachment--incoming {
+    @include mixins.light-theme {
+      border-color: variables.$color-black-alpha-20;
+    }
+
+    @include mixins.dark-theme {
+      border-color: variables.$color-white-alpha-20;
+    }
+  }
+
+  .module-message__container--outgoing & {
+    border-color: variables.$color-white-alpha-20;
+  }
+}
+
+.module-message__audio-attachment--with-content-above {
+  margin-top: 6px;
+}
+
+.module-message__audio-attachment__controls {
+  display: flex;
+  flex: 1;
+  margin-inline-end: 4px;
+}
+
+.module-message__audio-attachment__dot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  transition: width 100ms ease-out;
+  width: 14px;
+
+  &:before {
+    content: '';
+    display: block;
+    width: 6px;
+    height: 6px;
+    border-radius: 100%;
+  }
+
+  .module-message__audio-attachment--incoming & {
+    &:before {
+      @include mixins.light-theme {
+        background: variables.$color-gray-60;
+      }
+      @include mixins.dark-theme {
+        background: variables.$color-gray-25;
+      }
+    }
+  }
+  .module-message__audio-attachment--outgoing & {
+    &--unplayed:before {
+      background: variables.$color-white-alpha-80;
+    }
+  }
+}
+
+.module-message__audio-attachment__waveform {
+  flex-shrink: 0;
+
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+
+  outline: 0;
+}
+
+.PlaybackButton,
+.PlaybackRateButton,
+.module-message__audio-attachment__waveform {
+  &:focus {
+    outline: none;
+    @include mixins.keyboard-mode {
+      @include mixins.axo-focus-ring;
+    }
+  }
+
+  .module-message__audio-attachment--outgoing & {
+    &:focus {
+      outline: none;
+      @include mixins.keyboard-mode {
+        @include mixins.axo-focus-ring;
+      }
+    }
+  }
+}
+
+.module-message__audio-attachment__metadata {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+
+  @media (min-width: 0px) and (max-width: 799px) {
+    margin-inline-start: $audio-attachment-button-size +
+      $audio-attachment-button-margin-small;
+  }
+}
+
+.module-message__audio-attachment__countdown {
+  @include mixins.font-caption;
+  width: $audio-attachment-button-size;
+  text-align: center;
+  white-space: nowrap;
+  margin-inline-end: 12px;
+
+  .module-message__audio-attachment--incoming & {
+    @include mixins.light-theme {
+      $color: variables.$color-black-alpha-60;
+      color: $color;
+
+      &--unplayed:after {
+        background: $color;
+      }
+    }
+
+    @include mixins.dark-theme {
+      $color: variables.$color-white-alpha-80;
+      color: $color;
+
+      &--unplayed:after {
+        background: $color;
+      }
+    }
+  }
+
+  .module-message__audio-attachment--outgoing & {
+    color: variables.$color-white-alpha-80;
+
+    &--unplayed:after {
+      background: variables.$color-white-alpha-80;
+    }
+  }
+}

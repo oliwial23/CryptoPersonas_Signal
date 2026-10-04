@@ -1,0 +1,13 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../variables';
+
+.App {
+  height: 100%;
+  position: relative;
+
+  // TitleBar support
+  display: flex;
+  flex-direction: column;
+}

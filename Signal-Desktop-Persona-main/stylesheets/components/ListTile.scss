@@ -1,0 +1,121 @@
+// Copyright 2022 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+button.ListTile {
+  width: 100%;
+}
+
+.ListTile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-block: 6px;
+  padding-inline: 14px;
+
+  // use a transparent border to inset the background
+  border: 2px solid transparent;
+  border-width: 2px 10px;
+  background-clip: padding-box;
+  border-radius: 20px / 12px;
+
+  // reset button styles
+  background-color: transparent;
+  color: inherit;
+  box-sizing: border-box;
+  text-align: inherit;
+
+  &:focus {
+    outline: none;
+    @include mixins.keyboard-mode {
+      &::before {
+        content: '';
+        display: block;
+        position: absolute;
+        inset: 0;
+        border-radius: 12px;
+        @include mixins.axo-focus-ring-inset;
+      }
+    }
+  }
+
+  &--variant-panelrow {
+    padding-block: 8px;
+    padding-inline: 16px;
+  }
+
+  &__content {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    font-family: variables.$inter;
+  }
+
+  &__title {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  &__subtitle {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: 12px;
+    color: variables.$color-gray-25;
+    line-height: 17px;
+
+    &--max-lines-1 {
+      -webkit-line-clamp: 1;
+    }
+    &--max-lines-2 {
+      -webkit-line-clamp: 2;
+    }
+    &--max-lines-3 {
+      -webkit-line-clamp: 3;
+    }
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+    }
+    @include mixins.dark-theme {
+      color: variables.$color-gray-25;
+    }
+  }
+
+  &[aria-disabled='true'] {
+    cursor: not-allowed;
+  }
+
+  &__leading {
+    margin-inline-end: 12px;
+  }
+  &__trailing {
+    margin-inline-start: 12px;
+  }
+
+  &--clickable {
+    cursor: pointer;
+
+    &:hover:not([aria-disabled='true'], [aria-selected='true']),
+    &:focus-within:not([aria-disabled='true'], [aria-selected='true']) {
+      @include mixins.light-theme {
+        background-color: variables.$color-black-alpha-06;
+      }
+
+      @include mixins.dark-theme {
+        background-color: variables.$color-white-alpha-06;
+      }
+
+      & .ConversationDetails-panel-row__actions {
+        opacity: 1;
+      }
+    }
+  }
+}

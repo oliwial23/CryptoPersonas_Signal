@@ -1,0 +1,32 @@
+{
+  "private": true,
+  "name": "@signalapp/personas-engine",
+  "version": "0.1.0",
+  "description": "CryptoPersonas ZK engine (napi-rs): the transport-agnostic Replica + Member over record bytes. No Signal crypto — delivery is Desktop's own libsignal.",
+  "type": "module",
+  "main": "index.cjs",
+  "module": "index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs"
+    }
+  },
+  "files": [
+    "index.mjs",
+    "index.cjs",
+    "index.d.ts",
+    "*.node",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "./build.sh"
+  },
+  "author": {
+    "name": "Signal Messenger, LLC",
+    "email": "support@signal.org"
+  },
+  "license": "AGPL-3.0-only"
+}

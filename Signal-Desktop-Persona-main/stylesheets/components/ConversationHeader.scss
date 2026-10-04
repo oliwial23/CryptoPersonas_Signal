@@ -1,0 +1,130 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use 'sass:color';
+@use '../mixins';
+@use '../variables';
+
+.module-ConversationHeader {
+  @mixin icon-element($icon, $margin-right: 4px) {
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+
+    &::before {
+      content: '';
+      width: 14px;
+      height: 14px;
+      display: block;
+      margin-inline-end: $margin-right;
+
+      @include mixins.light-theme {
+        @include mixins.color-svg($icon, variables.$color-gray-60);
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg($icon, variables.$color-gray-25);
+      }
+    }
+  }
+
+  padding-top: var(--title-bar-drag-area-height);
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  height: calc(#{variables.$header-height} + var(--title-bar-drag-area-height));
+
+  &__header {
+    $padding: 4px 12px;
+
+    align-items: center;
+    display: flex;
+    flex-direction: row;
+    flex-grow: 1;
+    margin-inline: 4px;
+    padding: $padding;
+    overflow: hidden;
+    min-width: 0;
+    transition: margin-inline-end 200ms ease-out;
+
+    &--clickable {
+      @include mixins.button-reset;
+      & {
+        flex: 1;
+        border-radius: 4px;
+        -webkit-app-region: no-drag;
+
+        // These are clobbered by button-reset:
+        margin-inline: 4px;
+        padding: $padding;
+        padding-inline-start: 0;
+      }
+
+      @include mixins.keyboard-mode {
+        &:focus {
+          color: variables.$color-ultramarine;
+        }
+      }
+      @include mixins.dark-keyboard-mode {
+        &:focus {
+          color: variables.$color-ultramarine-light;
+        }
+      }
+    }
+
+    &__avatar {
+      min-width: 32px;
+      margin-inline-end: 12px;
+      padding-top: 4px;
+      padding-bottom: 4px;
+    }
+
+    &__info {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+
+      &__title {
+        @include mixins.font-body-1-bold;
+        display: flex;
+        align-items: center;
+
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+
+        &__in-contacts-icon {
+          margin-inline-start: 4px;
+        }
+      }
+
+      &__subtitle {
+        display: flex;
+        gap: 12px;
+        @include mixins.font-body-2;
+
+        @include mixins.light-theme {
+          color: variables.$color-gray-60;
+        }
+        @include mixins.dark-theme {
+          color: variables.$color-gray-25;
+        }
+
+        &__expiration {
+          @include icon-element('../images/icons/v3/timer/timer-compact.svg');
+          & {
+            margin-inline-end: 12px;
+          }
+        }
+
+        &__verified {
+          @include icon-element(
+            '../images/icons/v3/safety_number/safety_number-compact.svg'
+          );
+        }
+      }
+    }
+  }
+}

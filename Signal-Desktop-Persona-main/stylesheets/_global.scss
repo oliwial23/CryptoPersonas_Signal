@@ -1,0 +1,171 @@
+// Copyright 2015 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use 'mixins';
+@use 'variables';
+
+body.is-resizing-left-pane {
+  cursor: col-resize;
+}
+
+[contenteditable]:not([contenteditable='false']) {
+  /* stylelint-disable-next-line property-no-deprecated */
+  -webkit-user-modify: read-write-plaintext-only;
+}
+
+// This is a bugfix for browsers that implement dir="auto" wrong.
+//
+// Spec: https://html.spec.whatwg.org/multipage/dom.html#the-dir-attribute
+// > 2. If result is null, then return the parent directionality of element.
+//
+// Chrome is defaulting to ltr all the time, which breaks cursors on empty
+// inputs, textareas, and contenteditable elements.
+[dir='auto'] {
+  &:is(
+    input[value=""],
+    input:not([value]),
+    :not(input):empty,
+    /* Fix for https://developer.mozilla.org/en-US/docs/Web/CSS/:empty#browser_compatibility */
+    :has(> br:only-child)
+  ) {
+    :dir(ltr) > & {
+      /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+      direction: ltr;
+    }
+    :dir(rtl) > & {
+      /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+      direction: rtl;
+    }
+  }
+}
+
+audio {
+  max-width: 100%;
+}
+
+.dark-overlay {
+  position: absolute;
+  top: 0;
+  inset-inline: 0;
+  bottom: 0;
+
+  opacity: 0.25;
+  z-index: variables.$z-index-popup-overlay;
+
+  @include mixins.light-theme {
+    background-color: variables.$color-black;
+  }
+
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-95;
+  }
+}
+
+.clearfix:before,
+.clearfix:after {
+  display: table;
+  content: ' ';
+}
+.clearfix:after {
+  clear: both;
+}
+
+.hide {
+  display: none;
+}
+
+button {
+  -webkit-app-region: no-drag;
+}
+button:not(:disabled, [aria-disabled='true']) {
+  cursor: pointer;
+}
+
+@keyframes loading {
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes fade-in {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.app-migration-screen {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-loading-screen {
+  z-index: variables.$z-index-on-top-of-everything;
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  bottom: 0;
+  padding-block: 0;
+  padding-inline: 16px;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+
+  .dot-container {
+    display: flex;
+    gap: 7px;
+    margin-block: 6px 22px;
+    margin-inline: 0;
+
+    .dot {
+      width: 14px;
+      height: 14px;
+      border: 3px solid;
+      border-radius: 50%;
+      float: inline-start;
+      margin-block: 0;
+      margin-inline: 6px;
+      transform: scale(0);
+
+      border-color: var(--axo-color-label-primary);
+
+      & {
+        animation: loading 1500ms ease infinite 0ms;
+      }
+      &:nth-child(2) {
+        animation: loading 1500ms ease infinite 333ms;
+      }
+      &:nth-child(3) {
+        animation: loading 1500ms ease infinite 666ms;
+      }
+    }
+  }
+  .message {
+    animation: fade-in 150ms ease 1 0ms;
+    max-width: 35em;
+  }
+  .message-placeholder {
+    height: 20px;
+  }
+}
+
+//yellow border fix
+.inbox:focus {
+  outline: none;
+}
+
+.inbox {
+  position: relative;
+}
+
+.overflow-hidden {
+  overflow: hidden;
+}

@@ -1,0 +1,91 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.module-ContactPill {
+  align-items: center;
+  display: inline-flex;
+  overflow: hidden;
+  padding-block: 4px;
+  padding-inline: 8px;
+  border-radius: 6px;
+
+  @include mixins.light-theme {
+    background: variables.$color-black-alpha-08;
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    background: variables.$color-white-alpha-12;
+    color: variables.$color-gray-05;
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus-within {
+      @include mixins.axo-focus-ring;
+
+      @include mixins.light-theme {
+        background: variables.$color-gray-45;
+        color: variables.$color-white;
+      }
+
+      @include mixins.dark-theme {
+        background: variables.$color-gray-25;
+        color: variables.$color-gray-90;
+      }
+    }
+  }
+
+  &__contact-name {
+    @include mixins.font-body-2;
+    padding-block: 0;
+    padding-inline: 6px;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  &__remove {
+    $icon: '../images/icons/v3/x/x-compact-light.svg';
+
+    @include mixins.button-reset;
+    & {
+      height: 100%;
+      display: flex;
+      width: 16px;
+      height: 16px;
+      justify-content: center;
+      align-items: center;
+      padding: 0;
+    }
+
+    &::before {
+      content: '';
+      width: 100%;
+      height: 100%;
+      display: block;
+
+      @include mixins.light-theme {
+        @include mixins.color-svg($icon, variables.$color-gray-60);
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg($icon, variables.$color-gray-25);
+      }
+    }
+
+    &:focus {
+      outline: none;
+      @include mixins.keyboard-mode {
+        &::before {
+          @include mixins.color-svg($icon, variables.$color-white);
+        }
+      }
+      @include mixins.dark-keyboard-mode {
+        &::before {
+          @include mixins.color-svg($icon, variables.$color-gray-90);
+        }
+      }
+    }
+  }
+}

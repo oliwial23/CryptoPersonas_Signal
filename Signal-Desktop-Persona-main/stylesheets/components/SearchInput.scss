@@ -1,0 +1,84 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.module-SearchInput {
+  &__container {
+    position: relative;
+    margin-inline: 16px;
+    margin-bottom: 8px;
+
+    &--noMargin {
+      margin-inline: 0px;
+      margin-bottom: 0px;
+    }
+  }
+
+  &__icon {
+    height: 16px;
+    inset-inline-start: 8px;
+    pointer-events: none;
+    position: absolute;
+    top: 6px;
+    width: 16px;
+
+    @include mixins.color-svg(
+      '../images/icons/v3/search/search-compact-light.svg',
+      var(--axo-color-label-secondary)
+    );
+  }
+
+  &__input {
+    @include mixins.font-body-2;
+    border: solid 1px transparent;
+    border-radius: 8px;
+    height: 28px;
+    padding-inline: 30px 5px;
+    width: 100%;
+
+    background: var(--axo-color-fill-primary);
+    color: var(--axo-color-label-primary);
+
+    &::placeholder {
+      color: var(--axo-color-label-placeholder);
+    }
+
+    &:focus {
+      outline: none;
+      @include mixins.keyboard-mode {
+        @include mixins.axo-focus-ring-inset;
+      }
+    }
+
+    &--with-text {
+      padding-inline-end: 30px;
+    }
+  }
+
+  &__cancel {
+    height: 16px;
+    position: absolute;
+    inset-inline-end: 8px;
+    top: 6px;
+    width: 16px;
+
+    @include mixins.color-svg(
+      '../images/icons/v3/x/x-compact.svg',
+      var(--axo-color-label-secondary)
+    );
+  }
+
+  &__description {
+    margin-block-start: 12px;
+    @include mixins.font-subtitle;
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+    }
+    @include mixins.dark-theme {
+      color: variables.$color-gray-05;
+    }
+  }
+}

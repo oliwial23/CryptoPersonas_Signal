@@ -1,0 +1,100 @@
+// Copyright 2021 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use '../mixins';
+@use '../variables';
+
+.BetterAvatarBubble {
+  align-items: center;
+  background-clip: content-box;
+  background-position: center;
+  border-color: transparent;
+  border-radius: 100%;
+  border-style: solid;
+  border-width: 2px;
+  cursor: pointer;
+  display: flex;
+  font-size: 32px;
+  height: 56px;
+  justify-content: center;
+  padding: 2px;
+  position: relative;
+  width: 56px;
+
+  @include mixins.avatar-colors();
+
+  &--selected {
+    @include mixins.light-theme {
+      border-color: variables.$color-black;
+    }
+
+    @include mixins.dark-theme {
+      border-color: variables.$color-white;
+    }
+  }
+
+  &:focus {
+    outline: none;
+    @include mixins.keyboard-mode {
+      border-color: variables.$color-ultramarine;
+    }
+  }
+
+  &--editable {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 100%;
+    background: variables.$color-black-alpha-20;
+    height: 100%;
+    width: 100%;
+
+    &::after {
+      content: '';
+      display: block;
+      height: 24px;
+      width: 24px;
+      @include mixins.color-svg(
+        '../images/icons/v3/edit/edit.svg',
+        variables.$color-white
+      );
+    }
+  }
+
+  &__delete {
+    @include mixins.button-reset;
+    & {
+      align-items: center;
+      background-color: variables.$color-white;
+      border-radius: 100%;
+      box-shadow:
+        0px 4px 16px rgba(0, 0, 0, 0.12),
+        0px 2px 4px rgba(0, 0, 0, 0.2);
+      display: none;
+      height: 20px;
+      justify-content: center;
+      position: absolute;
+      top: 0;
+      inset-inline-end: 0;
+      width: 20px;
+    }
+
+    &:after {
+      @include mixins.color-svg(
+        '../images/icons/v3/x/x-compact.svg',
+        variables.$color-gray-75
+      );
+      & {
+        content: '';
+        height: 10px;
+        width: 10px;
+      }
+    }
+  }
+
+  &:hover {
+    .BetterAvatarBubble__delete {
+      display: flex;
+    }
+  }
+}

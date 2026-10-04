@@ -1,0 +1,6348 @@
+// Copyright 2018 Signal Messenger, LLC
+// SPDX-License-Identifier: AGPL-3.0-only
+
+@use 'sass:map';
+@use 'mixins';
+@use 'variables';
+
+// Using BEM syntax explained here: https://csswizardry.com/2013/01/mindbemding-getting-your-head-round-bem-syntax/
+
+// CAUTION: these styles are often overridden by other components
+// if you make changes to these, you must check EVERY component that uses <Modal.../>
+
+#app-container {
+  height: 100%;
+}
+
+.inbox {
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+.module-title-bar-drag-area {
+  height: var(--title-bar-drag-area-height);
+  inset-inline-start: 0;
+  position: fixed;
+  top: 0;
+  width: 100%;
+  z-index: variables.$z-index-on-top-of-everything;
+}
+
+.module-splash-screen {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.module-splash-screen__logo {
+  margin-block: 24px;
+  margin-inline: 0;
+
+  @include mixins.color-svg(
+    '../images/signal-logo.svg',
+    light-dark(variables.$color-ultramarine-logo, variables.$color-white)
+  );
+
+  &.module-splash-screen__logo--128 {
+    height: 128px;
+    width: 128px;
+  }
+
+  &.module-splash-screen__logo--96 {
+    height: 96px;
+    width: 96px;
+  }
+}
+
+// Module: Message
+
+.module-message {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  outline: none;
+  padding-inline: 16px;
+  transition-property: background, translate;
+  transition-duration: 0.1s;
+  transition-timing-function: ease-out;
+}
+
+.module-message__quote-story-reaction-header {
+  @include mixins.font-subtitle;
+  margin-bottom: 6px;
+
+  .module-message__container-outgoing & {
+    color: variables.$color-white-alpha-80;
+  }
+
+  .module-message__container-incoming & {
+    color: variables.$color-gray-60;
+  }
+}
+
+.module-message--expired {
+  animation: module-message__shake 0.2s linear infinite;
+}
+
+@keyframes module-message__shake {
+  0% {
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+    transform: translateX(0px);
+  }
+  25% {
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+    transform: translateX(-5px);
+  }
+  50% {
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+    transform: translateX(0px);
+  }
+  75% {
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+    transform: translateX(5px);
+  }
+  100% {
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+    transform: translateX(0px);
+  }
+}
+
+@keyframes module-message__highlight {
+  0% {
+    filter: none;
+  }
+  33% {
+    filter: brightness(50%);
+  }
+  66% {
+    filter: brightness(50%);
+  }
+  100% {
+    filter: none;
+  }
+}
+
+@keyframes module-message__highlight-lighter {
+  0% {
+    filter: none;
+  }
+  33% {
+    filter: brightness(76%);
+  }
+  66% {
+    filter: brightness(76%);
+  }
+  100% {
+    filter: none;
+  }
+}
+
+.module-message--outgoing {
+  flex-direction: row-reverse;
+}
+
+.module-message__buttons {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  opacity: 0;
+}
+
+.module-message:hover .module-message__buttons,
+.module-message__buttons:has([data-axo-contextmenu-state='open']) {
+  opacity: 1;
+}
+
+.module-message__buttons--incoming {
+  padding-inline-start: 8px;
+
+  & > * {
+    margin-inline-start: 12px;
+    &:first-child {
+      margin-inline-start: 0;
+    }
+  }
+}
+
+.module-message__buttons--outgoing {
+  padding-inline-end: 8px;
+  flex-direction: row-reverse;
+
+  & > * {
+    margin-inline-end: 12px;
+    &:first-child {
+      margin-inline-end: 0;
+    }
+  }
+}
+
+@mixin module-message__buttons__button($light-icon, $dark-icon: $light-icon) {
+  cursor: pointer;
+  height: 20px;
+  width: 20px;
+
+  @include mixins.light-theme {
+    @include mixins.color-svg($light-icon, variables.$color-gray-45);
+    &:hover {
+      @include mixins.color-svg($light-icon, variables.$color-gray-90);
+    }
+  }
+
+  @include mixins.dark-theme {
+    @include mixins.color-svg($dark-icon, variables.$color-gray-45);
+    &:hover {
+      @include mixins.color-svg($dark-icon, variables.$color-gray-02);
+    }
+  }
+
+  .module-message--targeted & {
+    @include mixins.mouse-mode {
+      background-color: variables.$color-gray-60;
+    }
+    @include mixins.dark-mouse-mode {
+      background-color: variables.$color-white;
+    }
+  }
+
+  .module-message:focus & {
+    @include mixins.keyboard-mode {
+      background-color: variables.$color-gray-60;
+    }
+    @include mixins.dark-keyboard-mode {
+      background-color: variables.$color-white;
+    }
+  }
+}
+
+.module-message__buttons__download {
+  @include module-message__buttons__button('../images/icons/v3/save/save.svg');
+}
+
+.module-message__buttons__react {
+  @include module-message__buttons__button(
+    '../images/icons/v3/heart/heart-plus.svg'
+  );
+}
+
+.module-message__buttons__reply {
+  @include module-message__buttons__button(
+    '../images/icons/v3/reply/reply.svg'
+  );
+}
+
+.module-message__buttons__menu {
+  @include module-message__buttons__button('../images/icons/v3/more/more.svg');
+
+  &--container {
+    border-radius: 4px;
+    height: 20px;
+    // the z-index here is so that this container is above the message and when
+    // clicked on, doesn't propagate the click event to the message.
+    z-index: variables.$z-index-above-base;
+  }
+}
+
+.module-message__error-container {
+  min-width: 28px;
+  position: relative;
+}
+
+.module-message__error {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  position: absolute;
+  bottom: 4px;
+
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/error/error-circle.svg',
+      variables.$color-accent-red
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/error/error-circle.svg',
+      variables.$color-accent-red
+    );
+  }
+}
+.module-message__error--paused {
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/error/error-circle.svg',
+      variables.$color-gray-60
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/error/error-circle.svg',
+      variables.$color-gray-45
+    );
+  }
+}
+
+.module-message__error--outgoing {
+  inset-inline-start: 8px;
+}
+
+.module-message__error--incoming {
+  inset-inline-end: 8px;
+}
+
+.module-message__container-outer {
+  line-height: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: min(306px, calc(100% - 16px - 22px));
+
+  .module-timeline--width-wide &,
+  .module-message-detail & {
+    // NOTE(evanhahn): I wanted this to be 66% of the timeline, but I could not make that
+    //   work without introducing layout bugs for some message types. This constant,
+    //   though not ideal, fixes those bugs.
+    max-width: 50vw;
+  }
+
+  .module-timeline--width-medium & {
+    max-width: 370px;
+  }
+}
+
+$message-padding-vertical: 8px;
+$message-padding-horizontal: 12px;
+
+.module-message__container {
+  $collapsed-border-radius: 4px;
+
+  position: relative;
+  display: inline-block;
+  border-radius: 18px;
+  outline: none;
+  margin-bottom: 6px;
+  margin-top: 6px;
+  min-width: 0px;
+  overflow: hidden;
+
+  padding-inline: $message-padding-horizontal;
+  padding-top: $message-padding-vertical;
+  padding-bottom: $message-padding-vertical;
+
+  .module-message--collapsed-above & {
+    margin-top: 1px;
+  }
+  .module-message--collapsed-below & {
+    margin-bottom: 1px;
+  }
+
+  .module-message--incoming.module-message--collapsed-above & {
+    border-start-start-radius: $collapsed-border-radius;
+  }
+  .module-message--incoming.module-message--collapsed-below & {
+    border-end-start-radius: $collapsed-border-radius;
+  }
+  .module-message--outgoing.module-message--collapsed-above & {
+    border-start-end-radius: $collapsed-border-radius;
+  }
+  .module-message--outgoing.module-message--collapsed-below & {
+    border-end-end-radius: $collapsed-border-radius;
+  }
+}
+
+.module-message__container--targeted {
+  @include mixins.mouse-mode {
+    animation: module-message__highlight 1.2s cubic-bezier(0.17, 0.17, 0, 1);
+  }
+}
+.module-message__container--targeted-lighter {
+  @include mixins.mouse-mode {
+    animation: module-message__highlight-lighter 1.2s
+      cubic-bezier(0.17, 0.17, 0, 1);
+  }
+}
+
+.module-message__wrapper {
+  position: relative;
+  transition: background 0.1s ease-out;
+}
+
+.module-message__wrapper--select-mode {
+  .module-message--incoming {
+    &:dir(ltr) {
+      /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+      translate: calc(16px + 22px) 0;
+    }
+    &:dir(rtl) {
+      /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+      translate: calc(-16px - 22px) 0;
+    }
+  }
+}
+
+.module-message__alt-accessibility-tree {
+  @include mixins.sr-only;
+}
+
+.module-message__wrapper--selected {
+  background: rgba(variables.$color-ultramarine, 8%);
+}
+
+.module-message__select-checkbox {
+  position: absolute;
+  top: 50%;
+  inset-inline-start: 16px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  background: transparent;
+  border: 1px solid variables.$color-gray-20;
+  animation: module-message__select-checkbox--fadeIn 0.2s ease-out;
+  transition:
+    background 0.1s ease-out,
+    border-color 0.1s ease-out;
+
+  &::before {
+    content: '';
+    display: block;
+    width: 14px;
+    height: 14px;
+    margin: 2px;
+    @include mixins.color-svg(
+      '../images/icons/v3/check/check-compact-bold.svg',
+      variables.$color-white
+    );
+    & {
+      opacity: 0;
+      transition: opacity 0.1s ease-out;
+    }
+  }
+
+  .module-message__wrapper--selected & {
+    background: variables.$color-ultramarine;
+    border-color: variables.$color-ultramarine;
+    &::before {
+      opacity: 1;
+    }
+  }
+}
+
+@keyframes module-message__select-checkbox--fadeIn {
+  from {
+    opacity: 0;
+  }
+}
+
+.module-message:focus-within {
+  @include mixins.keyboard-mode {
+    background: variables.$color-selected-message-background-light;
+  }
+  @include mixins.dark-keyboard-mode {
+    background: variables.$color-selected-message-background-dark;
+  }
+}
+
+.module-message__container--emoji {
+  padding-top: 4px;
+
+  .module-message__text--outgoing {
+    text-align: end;
+  }
+}
+
+.module-message__container--outgoing {
+  background: var(--axo-color-surface-message-outgoing);
+  color: var(--axo-color-label-primary-oncolor);
+}
+
+// In case the color gets messed up
+.module-message__container--incoming {
+  background: var(--axo-color-surface-message-incoming);
+  color: var(--axo-color-label-primary);
+}
+
+@each $color, $value in variables.$conversation-colors {
+  .module-message__container--outgoing-#{$color} {
+    background-color: $value;
+
+    @include mixins.dark-theme {
+      background-color: $value;
+    }
+  }
+}
+
+.module-message__container--outgoing-custom {
+  background-attachment: fixed;
+}
+
+@each $color, $value in variables.$conversation-colors-gradient {
+  .module-message__container--outgoing-#{$color} {
+    background-attachment: fixed;
+    background-image: linear-gradient(
+      map.get($value, 'deg'),
+      map.get($value, 'start'),
+      map.get($value, 'end')
+    );
+  }
+}
+
+.module-message__container--deleted-for-everyone {
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+    border: 1px solid variables.$color-gray-25;
+    background-color: transparent;
+    background-image: none;
+  }
+
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+    border: 1px solid variables.$color-gray-75;
+    background-color: transparent;
+    background-image: none;
+  }
+}
+
+.module-message__attachment-too-big {
+  margin-inline: -$message-padding-horizontal;
+  margin-top: -$message-padding-vertical;
+  margin-bottom: -$message-padding-vertical;
+  padding-top: $message-padding-vertical;
+  padding-bottom: $message-padding-vertical;
+  padding-inline: $message-padding-horizontal;
+
+  border-radius: 18px;
+
+  @include mixins.font-body-1-italic;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+    border: 1px solid variables.$color-gray-05;
+    background-color: variables.$color-white;
+    background-image: none;
+  }
+
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+    border: 1px solid variables.$color-gray-75;
+    background-color: variables.$color-gray-95;
+    background-image: none;
+  }
+}
+
+.module-message__attachment-too-big--content-above {
+  margin-block-start: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.module-message__attachment-too-big--content-below {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+
+  border-bottom: none;
+  margin-bottom: 7px;
+}
+
+.module-message__attachment-too-big--collapse-above--incoming {
+  border-top-left-radius: 4px;
+}
+.module-message__attachment-too-big--collapse-above--outgoing {
+  border-top-right-radius: 4px;
+}
+.module-message__attachment-too-big--collapse-below--incoming {
+  border-bottom-left-radius: 4px;
+}
+.module-message__attachment-too-big--collapse-below--outgoing {
+  border-bottom-right-radius: 4px;
+}
+
+.module-message__attachment-container {
+  // To ensure that images are centered if they aren't full width of bubble
+  text-align: center;
+  position: relative;
+
+  margin-inline: -$message-padding-horizontal;
+  margin-top: -$message-padding-vertical;
+  margin-bottom: -$message-padding-vertical;
+
+  line-height: 0;
+  overflow: hidden;
+
+  @include mixins.light-theme {
+    background-color: variables.$color-white;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-95;
+  }
+
+  &--with-content-below {
+    margin-bottom: 7px;
+  }
+
+  &--with-content-above {
+    margin-top: 4px;
+  }
+}
+
+.module-message__undownloadable-attachment {
+  @include mixins.font-body-1;
+
+  display: flex;
+
+  padding-block: 9px 8px;
+  padding-inline: 12px;
+
+  margin-inline: -$message-padding-horizontal;
+  margin-block-start: -$message-padding-vertical;
+  margin-block-end: -$message-padding-vertical;
+
+  &--with-content-below {
+    margin-block-end: 7px;
+    border-bottom: 0.5px solid variables.$color-white-alpha-10;
+
+    @include mixins.light-theme {
+      border-color: variables.$color-black-alpha-10;
+    }
+
+    @include mixins.dark-theme {
+      border-color: variables.$color-white-alpha-10;
+    }
+  }
+
+  &--with-content-above {
+    margin-block-start: 4px;
+  }
+}
+
+.module-message__container--outgoing
+  .module-message__undownloadable-attachment--with-content-below {
+  border-color: variables.$color-white-alpha-30;
+}
+
+.module-message__container--is-clickable {
+  cursor: pointer;
+}
+
+.module-message__sticker-container {
+  // To ensure that images are centered if they aren't full width of bubble
+  text-align: center;
+
+  margin-inline: -$message-padding-horizontal;
+  margin-top: -$message-padding-vertical - 1px;
+  margin-bottom: -$message-padding-vertical + 3px;
+
+  &--with-content-below {
+    margin-bottom: 5px;
+  }
+
+  &--with-content-above {
+    margin-top: 4px;
+  }
+}
+
+.module-message__img-attachment {
+  margin-bottom: -3px;
+
+  // redundant with attachment-container, but we get cursor flashing on move otherwise
+  cursor: pointer;
+}
+
+.module-message__simple-attachment {
+  @include mixins.button-reset;
+
+  & {
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    border-radius: 4px;
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus {
+      box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+    }
+  }
+}
+
+.module-message__container--outgoing .module-message__simple-attachment {
+  @include mixins.keyboard-mode {
+    &:focus {
+      box-shadow: 0px 0px 0px 2px variables.$color-white;
+    }
+  }
+}
+
+.module-message__simple-attachment--with-content-below {
+  padding-bottom: 8px;
+}
+
+.module-message__simple-attachment--with-content-above {
+  padding-top: 4px;
+}
+
+.module-message__simple-attachment__icon__extension {
+  @include mixins.font-subtitle;
+  text-transform: lowercase;
+
+  // Along with flow layout in parent item, centers text
+  text-align: center;
+  margin-inline: auto;
+
+  // We shouldn't have problems with 1-3 character extensions, but clip if we do!
+  white-space: nowrap;
+  overflow-x: hidden;
+  text-overflow: clip;
+
+  color: variables.$color-gray-90;
+}
+
+// For longer extensions we manually only show the first three characters and an ellipse;
+// all we do here is change the font.
+.module-message__simple-attachment__icon__extension--more-char {
+  font-size: 9px;
+  line-height: 11px;
+  letter-spacing: -0.2px;
+}
+.module-message__simple-attachment__text {
+  flex-grow: 1;
+  // icon-container is 30px wide, 12px margin
+  max-width: calc(100% - 42px);
+}
+
+.module-message__simple-attachment__file-name {
+  @include mixins.font-body-1-bold;
+
+  margin-top: 2px;
+  font-weight: 500;
+
+  // Handling really long filenames - cut them off
+  overflow-x: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+
+  @include mixins.light-theme {
+    color: variables.$color-white;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-white-alpha-90;
+  }
+}
+
+.module-message__simple-attachment__file-name--incoming {
+  color: variables.$color-white;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+}
+
+.module-message__simple-attachment__bottom-row {
+  display: flex;
+  flex-direction: row;
+}
+
+.module-message__simple-attachment__metadata-container {
+  flex-grow: 1;
+  padding-inline-start: 8px;
+  padding-top: 6px;
+  align-self: end;
+}
+
+.module-message__container--incoming
+  .module-message__simple-attachment__file-name--undownloadable {
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+}
+
+.module-message__simple-attachment__file-size {
+  flex-grow: 1;
+  flex-shrink: 0;
+  @include mixins.font-body-small;
+
+  margin-top: 2px;
+  white-space: no-wrap;
+
+  @include mixins.light-theme {
+    color: variables.$color-white-alpha-80;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-white-alpha-60;
+  }
+}
+
+.module-message__simple-attachment__file-size--incoming {
+  color: variables.$color-white;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-60;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+  }
+}
+
+.module-message__undownloadable-attachment__icon-container {
+  margin-inline-end: 8px;
+}
+
+.module-message__undownloadable-attachment__icon-container--file {
+  margin-block-start: 1px;
+  margin-inline-end: 3px;
+}
+
+.module-message__undownloadable-attachment__icon {
+  height: 20px;
+  width: 20px;
+
+  &--audio {
+    @include mixins.color-svg(
+      '../images/icons/v3/waveform/waveform-slash.svg',
+      currentColor
+    );
+  }
+
+  &--file {
+    @include mixins.color-svg(
+      '../images/icons/v3/error/error-circle.svg',
+      currentColor
+    );
+  }
+
+  &--sticker {
+    @include mixins.color-svg(
+      '../images/icons/v3/sticker/sticker-slash.svg',
+      currentColor
+    );
+  }
+
+  &--tap-to-view {
+    @include mixins.color-svg(
+      '../images/icons/v3/view_once/view_once-slash-bold.svg',
+      currentColor
+    );
+  }
+
+  &--small {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.module-message__undownloadable-attachment-info--file {
+  @include mixins.font-body-2;
+}
+
+.module-message__container--incoming
+  .module-message__undownloadable-attachment-info--file {
+  @include mixins.light-theme {
+    color: variables.$color-gray-80;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+  }
+}
+
+.module-message__undownloadable-attachment {
+  min-width: 200px;
+}
+
+.module-message__undownloadable-attachment-file {
+  @include mixins.font-body-2;
+  display: flex;
+}
+
+.module-message__undownloadable-attachment-text {
+  @include mixins.button-reset;
+  & {
+    @include mixins.font-body-1;
+    width: calc(100% + 24px);
+    margin-block-start: 9px;
+    margin-inline: -12px;
+    padding-block-start: 9px;
+    padding-inline: 12px;
+    border-block-start: 0.5px solid;
+    @include mixins.light-theme {
+      border-block-start-color: variables.$color-black-alpha-10;
+    }
+    @include mixins.dark-theme {
+      border-block-start-color: variables.$color-white-alpha-10;
+    }
+  }
+}
+
+.module-message__container--outgoing
+  .module-message__undownloadable-attachment-text {
+  border-block-start-color: variables.$color-white-alpha-30;
+}
+
+.module-message__undownloadable-attachment-text__icon-container {
+  margin-inline-end: 8px;
+  align-self: flex-start;
+}
+
+.module-message--outgoing {
+  .module-message__undownloadable-attachment + .module-message__metadata {
+    .module-message__metadata__date--with-sticker {
+      color: inherit;
+    }
+
+    .module-message__metadata__status-icon--with-sticker {
+      background-color: variables.$color-white-alpha-80;
+    }
+  }
+}
+
+.module-message__undownloadable-attachment-learn-more {
+  @include mixins.button-reset;
+  @include mixins.keyboard-mode {
+    &:focus {
+      box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+    }
+  }
+
+  & {
+    @include mixins.font-body-1-bold;
+    font-weight: 500;
+  }
+}
+
+.module-message__link-preview {
+  cursor: pointer;
+
+  &--nonclickable {
+    cursor: inherit;
+    .module-image__image,
+    .module-image__border-overlay--with-click-handler {
+      cursor: inherit;
+    }
+  }
+
+  & {
+    display: block;
+
+    margin-inline: -$message-padding-horizontal;
+    width: calc(100% + 24px);
+    outline: none;
+
+    margin-top: -$message-padding-vertical;
+    margin-bottom: 5px;
+    overflow: hidden;
+
+    @include mixins.keyboard-mode {
+      &:focus {
+        box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+      }
+    }
+  }
+}
+
+.module-message__link-preview--with-content-above {
+  margin-top: 4px;
+}
+
+.module-message__link-preview__content {
+  padding-block: $message-padding-vertical;
+  padding-inline: $message-padding-horizontal;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+
+  @include mixins.light-theme {
+    background-color: variables.$color-gray-02;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-80;
+  }
+}
+
+.module-message__link-preview__text--with-icon {
+  margin-top: 5px;
+}
+
+.module-message__link-preview__title {
+  @include mixins.font-body-1-bold;
+
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+}
+
+.module-message__link-preview__description {
+  @include mixins.font-body-2;
+
+  margin-top: 4px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow-wrap: break-word;
+  word-break: auto-phrase;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+}
+
+.module-message__link-preview__footer {
+  @include mixins.font-body-2;
+
+  display: flex;
+  flex-flow: row wrap;
+  align-items: center;
+  margin-top: 2px;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-60;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+  }
+
+  > *:not(:first-child) {
+    display: flex;
+    flex-grow: 1;
+
+    &:before {
+      content: '•';
+      font-size: 50%;
+      margin-inline: 0.2rem;
+    }
+  }
+}
+
+.module-message__link-preview__location {
+  text-transform: lowercase;
+}
+
+.module-message__author {
+  @include mixins.font-body-small-bold;
+
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+
+.module-message__author_with_sticker {
+  @include mixins.font-body-small-bold;
+
+  min-height: 18px;
+
+  // Stickers are pretty narrow, so we allow this one element of a sticker
+  //   message to go wider than normal.
+  // There's a tension here, since this is width and not max-width; things will
+  //   look bad for RTL users if we make it too wide.
+  width: 300px;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+}
+
+.module-message__author--with-quote {
+  margin-bottom: 3px;
+}
+
+.module-message__text {
+  @include mixins.font-body-1;
+
+  text-align: start;
+  overflow-wrap: break-word;
+  word-break: auto-phrase;
+  white-space: pre-wrap;
+  user-select: text;
+
+  @include mixins.light-theme {
+    color: variables.$color-white-alpha-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-white-alpha-90;
+  }
+
+  a {
+    text-decoration: underline;
+    outline: none;
+    // Allow links to be broken anywhere so they don't force extra line breaks
+    // when surrounded by text.
+    word-break: break-all;
+
+    @include mixins.light-theme {
+      color: variables.$color-white-alpha-90;
+    }
+    @include mixins.keyboard-mode {
+      &:focus {
+        outline: 1px solid variables.$color-gray-90;
+      }
+    }
+
+    @include mixins.dark-theme {
+      color: variables.$color-white-alpha-90;
+    }
+    @include mixins.dark-keyboard-mode {
+      &:focus {
+        outline: 1px solid variables.$color-white-alpha-90;
+      }
+    }
+  }
+}
+
+.module-message__text--incoming {
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+
+  a {
+    text-decoration: underline;
+    outline: none;
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-90;
+    }
+    @include mixins.keyboard-mode {
+      &:focus {
+        outline: 1px solid variables.$color-gray-90;
+      }
+    }
+
+    @include mixins.dark-theme {
+      color: variables.$color-gray-05;
+    }
+    @include mixins.dark-keyboard-mode {
+      &:focus {
+        outline: 1px solid variables.$color-gray-05;
+      }
+    }
+  }
+}
+
+.module-message__text--error {
+  @include mixins.font-body-1-italic;
+}
+.module-message__text--delete-for-everyone {
+  color: light-dark(variables.$color-gray-60, variables.$color-gray-25);
+}
+
+.module-message__metadata {
+  @include mixins.font-caption;
+
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 3px;
+  font-style: normal;
+  white-space: nowrap;
+  color: var(--axo-color-label-secondary);
+
+  &--outgoing {
+    color: var(--axo-color-label-secondary-oncolor);
+  }
+
+  &--outline-only-bubble,
+  &--sticker {
+    color: light-dark(variables.$color-gray-60, variables.$color-gray-25);
+  }
+
+  &--with-image-no-caption {
+    color: light-dark(variables.$color-white, variables.$color-white-alpha-80);
+  }
+
+  &--inline {
+    float: inline-end;
+    margin-top: -14px;
+    position: relative;
+    z-index: variables.$z-index-base;
+  }
+}
+
+.module-message__metadata__edited {
+  @include mixins.button-reset;
+  & {
+    cursor: pointer;
+    margin-inline-end: 6px;
+    z-index: variables.$z-index-base;
+  }
+}
+
+.module-message__metadata__sms {
+  margin-inline-start: 6px;
+}
+
+// With an image and no caption, this section needs to be on top of the image overlay
+.module-message__metadata--with-image-no-caption {
+  position: absolute;
+  bottom: 9px;
+  z-index: variables.$z-index-above-base;
+
+  width: 100%;
+  // Because this is absolutely positioned, we 100% is too big, take it down by parent
+  //   padding sizes.
+  padding-inline-end: 24px;
+
+  // This is so all clicks go right through to the underlying image.
+  pointer-events: none;
+}
+
+.module-message__metadata__tapable {
+  @include mixins.button-reset;
+}
+
+.module-message__metadata__status-icon {
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  margin-inline: 6px;
+  // High margin to leave space for the increase when we go to two checks
+  margin-bottom: 2px;
+}
+
+.module-message__metadata__status-icon--paused,
+.module-message__metadata__status-icon--sending {
+  @include mixins.only-when-page-is-visible {
+    animation: rotate 4s linear infinite;
+  }
+  @include mixins.color-svg(
+    '../images/icons/v3/message_status/messagestatus-sending.svg',
+    currentColor
+  );
+}
+
+.module-message__metadata__status-icon--sent {
+  @include mixins.color-svg(
+    '../images/icons/v3/message_status/messagestatus-sent.svg',
+    currentColor
+  );
+}
+.module-message__metadata__status-icon--delivered {
+  // We reduce the margin size to keep the overall width the same
+  margin-inline-end: 0px;
+  width: 18px;
+
+  @include mixins.color-svg(
+    '../images/icons/v3/message_status/messagestatus-delivered.svg',
+    currentColor
+  );
+}
+.module-message__metadata__status-icon--read,
+.module-message__metadata__status-icon--viewed {
+  // We reduce the margin size to keep the overall width the same
+  margin-inline-end: 0px;
+  width: 18px;
+
+  @include mixins.color-svg(
+    '../images/icons/v3/message_status/messagestatus-read.svg',
+    currentColor
+  );
+}
+
+// When status indicators are overlaid on top of an image, they use different colors
+.module-message__metadata__status-icon--with-image-no-caption {
+  color: light-dark(variables.$color-white, variables.$color-gray-02);
+}
+
+.module-message__metadata__spinner-container {
+  margin-inline-start: 6px;
+}
+
+.module-message__send-message-button {
+  @include mixins.button-reset;
+
+  & {
+    width: calc(100% + 24px);
+
+    @include mixins.font-body-2-bold;
+
+    margin-top: $message-padding-vertical;
+    margin-bottom: -$message-padding-vertical;
+    margin-inline: -$message-padding-horizontal;
+
+    text-align: center;
+    padding: 10px;
+
+    border-bottom-left-radius: 18px;
+    border-bottom-right-radius: 18px;
+
+    @include mixins.light-theme {
+      color: variables.$color-ultramarine;
+      background-color: variables.$color-gray-02;
+      border: 1px solid variables.$color-black-alpha-20;
+    }
+
+    @include mixins.dark-theme {
+      color: variables.$color-ultramarine-light;
+      background-color: variables.$color-gray-75;
+      border: 1px solid variables.$color-gray-45;
+    }
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus {
+      box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+    }
+  }
+}
+
+.module-message__send-message-button--no-bottom-left-curve {
+  border-bottom-left-radius: 4px;
+}
+.module-message__send-message-button--no-bottom-right-curve {
+  border-bottom-right-radius: 4px;
+}
+
+.module-message__author-avatar-container {
+  align-items: flex-end;
+  display: flex;
+  justify-content: center;
+  margin-inline-end: 8px;
+  min-width: 28px;
+  padding-bottom: 6px;
+
+  &--with-reactions {
+    padding-bottom: 15px;
+  }
+
+  &--typing {
+    flex-direction: row-reverse;
+    overflow-y: clip;
+  }
+}
+
+.module-message__container-outer--typing-bubble {
+  overflow-y: clip;
+}
+
+.module-message__typing-avatar-container {
+  flex-direction: row-reverse;
+  overflow-y: clip;
+}
+
+.module-message__typing-avatar {
+  display: flex;
+  justify-content: center;
+  position: relative;
+  z-index: variables.$z-index-base;
+
+  &:not(:last-child) {
+    margin-inline-start: -4px;
+  }
+
+  &--overflow-count {
+    .module-Avatar__contents {
+      @include mixins.light-theme() {
+        background: variables.$color-gray-05;
+        color: variables.$color-gray-60;
+      }
+
+      @include mixins.dark-theme() {
+        background: variables.$color-gray-75;
+        color: variables.$color-gray-25;
+      }
+    }
+
+    .module-Avatar__label {
+      @include mixins.font-caption-bold;
+    }
+  }
+
+  .module-Avatar {
+    min-width: 28px;
+    width: 28px;
+    height: 28px;
+  }
+
+  .module-Avatar__contents {
+    outline: 3px solid;
+
+    @include mixins.light-theme() {
+      outline-color: variables.$color-white;
+    }
+
+    @include mixins.dark-theme() {
+      outline-color: variables.$color-gray-95;
+    }
+  }
+}
+
+.module-message__typing-avatar-spacer {
+  flex: 0 1 24px;
+}
+
+.module-message__unopened-gift-badge {
+  width: 240px;
+  height: 132px;
+  background-color: variables.$color-ultramarine;
+  position: relative;
+
+  margin-inline: -$message-padding-horizontal;
+  margin-top: -$message-padding-vertical;
+  margin-bottom: $message-padding-vertical;
+
+  &--outgoing {
+    @include mixins.light-theme {
+      border-bottom: 1px solid variables.$color-white-alpha-80;
+    }
+    @include mixins.dark-theme {
+      border-bottom: 1px solid variables.$color-gray-95;
+    }
+  }
+
+  &__container {
+    cursor: default;
+  }
+
+  &__ribbon-horizontal {
+    position: absolute;
+    inset-inline: 0;
+    height: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    background-color: variables.$color-white;
+  }
+
+  &__ribbon-vertical {
+    @include mixins.position-absolute-center-x;
+    top: 0;
+    bottom: 0;
+    width: 16px;
+    background-color: variables.$color-white;
+  }
+
+  &__bow {
+    // Centered
+    @include mixins.position-absolute-center;
+
+    // For proper alignment with the ribbons
+    margin-top: 3px;
+
+    // 75.26px by 51.93px in Figma, but there's a buffer in the SVG file
+    width: 81px;
+    height: 60px;
+  }
+
+  &__text {
+    @include mixins.font-body-2-italic;
+
+    &--incoming {
+      @include mixins.light-theme {
+        color: variables.$color-gray-60;
+      }
+      @include mixins.dark-theme {
+        color: variables.$color-gray-25;
+      }
+    }
+  }
+
+  &__container .module-message__text--incoming {
+    @include mixins.font-body-2-italic;
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+    }
+    @include mixins.dark-theme {
+      color: variables.$color-gray-25;
+    }
+  }
+  &__container .module-message__text--outgoing {
+    @include mixins.font-body-2-italic;
+
+    @include mixins.light-theme {
+      color: variables.$color-white-alpha-80;
+    }
+    @include mixins.dark-theme {
+      color: variables.$color-white-alpha-80;
+    }
+  }
+}
+
+.module-message__redeemed-gift-badge {
+  display: flex;
+  flex-direction: row;
+
+  &__badge {
+    height: 64px;
+    width: 64px;
+    margin-inline: 4px 12px;
+    margin-top: 8px;
+    margin-bottom: 16px;
+    flex-grow: 0;
+    flex-shrink: 0;
+
+    &--missing-incoming {
+      border-radius: 50%;
+
+      @include mixins.light-theme {
+        background-color: variables.$color-gray-15;
+      }
+      @include mixins.dark-theme {
+        background-color: variables.$color-gray-60;
+      }
+    }
+    &--missing-outgoing {
+      border-radius: 50%;
+
+      @include mixins.light-theme {
+        background-color: variables.$color-white-alpha-20;
+      }
+      @include mixins.dark-theme {
+        background-color: variables.$color-white-alpha-20;
+      }
+    }
+  }
+
+  &__text {
+    flex-grow: 1;
+    margin-top: 19px;
+  }
+  &__title {
+    margin-bottom: 6px;
+    @include mixins.font-body-1;
+  }
+  &__remaining {
+    @include mixins.font-subtitle;
+
+    &--incoming {
+      @include mixins.light-theme {
+        color: variables.$color-gray-75;
+      }
+      @include mixins.dark-theme {
+        color: variables.$color-gray-25;
+      }
+    }
+    &--outgoing {
+      @include mixins.light-theme {
+        color: variables.$color-white-alpha-80;
+      }
+      @include mixins.dark-theme {
+        color: variables.$color-white-alpha-80;
+      }
+    }
+  }
+
+  &__button {
+    @include mixins.button-reset;
+    & {
+      @include mixins.button-secondary;
+    }
+
+    & {
+      margin-inline: auto;
+      width: 216px;
+      margin-bottom: 7px;
+      text-align: center;
+      border-radius: 4px;
+
+      @include mixins.font-body-1-bold;
+
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    &--incoming {
+      @include mixins.light-theme {
+        color: variables.$color-gray-90;
+        background-color: variables.$color-white;
+      }
+      @include mixins.dark-theme {
+        color: variables.$color-gray-05;
+        background-color: variables.$color-gray-62;
+      }
+
+      // Disabling hover
+      &:hover {
+        @include mixins.mouse-mode {
+          background-color: variables.$color-white;
+        }
+
+        @include mixins.dark-mouse-mode {
+          background-color: variables.$color-gray-62;
+        }
+      }
+    }
+
+    &--outgoing {
+      @include mixins.light-theme {
+        color: variables.$color-gray-90;
+        background-color: variables.$color-white-alpha-80;
+      }
+      @include mixins.dark-theme {
+        color: variables.$color-gray-90;
+        background-color: variables.$color-white-alpha-80;
+      }
+      &:hover {
+        @include mixins.mouse-mode {
+          background-color: variables.$color-white-alpha-90;
+        }
+
+        @include mixins.dark-mouse-mode {
+          background-color: variables.$color-white-alpha-90;
+        }
+      }
+      &:focus {
+        @include mixins.keyboard-mode {
+          box-shadow: 0px 0px 0px 3px variables.$color-ultramarine-light;
+        }
+        @include mixins.dark-keyboard-mode {
+          box-shadow: 0px 0px 0px 3px variables.$color-ultramarine-light;
+        }
+      }
+      &:active {
+        // We need to include all four here for specificity precedence
+
+        @include mixins.mouse-mode {
+          background-color: variables.$color-white;
+        }
+        @include mixins.dark-mouse-mode {
+          background-color: variables.$color-white;
+        }
+
+        @include mixins.keyboard-mode {
+          background-color: variables.$color-white;
+        }
+        @include mixins.dark-keyboard-mode {
+          background-color: variables.$color-white;
+        }
+      }
+    }
+
+    &__text {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      height: 36px;
+    }
+  }
+
+  &__icon-check {
+    height: 19px;
+    width: 19px;
+    margin-inline-end: 5px;
+    display: inline-block;
+
+    &--incoming {
+      @include mixins.light-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/check/check-circle.svg',
+          variables.$color-gray-90
+        );
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/check/check-circle.svg',
+          variables.$color-gray-05
+        );
+      }
+    }
+
+    &--outgoing {
+      @include mixins.light-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/check/check-circle.svg',
+          variables.$color-gray-90
+        );
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/check/check-circle.svg',
+          variables.$color-gray-90
+        );
+      }
+    }
+  }
+}
+
+.module-message__typing-animation-container {
+  height: 16px;
+  overflow-y: clip;
+
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.module-message__reactions {
+  position: relative;
+  z-index: variables.$z-index-above-base;
+  height: 22px;
+  display: flex;
+
+  &--incoming {
+    align-self: flex-end;
+    padding-inline-end: 8px;
+    margin-inline-start: 8px;
+  }
+  &--outgoing {
+    align-self: flex-start;
+    padding-inline-start: 8px;
+    margin-inline-end: 8px;
+  }
+}
+
+.module-message__reactions__reaction {
+  @include mixins.button-reset;
+
+  & {
+    min-width: 28px;
+    height: 22px;
+    border: 1px solid;
+    border-radius: 33px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+
+  &--with-count {
+    min-width: 40px;
+    padding-block: 0;
+    padding-inline: 6px;
+  }
+
+  &__count {
+    @include mixins.font-caption-bold;
+
+    margin-inline-start: 4px;
+
+    &--no-emoji {
+      margin-inline-start: 0px;
+    }
+
+    & {
+      @include mixins.light-theme {
+        color: variables.$color-gray-60;
+      }
+
+      @include mixins.dark-theme {
+        color: variables.$color-gray-25;
+      }
+    }
+
+    &--is-me {
+      @include mixins.dark-theme {
+        color: variables.$color-gray-15;
+      }
+    }
+  }
+
+  &:focus {
+    outline: none;
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus {
+      box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+    }
+  }
+
+  & {
+    @include mixins.light-theme() {
+      border-color: variables.$color-white;
+      background: variables.$color-gray-05;
+    }
+  }
+
+  @include mixins.dark-theme() {
+    border-color: variables.$color-gray-95;
+    background: variables.$color-gray-90;
+  }
+
+  &--is-me {
+    @include mixins.dark-theme() {
+      background: variables.$color-gray-60;
+    }
+
+    @include mixins.light-theme() {
+      background: variables.$color-gray-25;
+    }
+  }
+}
+
+.module-message__tap-to-view__icon--ready {
+  @include mixins.color-svg-themed(
+    '../images/icons/v3/view_once/view_once-bold.svg',
+    variables.$color-gray-90,
+    variables.$color-gray-05
+  );
+}
+.module-message__tap-to-view__icon--outgoing {
+  @include mixins.color-svg(
+    '../images/icons/v3/view_once/view_once-dash-bold.svg',
+    variables.$color-white-alpha-80
+  );
+}
+.module-message__tap-to-view__icon--viewed {
+  @include mixins.color-svg-themed(
+    '../images/icons/v3/view_once/view_once-viewed-bold.svg',
+    variables.$color-gray-90,
+    variables.$color-gray-05
+  );
+}
+.module-message__tap-to-view__icon--not-available {
+  @include mixins.color-svg-themed(
+    '../images/icons/v3/view_once/view_once-slash-bold.svg',
+    variables.$color-gray-90,
+    variables.$color-gray-05
+  );
+}
+
+// Module: Expire Timer
+
+.module-expire-timer {
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  margin-inline-start: 6px;
+  margin-bottom: 2px;
+}
+
+$timer-icons:
+  '60', '55', '50', '45', '40', '35', '30', '25', '20', '15', '10', '05', '00';
+
+@each $timer-icon in $timer-icons {
+  .module-expire-timer--#{$timer-icon} {
+    @include mixins.color-svg(
+      '../images/icons/v3/message_timer/messagetimer-#{$timer-icon}.svg',
+      currentColor
+    );
+  }
+}
+
+.module-about {
+  &__container {
+    margin-inline: auto;
+    max-width: 248px;
+    text-align: center;
+  }
+
+  &__text {
+    @include mixins.font-body-1;
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+    }
+    @include mixins.dark-theme {
+      color: variables.$color-gray-25;
+    }
+    & {
+      max-width: 400px;
+
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      display: -webkit-box;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  }
+}
+
+// Module: Embedded Contact
+
+.module-embedded-contact {
+  width: 100%;
+  padding-top: 4px;
+  padding-bottom: 4px;
+
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.module-embedded-contact--with-content-above {
+  padding-top: 4px;
+}
+
+.module-embedded-contact--with-content-below {
+  padding-bottom: 4px;
+}
+
+.module-embedded-contact__avatar-container {
+  height: 52px;
+  width: 52px;
+  border-radius: 26px;
+
+  @include mixins.keyboard-mode {
+    &:focus {
+      box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+    }
+  }
+}
+
+.module-embedded-contact--outgoing .module-embedded-contact__avatar-container {
+  @include mixins.keyboard-mode {
+    &:focus {
+      box-shadow: 0px 0px 0px 2px variables.$color-white;
+    }
+  }
+}
+
+.module-embedded-contact__avatar-container .AttachmentStatusIcon__container {
+  margin: 0;
+  height: 52px;
+  width: 52px;
+}
+
+.module-embedded-contact__avatar-container
+  .AttachmentStatusIcon__circle-icon-container {
+  margin: 0;
+}
+
+.module-embedded-contact__avatar-container {
+  @include mixins.button-reset;
+}
+
+.module-embedded-contact__avatar-container
+  .AttachmentStatusIcon__circle-icon-container {
+  @include mixins.position-absolute-center;
+}
+
+.module-embedded-contact__text-container {
+  flex-grow: 1;
+  margin-inline-start: 12px;
+
+  max-width: calc(100% - 64px);
+}
+
+.module-embedded-contact__contact-name {
+  @include mixins.font-body-1-bold;
+
+  margin-top: 6px;
+
+  max-width: 100%;
+  white-space: nowrap;
+  overflow-x: hidden;
+  text-overflow: ellipsis;
+
+  @include mixins.light-theme {
+    color: variables.$color-white;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+}
+
+.module-embedded-contact__contact-name--incoming {
+  color: variables.$color-white;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+  }
+}
+
+.module-embedded-contact__contact-method {
+  @include mixins.font-body-2;
+
+  margin-top: 3px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow-x: hidden;
+  text-overflow: ellipsis;
+
+  @include mixins.dark-theme {
+    color: variables.$color-white-alpha-80;
+  }
+  @include mixins.light-theme {
+    color: variables.$color-white-alpha-80;
+  }
+}
+
+.module-embedded-contact__contact-method--incoming {
+  color: variables.$color-white-alpha-80;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-60;
+  }
+}
+
+// Module: Contact Detail
+
+.module-contact-detail {
+  text-align: center;
+  max-width: 300px;
+  margin-inline: auto;
+}
+
+.module-contact-detail__avatar {
+  @include mixins.button-reset;
+  & {
+    cursor: default;
+    position: relative;
+    height: 80px;
+    width: 80px;
+    margin-bottom: 10px;
+    border-radius: 40px;
+  }
+  @include mixins.light-theme {
+    background-color: variables.$color-gray-05;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-80;
+  }
+}
+
+.module-contact-detail__avatar--clickable {
+  cursor: pointer;
+}
+
+.module-contact-detail__avatar .AttachmentStatusIcon__container {
+  height: 80px;
+  width: 80px;
+  margin: 0;
+}
+
+.module-contact-detail__avatar .AttachmentStatusIcon__circle-icon-container {
+  @include mixins.position-absolute-center;
+}
+
+.module-contact-detail__contact-name {
+  @include mixins.font-body-1-bold;
+}
+
+.module-contact-detail__contact-method {
+  @include mixins.font-body-2;
+
+  margin-top: 10px;
+}
+
+.module-contact-detail__send-message {
+  @include mixins.button-reset;
+
+  & {
+    border-radius: 4px;
+    background-color: variables.$color-ultramarine;
+    display: inline-block;
+    padding: 6px;
+    margin-top: 20px;
+
+    color: variables.$color-white;
+
+    flex-direction: column;
+    align-items: center;
+  }
+}
+
+.module-contact-detail__send-message__inner {
+  display: flex;
+  align-items: center;
+  padding-inline-end: 5px;
+
+  @include mixins.font-body-2-bold;
+}
+
+.module-contact-detail__send-message__bubble-icon {
+  height: 17px;
+  width: 18px;
+  display: inline-block;
+  margin-inline-end: 5px;
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/chat/chat.svg',
+      variables.$color-white
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/chat/chat.svg',
+      variables.$color-white
+    );
+  }
+}
+
+.module-contact-detail__additional-contact {
+  text-align: start;
+  margin-top: 15px;
+  padding-top: 8px;
+
+  @include mixins.light-theme {
+    border-top: 1px solid variables.$color-gray-05;
+  }
+  @include mixins.dark-theme {
+    border-top: 1px solid variables.$color-gray-75;
+  }
+}
+
+.module-contact-detail__additional-contact__type {
+  @include mixins.font-caption-bold;
+
+  color: variables.$color-gray-45;
+
+  margin-bottom: 3px;
+}
+
+// Module: Inline Notification Wrapper
+
+.module-inline-notification-wrapper {
+  outline: none;
+  position: relative;
+
+  &:focus {
+    @include mixins.keyboard-mode {
+      background: variables.$color-selected-message-background-light;
+    }
+    @include mixins.dark-keyboard-mode {
+      background: variables.$color-selected-message-background-dark;
+    }
+  }
+}
+
+// Module: Group Notification
+
+.module-group-notification__contact {
+  font-weight: bold;
+}
+
+// Module: Error Boundary
+
+.module-error-boundary-notification {
+  text-align: center;
+  cursor: pointer;
+
+  &:focus {
+    @include mixins.keyboard-mode {
+      outline: 0;
+    }
+  }
+
+  &:focus &__message {
+    @include mixins.keyboard-mode {
+      opacity: 1;
+    }
+  }
+
+  &__message {
+    opacity: 0.8;
+  }
+
+  & {
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+    }
+    @include mixins.dark-theme {
+      color: variables.$color-gray-05;
+    }
+  }
+
+  &__icon-container {
+    margin-inline: auto;
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  &__icon {
+    height: 20px;
+    width: 20px;
+    display: inline-block;
+    opacity: 0.6;
+
+    @include mixins.light-theme {
+      @include mixins.color-svg(
+        '../images/icons/v2/error-solid-24.svg',
+        variables.$color-gray-60
+      );
+    }
+    @include mixins.dark-theme {
+      @include mixins.color-svg(
+        '../images/icons/v2/error-solid-24.svg',
+        variables.$color-gray-05
+      );
+    }
+  }
+}
+
+.module-notification--with-click-handler {
+  cursor: pointer;
+}
+
+.module-notification__icon {
+  height: 24px;
+  width: 24px;
+  margin-inline: auto;
+}
+
+// Module: In Contacts Icon
+
+.module-in-contacts-icon__icon {
+  display: inline-block;
+  height: 14px;
+  width: 14px;
+
+  margin-bottom: 2px;
+  vertical-align: middle;
+
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/person/person-circle-compact.svg',
+      variables.$color-gray-60
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/person/person-circle-compact.svg',
+      variables.$color-gray-25
+    );
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus {
+      @include mixins.color-svg(
+        '../images/icons/v3/person/person-circle-compact.svg',
+        variables.$color-ultramarine
+      );
+    }
+  }
+}
+
+// Module: Conversation Details
+
+.conversation-details-panel {
+  max-width: 750px;
+  margin-block: 0;
+  margin-inline: auto;
+
+  @at-root .conversation #{&} {
+    overflow-y: auto;
+  }
+}
+
+// Brought this up here to add specificity
+button.ConversationDetails__action-button {
+  margin-inline-start: 16px;
+}
+
+// Module: Message Request Actions
+
+.module-message-request-actions {
+  padding-block: 8px 12px;
+  padding-inline: 16px;
+
+  &__message {
+    @include mixins.font-body-2;
+    text-align: center;
+    margin-bottom: 12px;
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+    }
+
+    @include mixins.dark-theme {
+      color: variables.$color-gray-25;
+    }
+
+    &__name {
+      @include mixins.font-body-2-bold;
+    }
+
+    &__learn-more {
+      text-decoration: none;
+    }
+  }
+}
+
+// Module: Image
+
+.module-image {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.module-image--hidden {
+  visibility: hidden;
+}
+
+.module-image--tap-to-play,
+.module-image--not-downloaded {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+
+  span {
+    align-items: center;
+    display: flex;
+    justify-content: center;
+    border-radius: 50px;
+    height: 50px;
+    width: 50px;
+    background-color: variables.$color-black-alpha-70;
+  }
+
+  &:hover {
+    span {
+      background-color: variables.$color-black-alpha-80;
+    }
+  }
+
+  &:focus {
+    span {
+      background-color: variables.$color-gray-75;
+      border: 4px solid variables.$color-ultramarine;
+      box-sizing: border-box;
+      outline: none;
+    }
+  }
+}
+
+.module-image--not-downloaded {
+  span:after {
+    content: '';
+    height: 24px;
+    width: 24px;
+
+    @include mixins.color-svg(
+      '../images/icons/v3/arrow/arrow-down.svg',
+      variables.$color-white
+    );
+  }
+}
+
+.module-image--tap-to-play {
+  span:after {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+
+    content: 'GIF';
+
+    @include mixins.font-body-1;
+    color: variables.$color-white;
+  }
+}
+
+.module-image__progress-circle-wrapper {
+  @include mixins.position-absolute-center;
+}
+
+.module-image__spinner-container {
+  @include mixins.position-absolute-center;
+
+  .module-image-spinner {
+    &__arc {
+      background-color: variables.$color-black-alpha-80;
+    }
+
+    &__circle {
+      background-color: variables.$color-white;
+    }
+
+    @include mixins.dark-theme {
+      &__arc {
+        background-color: variables.$color-black-alpha-80;
+      }
+    }
+  }
+}
+
+.module-image--with-background {
+  @include mixins.light-theme {
+    background-color: variables.$color-white;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-black;
+  }
+}
+
+.module-image__caption-icon {
+  position: absolute;
+  top: 6px;
+  inset-inline-start: 6px;
+}
+
+.module-image--cropped {
+  overflow: hidden;
+}
+
+.module-image__border-overlay {
+  @include mixins.button-reset;
+  & {
+    width: 100%;
+    cursor: inherit;
+    pointer-events: none;
+
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    inset-inline: 0;
+    z-index: variables.$z-index-above-base;
+  }
+}
+
+.module-image__border-overlay--with-click-handler {
+  cursor: pointer;
+  pointer-events: all;
+}
+
+.module-image__border-overlay--with-border {
+  @include mixins.light-theme {
+    box-shadow: inset 0px 0px 0px 1px variables.$color-black-alpha-085;
+  }
+  @include mixins.dark-theme {
+    box-shadow: inset 0px 0px 0px 1px variables.$color-white-alpha-20;
+  }
+}
+
+.module-image--gif {
+  video {
+    cursor: pointer;
+    object-fit: cover;
+  }
+}
+
+button.module-image__border-overlay:focus {
+  @include mixins.keyboard-mode {
+    box-shadow: inset 0px 0px 0px 2px variables.$color-ultramarine;
+  }
+}
+
+.module-image__border-overlay--dark {
+  background-color: variables.$color-black-alpha-20;
+}
+
+.module-image__loading-placeholder {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+
+  @include mixins.light-theme {
+    background-color: variables.$color-black-alpha-20;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-white-alpha-20;
+  }
+}
+
+.module-image__image {
+  object-fit: cover;
+  // redundant with attachment-container, but we get cursor flashing on move otherwise
+  cursor: pointer;
+}
+
+.module-image__bottom-overlay {
+  height: 48px;
+  background-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0),
+    rgba(0, 0, 0, 0) 9%,
+    rgba(0, 0, 0, 0.02) 17%,
+    rgba(0, 0, 0, 0.05) 24%,
+    rgba(0, 0, 0, 0.08) 31%,
+    rgba(0, 0, 0, 0.12) 37%,
+    rgba(0, 0, 0, 0.16) 44%,
+    rgba(0, 0, 0, 0.2) 50%,
+    rgba(0, 0, 0, 0.24) 56%,
+    rgba(0, 0, 0, 0.28) 63%,
+    rgba(0, 0, 0, 0.32) 69%,
+    rgba(0, 0, 0, 0.35) 76%,
+    rgba(0, 0, 0, 0.38) 83%,
+    rgba(0, 0, 0, 0.4) 91%,
+    rgba(0, 0, 0, 0.4)
+  );
+  position: absolute;
+  bottom: 0;
+  z-index: variables.$z-index-base;
+  inset-inline: 0;
+  pointer-events: none;
+}
+
+.module-image__overlay-circle {
+  @include mixins.position-absolute-center;
+  @include mixins.button-reset;
+  & {
+    width: 50px;
+    height: 50px;
+    background-color: variables.$color-black-alpha-80;
+    border-radius: 25px;
+  }
+}
+
+.module-image__overlay-circle--undownloadable {
+  background-color: variables.$color-black-alpha-40;
+}
+
+.module-image__play-icon {
+  @include mixins.position-absolute-center;
+
+  height: 24px;
+  width: 24px;
+  @include mixins.color-svg(
+    '../images/icons/v3/play/play-fill.svg',
+    var(--axo-color-label-primary-oncolor)
+  );
+}
+.module-image__stop-icon {
+  @include mixins.position-absolute-center;
+
+  // Smaller to fit within the spinner
+  height: 24px;
+  width: 24px;
+  @include mixins.color-svg(
+    '../images/icons/v3/stop/stop-fill.svg',
+    var(--axo-color-label-primary-oncolor)
+  );
+}
+.module-image__download-icon {
+  @include mixins.position-absolute-center;
+
+  height: 24px;
+  width: 24px;
+  @include mixins.color-svg(
+    '../images/icons/v3/arrow/arrow-down.svg',
+    var(--axo-color-label-primary-oncolor)
+  );
+}
+.module-image__undownloadable-icon {
+  @include mixins.position-absolute-center;
+
+  height: 24px;
+  width: 24px;
+  @include mixins.color-svg(
+    '../images/icons/v3/photo/photo-slash-compact.svg',
+    var(--axo-color-label-primary-oncolor)
+  );
+}
+
+.module-image__text-container {
+  position: absolute;
+  top: 0;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: variables.$z-index-above-above-base;
+
+  // This allows click-through to the overlay button behind it
+  pointer-events: none;
+
+  color: variables.$color-white;
+
+  @include mixins.font-body-1;
+
+  text-align: center;
+}
+
+.module-image__close-button {
+  @include mixins.staged-attachment-close-button;
+
+  &::before {
+    content: '';
+    display: block;
+    width: 16px;
+    height: 16px;
+    @include mixins.color-svg(
+      '../images/icons/v3/x/x-compact.svg',
+      variables.$color-white
+    );
+  }
+
+  &:focus {
+    outline: none;
+    @include mixins.keyboard-mode {
+      @include mixins.axo-focus-ring;
+    }
+  }
+}
+
+// Module: Image Grid
+
+.module-image-grid {
+  position: relative;
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+
+  gap: 1px;
+}
+
+.module-image-grid__download-overlay {
+  @include mixins.button-reset;
+
+  & {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    inset-inline: 0;
+    z-index: variables.$z-index-above-above-base;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus .module-image-grid__download-pill {
+      box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+    }
+  }
+}
+
+.module-image-grid__download-pill {
+  background-color: variables.$color-black-alpha-80;
+  color: variables.$color-white;
+  backdrop-filter: blur(10px);
+
+  height: 44px;
+  border-radius: 44px;
+
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+}
+.module-image-grid__download_pill__icon-wrapper {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  margin-inline-end: -6px;
+}
+.module-image-grid__download_pill__download-icon {
+  @include mixins.position-absolute-center;
+
+  height: 24px;
+  width: 24px;
+  @include mixins.color-svg(
+    '../images/icons/v3/arrow/arrow-down.svg',
+    variables.$color-white
+  );
+}
+.module-image-grid__download_pill__text-wrapper {
+  @include mixins.font-body-1;
+  margin-inline-end: 14px;
+}
+
+.module-image-grid--one-image {
+  margin-bottom: -5px;
+}
+
+.module-image-grid--with-sticker {
+  padding: 8px;
+}
+
+.module-image-grid__column {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.module-image-grid__row {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  flex-grow: 1;
+  gap: 1px;
+}
+
+// Module: Typing Animation
+
+.module-typing-animation {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+
+  height: 8px;
+  width: 38px;
+  padding-inline: 1px;
+}
+
+.module-message__typing-animation-container .module-typing-animation {
+  width: 30px;
+}
+
+.module-typing-animation__dot {
+  border-radius: 50%;
+
+  height: 6px;
+  width: 6px;
+  opacity: 0.4;
+  will-change: transform, opacity;
+
+  @include mixins.dark-theme {
+    background-color: variables.$color-white;
+  }
+  @include mixins.light-theme {
+    background-color: variables.$color-gray-60;
+  }
+
+  @include mixins.only-when-page-is-visible {
+    animation: {
+      name: typing-animation;
+      duration: 1600ms;
+      timing-function: ease;
+      iteration-count: infinite;
+    }
+  }
+}
+
+.module-left-pane .module-typing-animation__dot {
+  @include mixins.only-when-page-is-visible {
+    animation-name: typing-animation-bare;
+  }
+}
+
+.module-typing-animation__dot--light {
+  background-color: variables.$color-white;
+
+  @include mixins.light-theme {
+    background-color: variables.$color-gray-60;
+  }
+}
+
+@keyframes typing-animation {
+  0% {
+    opacity: 0.4;
+  }
+  20% {
+    transform: scale(1.3);
+    opacity: 1;
+  }
+  40% {
+    opacity: 0.4;
+  }
+}
+
+@keyframes typing-animation-bare {
+  0% {
+    opacity: 0.4;
+  }
+  20% {
+    opacity: 1;
+  }
+  40% {
+    opacity: 0.4;
+  }
+}
+
+.module-typing-animation__dot--second {
+  animation-delay: 160ms;
+}
+
+.module-typing-animation__dot--third {
+  animation-delay: 320ms;
+}
+
+.module-typing-animation__spacer {
+  flex-grow: 1;
+}
+
+// Module: Attachments
+
+.module-attachments__header {
+  height: 24px;
+  position: relative;
+}
+
+.module-attachments__edit-icon {
+  align-items: center;
+  background: variables.$color-black-alpha-60;
+  border-radius: 100%;
+  display: flex;
+  height: 36px;
+  justify-content: center;
+  inset-inline-start: 50%;
+  margin-inline-start: -20px;
+  margin-top: -18px;
+  position: absolute;
+  top: 50%;
+  visibility: hidden;
+  width: 36px;
+
+  &::after {
+    @include mixins.color-svg(
+      '../images/icons/v3/edit/edit-compact.svg',
+      variables.$color-white
+    );
+    & {
+      content: '';
+      height: 20px;
+      width: 20px;
+    }
+  }
+}
+
+.module-attachments--editable {
+  display: inline-block;
+  position: relative;
+
+  &:hover {
+    .module-attachments__edit-icon {
+      visibility: visible;
+    }
+  }
+}
+
+.module-attachments__close-button {
+  $icon: '../images/icons/v3/x/x.svg';
+
+  @include mixins.button-reset;
+
+  & {
+    position: absolute;
+    top: 8px;
+    inset-inline-end: 16px;
+
+    width: 20px;
+    height: 20px;
+
+    z-index: variables.$z-index-above-base;
+
+    @include mixins.light-theme {
+      @include mixins.color-svg($icon, variables.$color-black);
+    }
+    @include mixins.dark-theme {
+      @include mixins.color-svg($icon, variables.$color-white);
+    }
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus {
+      @include mixins.color-svg($icon, variables.$color-ultramarine);
+    }
+  }
+}
+
+.module-attachments__rail {
+  margin-top: 12px;
+  margin-inline-start: 12px;
+  padding-inline-end: 12px;
+  overflow-x: scroll;
+  max-height: 142px;
+  white-space: nowrap;
+  overflow-y: hidden;
+  margin-bottom: 6px;
+}
+
+.module-staged-attachment {
+  margin-inline-end: 8px;
+
+  &.module-image::before {
+    background: linear-gradient(
+      180deg,
+      variables.$color-black-alpha-30 0%,
+      transparent 100%
+    );
+    content: '';
+    display: block;
+    height: 40px;
+    opacity: 0;
+    position: absolute;
+    transition: opacity 0.2s ease-out;
+    width: 100%;
+  }
+
+  &.module-image:hover::before {
+    opacity: 1;
+  }
+}
+
+// Module: Staged Generic Attachment
+
+.module-staged-generic-attachment {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  height: 120px;
+  width: 120px;
+  position: relative;
+  border-radius: 4px;
+  padding: 7px;
+  vertical-align: middle;
+  white-space: nowrap;
+
+  @include mixins.light-theme {
+    box-shadow: inset 0px 0px 0px 1px variables.$color-black-alpha-20;
+    background-color: variables.$color-gray-05;
+  }
+  @include mixins.dark-theme {
+    box-shadow: inset 0px 0px 0px 1px variables.$color-gray-45;
+    background-color: variables.$color-gray-75;
+    color: variables.$color-gray-02;
+  }
+}
+
+.module-staged-generic-attachment__close-button {
+  position: absolute;
+  inset-inline-end: 5px;
+  top: 0;
+
+  @include mixins.staged-attachment-close-button;
+
+  &::before {
+    content: '';
+    display: block;
+    width: 16px;
+    height: 16px;
+    @include mixins.light-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/x/x-compact.svg',
+        variables.$color-black
+      );
+    }
+    @include mixins.dark-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/x/x-compact.svg',
+        variables.$color-gray-45
+      );
+    }
+  }
+
+  &:focus {
+    outline: none;
+    @include mixins.keyboard-mode {
+      @include mixins.axo-focus-ring;
+    }
+  }
+}
+
+.module-staged-generic-attachment__filename {
+  @include mixins.font-caption;
+
+  max-width: 100%;
+  text-align: center;
+
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-overflow: ellipsis;
+}
+
+// Module: Staged Placeholder Attachment
+
+.module-staged-placeholder-attachment {
+  @include mixins.button-reset;
+
+  & {
+    margin: 1px;
+    border-radius: 4px;
+
+    height: 120px;
+    width: 120px;
+    display: inline-block;
+    vertical-align: middle;
+    position: relative;
+
+    @include mixins.light-theme {
+      border: 1px solid variables.$color-gray-25;
+      &:hover {
+        background: variables.$color-gray-05;
+      }
+    }
+  }
+
+  @include mixins.dark-theme {
+    border: 1px solid variables.$color-gray-60;
+
+    &:hover {
+      background: variables.$color-gray-75;
+    }
+  }
+
+  &:focus {
+    outline: none;
+    @include mixins.keyboard-mode {
+      @include mixins.axo-focus-ring;
+    }
+  }
+}
+
+.module-staged-placeholder-attachment__plus-icon {
+  @include mixins.position-absolute-center;
+  height: 28px;
+  width: 28px;
+
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/plus/plus-light.svg',
+      variables.$color-gray-45
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/plus/plus-light.svg',
+      variables.$color-gray-60
+    );
+  }
+}
+
+.module-payment-notification {
+  &__container {
+    display: block;
+  }
+
+  &__label {
+    margin-block: 0 7px;
+    margin-inline: 0;
+    @include mixins.font-subtitle;
+
+    @include mixins.light-theme() {
+      color: variables.$color-gray-60;
+    }
+    @include mixins.dark-theme() {
+      color: variables.$color-gray-25;
+    }
+  }
+
+  &__check_device_box {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    @include mixins.font-body-2;
+    padding-block: 22px;
+    padding-inline: 7px;
+    padding-inline-start: 12px;
+    border-radius: 18px;
+    margin-block: 0;
+    margin-inline: -4px;
+
+    @include mixins.light-theme() {
+      background: variables.$color-white-alpha-60;
+      color: variables.$color-gray-90;
+    }
+    @include mixins.dark-theme() {
+      background: variables.$color-white-alpha-20;
+      color: variables.$color-white;
+    }
+
+    &::before {
+      content: '';
+      display: block;
+      flex-shrink: 0;
+      width: 16px;
+      height: 16px;
+      @include mixins.color-svg(
+        '../images/icons/v3/info/info.svg',
+        currentcolor
+      );
+    }
+  }
+
+  &__note {
+    margin-block: 9px 0;
+    margin-inline: 0;
+    @include mixins.font-body-1;
+  }
+
+  &--outgoing &__label {
+    @include mixins.light-theme() {
+      color: variables.$color-white-alpha-80;
+    }
+    @include mixins.dark-theme() {
+      color: variables.$color-white-alpha-80;
+    }
+  }
+
+  &--outgoing &__check_device_box {
+    background: variables.$color-white-alpha-20;
+    color: variables.$color-white;
+  }
+}
+
+// Module: Spinner
+
+.module-spinner__container {
+  margin-inline: auto;
+  position: relative;
+  height: 56px;
+  width: 56px;
+}
+
+.module-spinner__circle {
+  position: absolute;
+  top: 0;
+  inset-inline-start: 0;
+
+  z-index: variables.$z-index-above-base;
+  height: 100%;
+  width: 100%;
+
+  @include mixins.color-svg(
+    '../images/spinner-track-56.svg',
+    variables.$color-white-alpha-40
+  );
+}
+.module-spinner__arc {
+  position: absolute;
+  top: 0;
+  inset-inline-start: 0;
+
+  z-index: variables.$z-index-above-above-base;
+  height: 100%;
+  width: 100%;
+
+  animation: rotate 1000ms linear infinite;
+
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/spinner-56.svg',
+      variables.$color-gray-60
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/spinner-56.svg',
+      variables.$color-gray-05
+    );
+  }
+}
+
+// In these --small and --mini sizes, we're exploding our @color-svg mixin so we don't
+//   have to duplicate our background colors for the dark/ios/size matrix.
+
+.module-spinner__container--small {
+  height: 24px;
+  width: 24px;
+}
+
+.module-spinner__circle--small {
+  -webkit-mask: url('../images/spinner-track-24.svg') no-repeat center;
+  -webkit-mask-size: 100%;
+
+  // For specificity
+  @include mixins.dark-theme {
+    -webkit-mask: url('../images/spinner-track-24.svg') no-repeat center;
+    -webkit-mask-size: 100%;
+  }
+}
+.module-spinner__arc--small {
+  -webkit-mask: url('../images/spinner-24.svg') no-repeat center;
+  -webkit-mask-size: 100%;
+
+  // For specificity
+  @include mixins.dark-theme {
+    -webkit-mask: url('../images/spinner-24.svg') no-repeat center;
+    -webkit-mask-size: 100%;
+  }
+}
+
+.module-spinner__circle--incoming {
+  background-color: variables.$color-white-alpha-40;
+}
+.module-spinner__arc--incoming {
+  @include mixins.light-theme {
+    background-color: variables.$color-gray-60;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-02;
+  }
+}
+
+.module-spinner__circle--outgoing {
+  @include mixins.light-theme {
+    background-color: variables.$color-white-alpha-40;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-white-alpha-40;
+  }
+}
+.module-spinner__arc--outgoing {
+  @include mixins.light-theme {
+    background-color: variables.$color-white;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-05;
+  }
+}
+
+.module-spinner__circle--on-avatar {
+  background-color: variables.$color-white-alpha-40;
+}
+.module-spinner__circle--on-background {
+  @include mixins.light-theme {
+    background-color: variables.$color-gray-05;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-75;
+  }
+}
+.module-spinner__arc--on-background {
+  @include mixins.light-theme {
+    background-color: variables.$color-gray-60;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-25;
+  }
+}
+
+.module-spinner__circle--on-primary-button {
+  background-color: variables.$color-white-alpha-40;
+}
+
+.module-spinner__circle--on-progress-dialog {
+  @include mixins.light-theme {
+    background-color: variables.$color-white;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-80;
+  }
+}
+.module-spinner__arc--on-progress-dialog {
+  background-color: variables.$color-ultramarine;
+}
+.module-spinner__arc--on-avatar {
+  background-color: variables.$color-white;
+}
+.module-spinner__arc--on-primary-button {
+  background-color: variables.$color-white;
+}
+
+// Module: Reaction Viewer
+
+.module-reaction-viewer {
+  width: 320px;
+  height: 320px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+
+  @include mixins.popper-shadow();
+
+  & {
+    @include mixins.light-theme() {
+      background: variables.$color-white;
+    }
+    @include mixins.dark-theme {
+      background: variables.$color-gray-75;
+    }
+  }
+
+  &__header {
+    width: 100%;
+    min-height: 44px;
+    padding-block: 0px;
+    padding-inline: 8px;
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: center;
+    overflow-x: auto;
+
+    &__button {
+      min-height: 28px;
+      border: none;
+      border-radius: 18px;
+      padding-block: 0px;
+      padding-inline: 8px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      flex-basis: 45px;
+      flex-shrink: 0;
+
+      &:not(:first-of-type) {
+        margin-inline-start: 4px;
+      }
+
+      &:focus {
+        outline: none;
+      }
+      @include mixins.keyboard-mode {
+        &:focus {
+          box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+        }
+      }
+
+      background: none;
+
+      &--selected {
+        @include mixins.light-theme() {
+          background: variables.$color-gray-05;
+        }
+
+        @include mixins.dark-theme() {
+          background: variables.$color-gray-60;
+        }
+      }
+
+      &__count,
+      &__all {
+        @include mixins.font-body-2-bold();
+
+        white-space: nowrap;
+
+        @include mixins.light-theme() {
+          color: variables.$color-gray-90;
+        }
+
+        @include mixins.dark-theme() {
+          color: variables.$color-gray-05;
+        }
+      }
+
+      &__count {
+        margin-inline-start: 4px;
+      }
+    }
+  }
+
+  &__body {
+    flex-grow: 1;
+    padding-block: 0;
+    padding-inline: 16px;
+    overflow: auto;
+
+    &__row {
+      margin-top: 12px;
+      min-height: 32px;
+      display: flex;
+      flex-direction: row;
+      justify-content: flex-start;
+      align-items: center;
+
+      &:last-of-type {
+        margin-bottom: 12px;
+      }
+
+      &__avatar {
+        min-width: 32px;
+        flex-shrink: 1;
+      }
+
+      &__name {
+        @include mixins.font-body-1-bold();
+        flex-grow: 1;
+        margin-inline-start: 8px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+
+        @include mixins.light-theme() {
+          color: variables.$color-gray-90;
+        }
+
+        @include mixins.dark-theme() {
+          color: variables.$color-gray-05;
+        }
+      }
+
+      &__emoji {
+        width: 18px;
+        flex-shrink: 1;
+      }
+    }
+  }
+}
+
+// Module: Calling
+.module-calling {
+  // creates a new independent stacking context that includes modals
+  //
+  // container has no width/height, direct children need to:
+  // - size themselves explicitly (no percentage width/height or top/bottom or left/right)
+  // - size themselves in relation to viewport (position: fixed)
+  &__modal-container {
+    position: fixed;
+    top: 0;
+    inset-inline-start: 0;
+    z-index: variables.$z-index-calling-container;
+  }
+
+  &__container {
+    align-items: center;
+    background-color: variables.$calling-background-color;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    justify-content: center;
+    position: fixed;
+    /* stylelint-disable-next-line liberty/use-logical-spec */
+    left: 0;
+    top: 0;
+    width: 100%;
+    z-index: variables.$z-index-calling;
+  }
+
+  &__background {
+    position: absolute;
+    inset-inline-start: 0;
+    inset-inline-end: 0;
+    top: 0;
+    bottom: 0;
+
+    display: flex;
+    align-items: center;
+    flex-direction: column;
+    justify-content: center;
+    overflow: hidden;
+
+    &--darken {
+      position: absolute;
+      height: 100%;
+      width: 100%;
+      background-color: rgba(variables.$color-gray-60, 0.6);
+    }
+
+    &--blur {
+      background-repeat: no-repeat;
+      background-size: cover;
+      background-position: center;
+      filter: blur(25px);
+      height: 100%;
+      position: absolute;
+      width: 100%;
+      // Improve appearance of blurred edges by reducing edge gradient effect
+      transform: scale(1.2, 1.2);
+    }
+  }
+
+  &__camera-is-off {
+    @include mixins.font-body-2;
+    @include mixins.calling-text-shadow;
+    align-items: center;
+    color: variables.$color-white;
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+    margin-block-start: 15px;
+    margin-block-end: 15px;
+    justify-content: center;
+    text-align: center;
+    transition: opacity 100ms ease-out;
+    z-index: variables.$z-index-base;
+
+    &::before {
+      content: '';
+      display: block;
+      background-color: variables.$color-white;
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      -webkit-mask-size: 100%;
+      -webkit-mask-image: url('../images/icons/v3/video/video-slash-light.svg');
+      height: 24px;
+      width: 24px;
+      margin-block-end: 12px;
+    }
+  }
+
+  &__camera-is-off-spacer {
+    flex-basis: 120px;
+  }
+}
+
+.module-calling__spacer {
+  display: flex;
+  flex-grow: 0;
+  flex-shrink: 1;
+}
+
+@keyframes module-ongoing-call__controls--fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes module-ongoing-call__controls--fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@mixin module-ongoing-call__controls--fade-in {
+  animation: {
+    name: module-ongoing-call__controls--fade-in;
+    duration: 1200ms;
+    timing-function: variables.$ease-out-expo;
+    fill-mode: forwards;
+  }
+}
+
+@mixin module-ongoing-call__controls--fade-out {
+  animation: {
+    name: module-ongoing-call__controls--fade-out;
+    duration: 1200ms;
+    timing-function: variables.$ease-out-expo;
+    fill-mode: forwards;
+  }
+  pointer-events: none;
+}
+
+.module-ongoing-call__container--hide-controls {
+  .module-ongoing-call__prev-page,
+  .module-ongoing-call__next-page {
+    @include module-ongoing-call__controls--fade-out;
+  }
+}
+.module-ongoing-call {
+  &__remote-video-enabled {
+    max-width: 100%;
+    max-height: 100%;
+    position: relative;
+    &--reconnecting {
+      filter: blur(15px);
+    }
+  }
+
+  &__remote-video-disabled {
+    background-color: variables.$color-gray-95;
+    height: 100vh;
+    width: 100%;
+    display: flex;
+    position: relative;
+    align-items: center;
+    justify-content: center;
+  }
+
+  &__container {
+    &--direct:not(&--call-not-started) {
+      .module-ongoing-call__footer {
+        position: absolute;
+      }
+    }
+  }
+
+  &__next-page,
+  &__prev-page {
+    @include mixins.button-reset;
+    & {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      height: 32px;
+      width: 32px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      border-radius: 50%;
+      background-color: variables.$color-gray-78;
+      z-index: variables.$z-index-above-above-base;
+    }
+
+    &--arrow {
+      width: 20px;
+      height: 20px;
+    }
+  }
+
+  &__next-page {
+    inset-inline-end: 4px;
+    &--arrow {
+      @include mixins.color-svg(
+        '../images/icons/v3/chevron/chevron-right.svg',
+        variables.$color-white
+      );
+    }
+  }
+
+  &__prev-page {
+    inset-inline-start: 4px;
+    &--arrow {
+      @include mixins.color-svg(
+        '../images/icons/v3/chevron/chevron-left.svg',
+        variables.$color-white
+      );
+    }
+  }
+
+  &__direct-call-ringing-spacer {
+    flex: 1;
+    z-index: -1;
+  }
+
+  &__direct-call-speaking-indicator {
+    position: absolute;
+    inset-inline-end: 16px;
+    bottom: 112px;
+    transition: bottom 0.3s variables.$ease-out-local-preview;
+  }
+  &__direct-call-speaking-indicator--self-view-expanded {
+    bottom: 330px;
+  }
+  &__direct-call-speaking-indicator--expanded-no-controls {
+    bottom: 232px;
+  }
+
+  &__participants {
+    display: flex;
+    flex: 1 1 0;
+    width: 100%;
+    margin-block-start: 24px;
+    z-index: variables.$z-index-above-base;
+    -webkit-app-region: no-drag;
+
+    &__grid--wrapper {
+      margin-block-start: 26px;
+      margin-block-end: 16px;
+      margin-inline: 16px;
+      display: flex;
+      width: 100%;
+    }
+
+    &__grid {
+      flex-grow: 1;
+      position: relative;
+
+      .module-ongoing-call__group-call-remote-participant--hand-raised
+        .module-ongoing-call__group-call-remote-participant__info__contact-name {
+        display: block;
+        visibility: visible;
+      }
+
+      .module-ongoing-call__group-call-remote-participant {
+        // Only apply container-type: size to grid column to prevent size collapse
+        // for implicitly sized participants (PiP)
+        container-type: size;
+        position: relative;
+
+        @container (min-width: 180px) or (min-height: 180px) {
+          .module-ongoing-call__group-call-remote-participant__footer {
+            padding-block: 0 14px;
+            padding-inline: 16px;
+          }
+
+          .module-ongoing-call__group-call-remote-participant__error {
+            display: block;
+          }
+        }
+
+        &--hand-raised {
+          .module-ongoing-call__group-call-remote-participant__footer {
+            padding-block: 0 8px;
+            padding-inline: 8px;
+          }
+        }
+      }
+    }
+
+    &__overflow {
+      flex: 0 0 auto;
+      position: relative;
+      margin-block-start: calc(60px + var(--title-bar-drag-area-height));
+      margin-inline-end: 16px;
+
+      &__inner {
+        position: absolute;
+        bottom: 0;
+        inset-inline-start: 0;
+        width: 100%;
+        max-height: 100%;
+        overflow-y: scroll;
+        scrollbar-width: none;
+      }
+
+      & .module-ongoing-call__group-call-remote-participant {
+        width: 100%;
+        margin-bottom: 1rem;
+
+        &__footer {
+          height: 40px;
+          padding-block: 0 8px;
+          padding-inline: 10px;
+        }
+
+        &--hand-raised {
+          .module-ongoing-call__group-call-remote-participant__footer {
+            padding-block: 0 6px;
+            padding-inline: 6px;
+          }
+        }
+      }
+
+      &__scroll-marker {
+        $scroll-marker-selector: &;
+
+        @include mixins.smooth-scroll;
+
+        & {
+          display: flex;
+          justify-content: center;
+          inset-inline-start: 0;
+          opacity: 1;
+          position: absolute;
+          transition: opacity 200ms ease-out;
+          width: 100%;
+          z-index: variables.$z-index-above-above-base;
+        }
+
+        &--hidden {
+          opacity: 0;
+        }
+
+        &__button {
+          &::before {
+            @include mixins.color-svg(
+              '../images/icons/v3/chevron/chevron-down.svg',
+              variables.$color-gray-15
+            );
+
+            & {
+              content: '';
+              display: block;
+              height: 100%;
+              width: 100%;
+            }
+          }
+
+          & {
+            background: variables.$color-gray-78;
+            border-radius: 100%;
+            border: 0;
+            height: 24px;
+            padding-inline: 4px;
+            margin-inline: 0;
+            opacity: 0;
+            outline: none;
+            transition: opacity 200ms ease-out;
+            width: 24px;
+          }
+        }
+
+        &--top {
+          top: 0;
+          background: linear-gradient(
+            variables.$calling-background-color,
+            transparent 20px,
+            transparent
+          );
+
+          #{$scroll-marker-selector}__button {
+            margin-block-start: 16px;
+            transform: rotate(180deg);
+          }
+        }
+
+        &--bottom {
+          bottom: 0;
+          background: linear-gradient(
+            to top,
+            variables.$calling-background-color,
+            transparent 20px,
+            transparent
+          );
+
+          #{$scroll-marker-selector}__button {
+            margin-block-end: 16px;
+          }
+        }
+      }
+
+      &:hover &__scroll-marker__button {
+        opacity: 1;
+      }
+    }
+  }
+
+  &__group-call--pagination-tile {
+    @include mixins.button-reset;
+    & {
+      position: absolute;
+      border-radius: 10px;
+      background-color: variables.$color-gray-78;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      @include mixins.font-body-1;
+      color: variables.$color-gray-20;
+    }
+    &--next-arrow {
+      @include mixins.color-svg(
+        '../images/icons/v3/chevron/chevron-right.svg',
+        variables.$color-gray-20
+      );
+      & {
+        height: 16px;
+        width: 16px;
+      }
+    }
+    &--prev-arrow {
+      @include mixins.color-svg(
+        '../images/icons/v3/chevron/chevron-left.svg',
+        variables.$color-gray-20
+      );
+      & {
+        height: 16px;
+        width: 16px;
+      }
+    }
+  }
+
+  &__group-call-remote-participant {
+    display: flex;
+    justify-content: center;
+    position: relative;
+
+    line-height: 0;
+    overflow: hidden;
+    border-radius: 10px;
+
+    // Should match GroupCallRemoteParticipant CONTAINER_TRANSITION_TIME
+    transition:
+      top 200ms linear,
+      inset-inline-start 200ms linear,
+      transform 200ms linear,
+      width 200ms linear,
+      height 200ms linear;
+
+    @media (prefers-reduced-motion) {
+      transition: none;
+    }
+
+    &:after {
+      content: '';
+      position: absolute;
+      z-index: variables.$z-index-above-above-base;
+      width: 100%;
+      height: 100%;
+      border: 0 solid transparent;
+      border-radius: 10px;
+      transition-property: border-width, border-color;
+      // Turn on the transition when the user stops speaking to fade out.
+      transition-duration: 300ms;
+      transition-delay: 1000ms;
+      transition-timing-function: ease-in-out;
+      pointer-events: none;
+    }
+    &--speaking:after {
+      border-width: 3px;
+      border-color: variables.$color-white;
+      // Turn off the transition when the user starts speaking to appear instantly
+      transition-duration: 0ms;
+      transition-delay: 0ms;
+    }
+
+    &__remote-video {
+      // The background-color is seen while the video loads.
+      background-color: variables.$color-gray-75;
+      &--reconnecting {
+        filter: blur(15px);
+      }
+    }
+
+    &-background.module-calling__background--no-avatar {
+      background-color: variables.$color-gray-78;
+    }
+
+    &-background .module-calling__background--blur {
+      pointer-events: none;
+    }
+
+    &__error {
+      // Hide it here in the general case, and reveal it in the grid layout
+      // when @container size is big enough
+      display: none;
+
+      margin-block-end: 16px;
+      margin-inline: 8px;
+      font-size: 12px;
+      line-height: 16px;
+      color: variables.$color-white;
+      text-align: center;
+      z-index: variables.$z-index-base;
+    }
+
+    &__more-info {
+      @include mixins.button-reset;
+      & {
+        padding-block: 3px;
+        padding-inline: 10px;
+        border-radius: 16px;
+        background-color: variables.$color-black-alpha-30;
+        color: variables.$color-white;
+        font-size: 12px;
+        line-height: 16px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        z-index: variables.$z-index-above-base;
+      }
+
+      &-modal-title {
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        display: -webkit-box;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      // Shown in the mini version / overflow sidebar
+      &--icon {
+        width: 20px;
+        height: 20px;
+      }
+
+      &--icon-blocked {
+        @include mixins.color-svg(
+          '../images/icons/v3/block/block.svg',
+          variables.$color-white
+        );
+      }
+
+      &--icon-missing-media-keys {
+        @include mixins.color-svg(
+          '../images/icons/v3/error/error-circle.svg',
+          variables.$color-white
+        );
+      }
+    }
+
+    &__error-icon {
+      width: 20px;
+      height: 20px;
+      margin-block-end: 12px;
+
+      &--blocked {
+        @include mixins.color-svg(
+          '../images/icons/v3/block/block.svg',
+          variables.$color-white
+        );
+      }
+
+      &--missing-media-keys {
+        @include mixins.color-svg(
+          '../images/icons/v3/error/error-circle.svg',
+          variables.$color-white
+        );
+      }
+    }
+
+    &__footer {
+      display: flex;
+      position: absolute;
+      bottom: 0;
+      height: 60px;
+      padding-block: 0 10px;
+      padding-inline: 12px;
+      width: 100%;
+      z-index: variables.$z-index-above-base;
+    }
+
+    &__info {
+      display: flex;
+      align-items: center;
+      align-self: flex-end;
+      justify-content: space-between;
+      max-width: 100%;
+
+      &__contact-name {
+        @include mixins.font-body-2-medium;
+        flex-grow: 1;
+        color: variables.$color-white;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        visibility: hidden;
+        direction: inherit;
+        white-space: nowrap;
+      }
+
+      &--clickable {
+        @include mixins.button-reset;
+      }
+    }
+
+    &__dropdown button {
+      // Matches CallingAudioIndicator
+      background: rgba(variables.$color-gray-80, 0.7);
+    }
+
+    &--hand-raised &__footer {
+      background: transparent;
+    }
+
+    &--hand-raised &__info {
+      background: variables.$color-white;
+      border-radius: 40px;
+
+      &__contact-name {
+        display: none;
+        color: variables.$color-black;
+        margin-inline-end: 12px;
+      }
+
+      &:has(.CallingStatusIndicator--NextHandRaised) {
+        background: variables.$color-next-raised-hand;
+      }
+    }
+
+    &--is-on-top {
+      z-index: variables.$z-index-above-above-base;
+    }
+
+    &:hover {
+      .module-ongoing-call__group-call-remote-participant__info__contact-name {
+        display: block;
+        visibility: visible;
+      }
+    }
+
+    &:hover:not(
+        .module-ongoing-call__group-call-remote-participant--hand-raised
+      ) {
+      .module-ongoing-call__group-call-remote-participant__footer {
+        background: linear-gradient(
+          180deg,
+          transparent,
+          variables.$color-black-alpha-60 100%
+        );
+      }
+    }
+  }
+
+  &__local-preview-container {
+    display: contents;
+  }
+
+  &__local-preview-fullsize {
+    position: absolute;
+    top: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    z-index: variables.$z-index-negative;
+
+    video {
+      @include mixins.lonely-local-video-preview;
+    }
+
+    &--presenting {
+      video {
+        transform: none;
+      }
+    }
+  }
+
+  &__local-preview {
+    z-index: variables.$z-index-calling-pip;
+    border-radius: 12px;
+    position: absolute;
+
+    display: flex;
+
+    // 960x720 = 1.333 aspect ratio
+    height: 80px;
+    width: variables.$calling-local-preview-normal-width;
+
+    inset-inline-end: 16px;
+    bottom: 16px;
+
+    transition: all 0.3s variables.$ease-out-local-preview;
+
+    overflow: hidden;
+    cursor: pointer;
+
+    &--active {
+      box-shadow: 0px 4px 14px 0px variables.$color-black-alpha-40;
+    }
+
+    &--expanded {
+      bottom: 112px;
+
+      // 960x720 = 1.333 aspect ratio
+      width: 312px;
+      height: 234px;
+    }
+
+    &--controls-hidden {
+      bottom: 16px;
+    }
+
+    &__background {
+      background-color: variables.$color-gray-78;
+    }
+
+    &__video {
+      height: 100%;
+      width: 100%;
+
+      video {
+        // The background-color is seen while the video loads.
+        background-color: variables.$color-gray-75;
+        height: 100%;
+        width: 100%;
+
+        transform: rotateY(180deg);
+      }
+
+      &--presenting video {
+        transform: inherit;
+      }
+    }
+  }
+
+  &__footer {
+    bottom: 0;
+    display: flex;
+    flex-direction: row-reverse;
+    justify-content: space-between;
+    width: 100%;
+    z-index: variables.$z-index-above-base;
+
+    &__actions {
+      align-items: center;
+      display: flex;
+      flex-grow: 1;
+      justify-content: center;
+    }
+  }
+
+  &__controls {
+    z-index: variables.$z-index-above-above-base;
+  }
+
+  &__controls--fadeIn {
+    @include module-ongoing-call__controls--fade-in;
+  }
+
+  &__controls--fadeOut {
+    @include module-ongoing-call__controls--fade-out;
+  }
+}
+
+.module-calling-pip {
+  backface-visibility: hidden;
+  background-color: variables.$color-gray-95;
+  border-radius: 18px;
+  box-shadow:
+    0px 0px 8px rgba(0, 0, 0, 0.05),
+    0px 8px 20px rgba(0, 0, 0, 0.3);
+  cursor: grab;
+  // This size is just a starting place; the component will figure out what it should
+  // be. When resizing for incoming portrait video, the width will be kept constant. The
+  // width only changes with window size.
+  // These both should be kept in sync with the _normal_ height/width in CallingPip.tsx
+  height: 286px;
+  width: 160px;
+
+  position: fixed;
+  z-index: variables.$z-index-calling-pip;
+  overflow: hidden;
+
+  & .module-ongoing-call__group-call-remote-participant {
+    border-radius: 0;
+  }
+
+  &__video {
+    &--remote {
+      align-items: center;
+      background-color: variables.$color-gray-95;
+      border-radius: 18px;
+      height: 100%;
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+
+      // The avatar image can be dragged on Windows.
+      .module-Avatar img {
+        -webkit-user-drag: none;
+      }
+
+      .module-calling__background--no-avatar {
+        background: transparent;
+      }
+    }
+
+    &--local,
+    &--local-presenting {
+      position: absolute;
+      top: 8px;
+      inset-inline-start: 8px;
+      // These are the normal widths; the size will change based on whether the window
+      // is large, like the overall pip.
+      height: 60px;
+      width: 80px;
+
+      border-radius: 12px;
+      overflow: hidden;
+      background-color: variables.$color-gray-80;
+
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+    }
+
+    &--local video {
+      transform: rotateY(180deg);
+    }
+  }
+
+  &__full-size-local-preview {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    position: relative;
+
+    video {
+      width: 100%;
+      height: 100%;
+      transform: rotateY(180deg);
+      object-fit: contain;
+    }
+
+    &--presenting video {
+      transform: none;
+    }
+  }
+
+  &__pills {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+
+    position: absolute;
+    bottom: 66px;
+    inset-inline-start: 8px;
+    transition: bottom 0.5s variables.$ease-out-local-preview;
+
+    &--no-controls {
+      bottom: 8px;
+    }
+  }
+
+  &__pill {
+    height: 28px;
+    border-radius: 14px;
+    padding: 6px;
+    padding-inline-start: 12px;
+    padding-inline-end: 12px;
+    background-color: variables.$color-gray-80;
+    color: variables.$color-gray-05;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+
+    @include mixins.font-body-small;
+  }
+
+  &__pill-icon {
+    height: 16px;
+    width: 16px;
+    margin-inline-end: 4px;
+
+    &__raised-hands {
+      @include mixins.color-svg(
+        '../images/icons/v3/raise_hand/raise_hand.svg',
+        variables.$color-gray-05
+      );
+    }
+    &__group-join {
+      @include mixins.color-svg(
+        '../images/icons/v3/person/person-plus-compact.svg',
+        variables.$color-gray-05
+      );
+    }
+  }
+
+  &__actions {
+    position: absolute;
+    // It starts offscreen then animates in/out as it fades in/outs
+    bottom: -60px;
+    inset-inline-start: 4px;
+    inset-inline-end: 4px;
+    padding: 12px;
+    height: 56px;
+    opacity: 0;
+    transition: all 0.5s variables.$ease-out-local-preview;
+
+    display: flex;
+    align-items: center;
+    flex-direction: row;
+
+    border-radius: 18px;
+    justify-content: space-around;
+    background-color: variables.$color-gray-78;
+
+    &--visible {
+      opacity: 1;
+      bottom: 4px;
+    }
+
+    &__spacer {
+      flex-grow: 1;
+      flex-shrink: 1;
+    }
+    &__button {
+      flex-shrink: 0;
+      flex-grow: 0;
+    }
+    &__middle-button {
+      // icon width, and 15px of border on each side
+      width: 62px;
+      text-align: center;
+      flex-shrink: 0;
+      flex-grow: 0;
+    }
+
+    .CallingButton__icon {
+      height: 32px;
+      width: 32px;
+    }
+  }
+
+  &__un-pip-container {
+    position: absolute;
+    top: 16px;
+    inset-inline-end: 16px;
+
+    opacity: 0;
+    transition: opacity 0.5s variables.$ease-out-local-preview;
+
+    &--visible {
+      opacity: 1;
+    }
+  }
+
+  &__button {
+    &--hangup {
+      @include mixins.color-svg(
+        '../images/icons/v3/phone/phone-down-light.svg',
+        variables.$color-gray-75
+      );
+      & {
+        height: 28px;
+        width: 28px;
+        border: none;
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/phone/phone-down-light.svg',
+          variables.$color-gray-15
+        );
+      }
+    }
+
+    &--pip {
+      @include mixins.color-svg(
+        '../images/icons/v3/pip/pip-maximize-light.svg',
+        variables.$color-gray-75
+      );
+      & {
+        height: 24px;
+        width: 24px;
+        border: none;
+      }
+      @include mixins.dark-theme {
+        @include mixins.color-svg(
+          '../images/icons/v3/pip/pip-maximize-light.svg',
+          variables.$color-gray-15
+        );
+      }
+    }
+  }
+}
+
+.module-calling-participants-list {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  height: 440px;
+  max-height: calc(100vh - variables.$CallControls__height - 22px);
+  padding-block: 5px 0;
+  padding-inline: 5px;
+  margin-block-end: 85px;
+  margin-block-start: 20px;
+  margin-inline: auto;
+  background-color: variables.$color-gray-80;
+  border-radius: 10px;
+  color: variables.$color-white;
+  filter: drop-shadow(0px 4px 3px variables.$color-black-alpha-20);
+  outline: 1px solid variables.$color-gray-62;
+  overflow: hidden;
+
+  &__overlay {
+    position: absolute;
+    top: 0;
+    display: flex;
+    flex-direction: row;
+    width: 100vw;
+    height: 100vh;
+    padding-inline-start: 15px;
+    align-items: flex-end;
+    inset-inline-start: 0;
+    z-index: variables.$z-index-calling;
+
+    &::after {
+      content: '';
+      display: flex;
+      flex-shrink: 1;
+      flex-basis: 480px;
+    }
+  }
+
+  &__title {
+    @include mixins.font-body-2-bold;
+  }
+
+  &__contact-icon {
+    margin-inline-start: 0.3em;
+    background-color: variables.$color-gray-25;
+  }
+
+  &__list {
+    height: 100%;
+    overflow: auto;
+    margin: 0;
+    padding-block: 0;
+    padding-inline: 0;
+  }
+
+  &__contact {
+    @include mixins.font-body-1;
+    @include mixins.button-reset;
+    & {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      margin-block: 2px;
+      padding-block: 8px;
+      padding-inline-start: 10px;
+      padding-inline-end: 2px;
+      list-style-type: none;
+      border-radius: 6px;
+      cursor: auto;
+    }
+    &.module-calling-participants-list__clickable {
+      cursor: pointer;
+    }
+    &:not(.module-calling-participants-list__me):hover {
+      background-color: variables.$color-gray-62;
+    }
+  }
+
+  &__avatar-and-name {
+    display: flex;
+    flex-grow: 1;
+    min-width: 0;
+    align-items: center;
+  }
+
+  &__name {
+    font-size: 13px;
+    margin-inline-start: 8px;
+  }
+
+  &__header {
+    display: flex;
+    justify-content: space-between;
+    margin-block-end: 2px;
+    padding-block: 8px;
+    padding-inline: 10px 5px;
+  }
+
+  &__close {
+    @include mixins.button-reset;
+
+    & {
+      @include mixins.color-svg(
+        '../images/icons/v3/x/x.svg',
+        variables.$color-gray-15
+      );
+    }
+
+    & {
+      height: 18px;
+      width: 18px;
+      margin-inline-end: 4px;
+      z-index: variables.$z-index-above-base;
+    }
+
+    @include mixins.keyboard-mode {
+      &:focus {
+        background: variables.$color-ultramarine;
+      }
+    }
+  }
+
+  &__status-icon {
+    display: flex;
+    flex: none;
+    margin-inline: 8px;
+    height: 16px;
+    width: 16px;
+  }
+
+  &__hand-raised {
+    @include mixins.color-svg(
+      '../images/icons/v3/raise_hand/raise_hand-light.svg',
+      variables.$color-white
+    );
+  }
+
+  &__muted {
+    &--video {
+      @include mixins.color-svg(
+        '../images/icons/v3/video/video-slash-compact-light.svg',
+        variables.$color-white
+      );
+    }
+
+    &--audio {
+      @include mixins.color-svg(
+        '../images/icons/v3/mic/mic-slash-compact-light.svg',
+        variables.$color-white
+      );
+    }
+  }
+
+  &__presenting {
+    @include mixins.color-svg(
+      '../images/icons/v3/share_screen/share_screen-fill-light.svg',
+      variables.$color-white
+    );
+  }
+
+  &__menu-icon {
+    display: none;
+    @include mixins.color-svg(
+      '../images/icons/v3/more/more.svg',
+      variables.$color-white
+    );
+  }
+}
+
+button.module-calling-participants-list__contact {
+  cursor: pointer;
+}
+
+.module-call-need-permission-screen {
+  align-items: center;
+  background-color: variables.$color-gray-95;
+  color: variables.$color-gray-05;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  justify-content: center;
+  position: fixed;
+  top: 0;
+  /* stylelint-disable-next-line liberty/use-logical-spec */
+  left: 0;
+  width: 100%;
+
+  &__text {
+    margin-block: 2em;
+    margin-inline: 1em;
+    max-width: 400px;
+    @include mixins.font-body-1;
+    text-align: center;
+  }
+
+  &__button {
+    padding-block: 0.5em;
+    padding-inline: 1em;
+    border: 0;
+    border-radius: 4px;
+    @include mixins.font-body-1-bold;
+    color: variables.$color-gray-05;
+    background: variables.$color-gray-65;
+  }
+}
+
+// Module: conversation list
+
+.module-conversation-list {
+  $normal-row-height: 72px;
+
+  scrollbar-gutter: stable;
+  padding-inline-start: 11px;
+  padding-inline-end: calc(11px - var(--axo-scrollbar-gutter-thin-vertical));
+
+  @include mixins.scrollbar-on-hover;
+
+  // list tiles in choose-group-members and compose extend to the edge
+  .module-left-pane--mode-choose-group-members &,
+  .module-left-pane--mode-compose & {
+    padding-inline: 0;
+  }
+
+  &--has-dialog-padding {
+    padding-block-start: 8px;
+  }
+
+  &__item {
+    &--archive-button {
+      @include mixins.button-reset;
+
+      & {
+        align-items: center;
+        display: flex;
+        justify-content: center;
+        border-radius: 10px;
+        height: $normal-row-height;
+        line-height: $normal-row-height;
+        text-align: center;
+        width: 100%;
+        padding-inline: 18px;
+        display: flex;
+
+        @include mixins.light-theme {
+          color: variables.$color-gray-60;
+
+          &:hover,
+          &:focus {
+            background-color: variables.$color-gray-05;
+          }
+        }
+        @include mixins.dark-theme {
+          color: variables.$color-gray-25;
+          &:hover,
+          &:focus {
+            background-color: variables.$color-gray-75;
+          }
+        }
+      }
+
+      &:focus {
+        outline: none;
+        @include mixins.keyboard-mode {
+          @include mixins.axo-focus-ring;
+        }
+      }
+
+      &__icon {
+        &::before {
+          display: block;
+          content: '';
+          width: 24px;
+          height: 24px;
+
+          @include mixins.light-theme {
+            @include mixins.color-svg(
+              '../images/icons/v3/archive/archive.svg',
+              variables.$color-gray-60
+            );
+          }
+          @include mixins.dark-theme {
+            @include mixins.color-svg(
+              '../images/icons/v3/archive/archive.svg',
+              variables.$color-gray-25
+            );
+          }
+        }
+      }
+
+      &__text {
+        @include mixins.font-body-1-bold;
+        margin-inline: 8px;
+      }
+
+      &__archived-count {
+        @include mixins.font-body-2-bold;
+
+        padding: 6px;
+        padding-top: 1px;
+        padding-bottom: 1px;
+        border-radius: 10px;
+        white-space: pre;
+
+        @include mixins.light-theme {
+          color: variables.$color-gray-60;
+          background-color: variables.$color-gray-05;
+        }
+        @include mixins.dark-theme {
+          color: variables.$color-gray-25;
+          background-color: variables.$color-gray-75;
+        }
+      }
+
+      .module-conversation-list--width-narrow & {
+        &__icon {
+          display: block;
+          width: 48px;
+          height: 48px;
+          padding: 12px;
+        }
+
+        &__text,
+        &__archived-count {
+          display: none;
+        }
+      }
+    }
+
+    &--contact-or-conversation {
+      $unread-indicator: '#{&}__unread-indicator';
+
+      @include mixins.button-reset;
+
+      & {
+        align-items: center;
+        border-radius: 10px;
+        cursor: inherit;
+        display: flex;
+        flex-direction: row;
+        height: $normal-row-height;
+        margin-block: 2px;
+        margin-inline: 0;
+        padding-block: 8px;
+        padding-inline: 14px;
+        width: 100%;
+
+        --conversation-item-bg: transparent;
+        background: var(--conversation-item-bg);
+      }
+
+      #{$unread-indicator} {
+        $size: 18px;
+        height: $size;
+        min-width: $size;
+        border-radius: 10px;
+
+        display: flex;
+        justify-content: center;
+        align-items: center;
+
+        background: var(--axo-color-fill-accent);
+
+        .module-conversation-list--width-narrow & {
+          display: none;
+        }
+
+        &--unread-messages,
+        &--marked-unread {
+          @include mixins.font-caption-bold;
+          text-align: center;
+          word-break: normal;
+          padding-inline: 4px;
+          line-height: 100%;
+          color: var(--axo-color-label-primary-oncolor);
+          font-weight: 500;
+        }
+        &--unread-mentions__icon {
+          @include mixins.color-svg(
+            '../images/icons/v3/at/at.svg',
+            var(--axo-color-label-primary-oncolor)
+          );
+          & {
+            width: 12px;
+            height: 12px;
+          }
+        }
+      }
+
+      &--is-button {
+        cursor: pointer;
+
+        &:disabled {
+          cursor: inherit;
+        }
+
+        &:focus {
+          outline: none;
+        }
+      }
+
+      &--is-checkbox {
+        cursor: pointer;
+
+        &--disabled {
+          cursor: not-allowed;
+        }
+      }
+
+      &:hover:not(:disabled, &--disabled, &--is-selected),
+      &[data-axo-contextmenu-state='open'] {
+        --conversation-item-bg: var(--axo-color-fill-primary);
+      }
+
+      @include mixins.keyboard-mode {
+        &:focus:not(:disabled, &--disabled) {
+          @include mixins.axo-focus-ring-inset;
+        }
+      }
+
+      &--is-selected {
+        --conversation-item-bg: var(--axo-color-fill-primary-pressed);
+      }
+
+      &__avatar-container {
+        position: relative;
+
+        #{$unread-indicator} {
+          $size: 18px;
+
+          @include mixins.rounded-corners;
+          height: $size;
+          margin: 0;
+          min-width: $size;
+          position: absolute;
+          top: -1px;
+          display: none;
+
+          .module-conversation-list--width-narrow & {
+            display: flex;
+          }
+
+          box-shadow:
+            0 0 0 3px var(--conversation-item-bg),
+            0 0 0 3px var(--axo-color-surface-secondary);
+
+          &--unread-messages,
+          &--marked-unread {
+            inset-inline-end: -5px;
+          }
+          &--unread-mentions {
+            inset-inline-start: -5px;
+          }
+        }
+      }
+
+      &__content {
+        flex-grow: 1;
+        margin-inline-start: 12px;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        overflow: hidden;
+
+        &--disabled {
+          opacity: 0.5;
+        }
+
+        &__header {
+          display: flex;
+          flex-direction: row;
+          align-items: center;
+
+          .module-conversation-list--width-narrow & {
+            display: none;
+          }
+
+          &__name {
+            align-items: center;
+            display: flex;
+            flex-grow: 1;
+            flex-shrink: 1;
+
+            @include mixins.font-body-1-bold;
+
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+
+            @include mixins.light-theme {
+              color: variables.$color-gray-90;
+            }
+            @include mixins.dark-theme {
+              color: variables.$color-gray-05;
+            }
+
+            &__contact-name {
+              overflow: hidden;
+              text-overflow: ellipsis;
+
+              .ContactModal__official-badge {
+                position: relative;
+                top: 1px;
+              }
+            }
+
+            &__mute-icon {
+              $size: 14px;
+
+              height: $size;
+              margin-inline-start: 8px;
+              min-width: $size;
+              width: $size;
+
+              @include mixins.light-theme {
+                @include mixins.color-svg(
+                  '../images/icons/v3/bell/bell-slash-bold.svg',
+                  variables.$color-gray-45
+                );
+              }
+
+              @include mixins.dark-theme {
+                @include mixins.color-svg(
+                  '../images/icons/v3/bell/bell-slash-bold.svg',
+                  variables.$color-gray-25
+                );
+              }
+            }
+          }
+
+          &__date {
+            @include mixins.font-caption;
+            display: inline-block;
+            flex-shrink: 0;
+            margin-inline-start: 6px;
+
+            @include mixins.light-theme {
+              color: variables.$color-gray-60;
+            }
+            @include mixins.dark-theme {
+              color: variables.$color-gray-25;
+            }
+          }
+        }
+
+        &__message {
+          display: flex;
+          flex-direction: row;
+          justify-content: flex-end;
+
+          .module-conversation-list--width-narrow & {
+            align-items: center;
+            justify-content: flex-start;
+          }
+
+          &__text {
+            .module-conversation-list__item--contact-or-conversation--is-checkbox
+              & {
+              /* restrict the growth so it doesn't encroach on the checkbox */
+              -webkit-line-clamp: 1;
+            }
+          }
+
+          &__text {
+            flex-grow: 1;
+            flex-shrink: 1;
+
+            @include mixins.font-body-2;
+
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+            display: -webkit-box;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-align: start;
+            white-space-collapse: preserve;
+
+            @include mixins.light-theme {
+              color: variables.$color-gray-60;
+            }
+            @include mixins.dark-theme {
+              color: variables.$color-gray-25;
+            }
+
+            .module-conversation-list--width-narrow & {
+              display: none;
+            }
+
+            &--always-full-size {
+              height: 36px; // two lines
+            }
+
+            &__blocked {
+              display: flex;
+              align-items: center;
+              &::before {
+                content: '';
+                display: inline-block;
+                width: 16px;
+                height: 16px;
+                margin-inline-end: 4px;
+                @include mixins.color-svg(
+                  '../images/icons/v3/block/block.svg',
+                  currentColor
+                );
+              }
+            }
+
+            &__message-request {
+              @include mixins.font-body-2-bold;
+
+              @include mixins.light-theme {
+                color: variables.$color-gray-60;
+              }
+              @include mixins.dark-theme {
+                color: variables.$color-gray-25;
+              }
+            }
+
+            &__draft-prefix,
+            &__deleted-for-everyone {
+              font-style: italic;
+              margin-inline-end: 3px;
+            }
+
+            &__status-icon {
+              flex-shrink: 0;
+
+              margin-top: 4px;
+              width: 12px;
+              height: 12px;
+              display: inline-block;
+              margin-inline-start: 6px;
+
+              .module-conversation-list--width-narrow & {
+                display: none;
+              }
+
+              @mixin normal-status-icon($icon) {
+                @include mixins.light-theme {
+                  @include mixins.color-svg($icon, variables.$color-gray-45);
+                }
+                @include mixins.dark-theme {
+                  @include mixins.color-svg($icon, variables.$color-gray-25);
+                }
+              }
+
+              &--sending {
+                @include mixins.only-when-page-is-visible {
+                  animation: rotate 4s linear infinite;
+                }
+                @include mixins.light-theme {
+                  @include mixins.color-svg(
+                    '../images/icons/v3/message_status/messagestatus-sending.svg',
+                    variables.$color-gray-60
+                  );
+                }
+                @include mixins.dark-theme {
+                  @include mixins.color-svg(
+                    '../images/icons/v3/message_status/messagestatus-sending.svg',
+                    variables.$color-gray-45
+                  );
+                }
+              }
+
+              &--sent {
+                @include normal-status-icon(
+                  '../images/icons/v3/message_status/messagestatus-sent.svg'
+                );
+              }
+
+              &--delivered {
+                @include normal-status-icon(
+                  '../images/icons/v3/message_status/messagestatus-delivered.svg'
+                );
+                & {
+                  width: 18px;
+                }
+              }
+
+              &--read,
+              &--viewed {
+                @include normal-status-icon(
+                  '../images/icons/v3/message_status/messagestatus-read.svg'
+                );
+                & {
+                  width: 18px;
+                }
+              }
+
+              &--error,
+              &--partial-sent {
+                @include mixins.light-theme {
+                  @include mixins.color-svg(
+                    '../images/icons/v3/error/error-circle.svg',
+                    variables.$color-accent-red
+                  );
+                }
+                @include mixins.dark-theme {
+                  @include mixins.color-svg(
+                    '../images/icons/v3/error/error-circle.svg',
+                    variables.$color-accent-red
+                  );
+                }
+              }
+
+              &--paused {
+                @include mixins.light-theme {
+                  @include mixins.color-svg(
+                    '../images/icons/v3/error/error-circle.svg',
+                    variables.$color-gray-60
+                  );
+                }
+                @include mixins.dark-theme {
+                  @include mixins.color-svg(
+                    '../images/icons/v3/error/error-circle.svg',
+                    variables.$color-gray-45
+                  );
+                }
+              }
+            }
+
+            &__message-search-result-contents {
+              display: -webkit-box;
+              white-space: initial;
+              -webkit-box-orient: vertical;
+              -webkit-line-clamp: 2;
+            }
+
+            &__start-new-conversation {
+              @include mixins.font-body-1-italic;
+            }
+          }
+        }
+
+        &__unread-indicators {
+          display: flex;
+          flex-direction: row;
+          gap: 4px;
+          flex-shrink: 0;
+          margin-inline-start: 10px;
+          margin-top: 1px;
+        }
+      }
+
+      &__checkbox {
+        -webkit-appearance: none;
+        background: variables.$color-white;
+        border-radius: 100%;
+        height: 20px;
+        margin-inline: 16px;
+        width: 20px;
+        min-width: 20px;
+        pointer-events: none;
+
+        @include mixins.light-theme {
+          border: 1px solid variables.$color-gray-15;
+        }
+        @include mixins.dark-theme {
+          border: 1px solid variables.$color-gray-80;
+        }
+
+        &:focus {
+          outline: none;
+        }
+
+        @include mixins.keyboard-mode {
+          &:focus {
+            border-width: 2px;
+            border-color: variables.$color-ultramarine;
+            &:checked {
+              box-shadow: inset 0 0 0px 1px variables.$color-white;
+            }
+          }
+        }
+        @include mixins.dark-keyboard-mode {
+          &:focus {
+            border-width: 2px;
+            border-color: variables.$color-ultramarine-light;
+
+            &:checked {
+              box-shadow: inset 0 0 0px 1px variables.$color-black;
+            }
+          }
+        }
+
+        &:disabled:not(:checked) {
+          opacity: 0.5;
+        }
+
+        &:checked {
+          $icon: '../images/icons/v3/check/check.svg';
+
+          background: variables.$color-ultramarine;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+
+          &::before {
+            content: '';
+            display: block;
+            @include mixins.color-svg($icon, variables.$color-white);
+            & {
+              width: 13px;
+              height: 13px;
+            }
+          }
+
+          @include mixins.light-theme {
+            &:disabled {
+              background: variables.$color-gray-15;
+            }
+          }
+          @include mixins.dark-theme {
+            &:disabled {
+              background: variables.$color-gray-45;
+            }
+          }
+        }
+
+        &--container {
+          margin-inline-start: 8px;
+          /* prevent sibling content from pushing this smaller (min-width: the "!important" of width) */
+          min-width: 20px;
+        }
+      }
+    }
+
+    &--clear-filter-button {
+      height: $normal-row-height;
+    }
+
+    &--header {
+      @include mixins.font-body-1-bold;
+
+      align-items: flex-end;
+      display: flex;
+      height: 100%;
+      overflow-x: hidden;
+      padding-bottom: 8px;
+      padding-inline-start: 16px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+
+      @include mixins.dark-theme {
+        color: variables.$color-gray-05;
+      }
+
+      .module-conversation-list--width-narrow & {
+        @include mixins.rounded-corners;
+        display: block;
+        height: 2px;
+        margin-block: 19px;
+        margin-inline: 14px 0;
+        padding-bottom: 0;
+        width: 48px;
+
+        // Hide the text, but keep it for screen readers.
+        color: transparent;
+        overflow: hidden;
+        text-indent: -99999px;
+
+        @include mixins.light-theme {
+          background: variables.$color-black-alpha-12;
+        }
+
+        @include mixins.dark-theme {
+          background: variables.$color-white-alpha-12;
+        }
+      }
+    }
+
+    &--spinner {
+      width: 100%;
+      padding: 10px;
+
+      text-align: center;
+    }
+  }
+}
+
+.module-conversation-list__empty-results {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-block: 48px;
+  padding-inline: 12px;
+}
+
+.module-conversation-list__generic-checkbox-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 16px;
+  background-color: light-dark(
+    variables.$color-black-alpha-06,
+    variables.$color-white-alpha-12
+  );
+
+  &::before {
+    content: '';
+    display: block;
+    width: 20px;
+    height: 20px;
+  }
+
+  &--contact::before {
+    @include mixins.color-svg(
+      '../images/icons/v3/person/person.svg',
+      light-dark(variables.$color-black, variables.$color-gray-05)
+    );
+  }
+
+  &--group::before {
+    @include mixins.color-svg(
+      '../images/icons/v3/group/group.svg',
+      light-dark(variables.$color-black, variables.$color-gray-05)
+    );
+  }
+}
+
+// Module: Left Pane
+
+.module-left-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  position: relative;
+
+  @include mixins.light-theme {
+    $background-color: variables.$color-gray-02;
+  }
+
+  @include mixins.dark-theme {
+    $background-color: variables.$color-gray-80;
+  }
+}
+
+.module-left-pane__header {
+  flex-grow: 0;
+  flex-shrink: 0;
+
+  &__contents {
+    width: 100%;
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    padding-block: 15px;
+
+    &__back-button {
+      @include mixins.button-reset;
+
+      & {
+        margin-inline-start: 16px;
+
+        width: 20px;
+        height: 20px;
+      }
+
+      &:disabled {
+        cursor: not-allowed;
+      }
+
+      @include mixins.light-theme {
+        &:dir(ltr) {
+          @include mixins.color-svg(
+            '../images/icons/v3/chevron/chevron-left.svg',
+            variables.$color-gray-60
+          );
+        }
+        &:dir(rtl) {
+          @include mixins.color-svg(
+            '../images/icons/v3/chevron/chevron-right.svg',
+            variables.$color-gray-60
+          );
+        }
+      }
+      @include mixins.keyboard-mode {
+        &:dir(ltr) {
+          &:focus {
+            @include mixins.color-svg(
+              '../images/icons/v3/chevron/chevron-left.svg',
+              variables.$color-ultramarine
+            );
+          }
+        }
+        &:dir(rtl) {
+          &:focus {
+            @include mixins.color-svg(
+              '../images/icons/v3/chevron/chevron-right.svg',
+              variables.$color-ultramarine
+            );
+          }
+        }
+      }
+
+      @include mixins.dark-theme {
+        &:dir(ltr) {
+          @include mixins.color-svg(
+            '../images/icons/v3/chevron/chevron-left.svg',
+            variables.$color-gray-25
+          );
+        }
+        &:dir(rtl) {
+          @include mixins.color-svg(
+            '../images/icons/v3/chevron/chevron-right.svg',
+            variables.$color-gray-25
+          );
+        }
+      }
+      @include mixins.dark-keyboard-mode {
+        &:dir(ltr) {
+          &:hover {
+            @include mixins.color-svg(
+              '../images/icons/v3/chevron/chevron-left.svg',
+              variables.$color-ultramarine-light
+            );
+          }
+        }
+        &:dir(rtl) {
+          &:hover {
+            @include mixins.color-svg(
+              '../images/icons/v3/chevron/chevron-right.svg',
+              variables.$color-ultramarine-light
+            );
+          }
+        }
+      }
+
+      .NavSidebar--narrow & {
+        margin-inline-start: 0;
+      }
+    }
+
+    &__text {
+      @include mixins.font-body-1-bold;
+      flex-grow: 1;
+      padding-inline-end: 36px;
+      text-align: center;
+
+      @include mixins.light-theme {
+        color: variables.$color-gray-90;
+      }
+      @include mixins.dark-theme {
+        color: variables.$color-gray-05;
+      }
+
+      .NavSidebar--narrow & {
+        @include mixins.sr-only;
+      }
+    }
+
+    .NavSidebar--narrow & {
+      justify-content: center;
+    }
+  }
+
+  &__form {
+    display: flex;
+    flex-direction: column;
+
+    &__expire-timer {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+
+      margin-block: 0 16px;
+
+      margin-inline: 16px;
+
+      &__label {
+        margin-inline-end: 12px;
+      }
+    }
+  }
+}
+
+.module-left-pane__startComposingIcon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/compose/compose.svg',
+      variables.$color-gray-75
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/compose/compose.svg',
+      variables.$color-gray-15
+    );
+  }
+}
+
+.module-left-pane__moreActionsIcon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  @include mixins.light-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/more/more.svg',
+      variables.$color-black
+    );
+  }
+  @include mixins.dark-theme {
+    @include mixins.color-svg(
+      '../images/icons/v3/more/more.svg',
+      variables.$color-gray-15
+    );
+  }
+}
+
+.module-left-pane__dialogs {
+  & + .module-left-pane__chatFolders {
+    margin-top: 8px;
+  }
+}
+
+.module-left-pane__archive-helper-text {
+  @include mixins.font-body-2;
+
+  flex-grow: 0;
+  flex-shrink: 0;
+
+  padding: 1em;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-60;
+    background-color: variables.$color-gray-05;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+    background-color: variables.$color-gray-75;
+  }
+
+  .NavSidebar--narrow & {
+    display: none;
+  }
+}
+.module-left-pane__no-search-results__unread-header {
+  margin-bottom: 50px;
+}
+
+.module-left-pane__no-search-results--withHeader {
+  display: flex;
+  flex-direction: column;
+  margin-top: 15px;
+  // This applies only for filter by unread, set margin
+  // for clear filter button
+  margin-bottom: 20px;
+  padding-inline: 1em;
+  width: 100%;
+  text-align: center;
+  outline: none;
+}
+
+.module-left-pane__no-search-results,
+.module-left-pane__compose-no-contacts {
+  margin-top: 27px;
+  padding-inline: 1em;
+  width: 100%;
+  text-align: center;
+  outline: none;
+}
+
+.module-left-pane__compose-no-contacts {
+  flex-grow: 1;
+}
+
+.module-left-pane__no-search-results__sms-only {
+  margin-top: 12px;
+  @include mixins.light-theme {
+    color: variables.$color-gray-60;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+  }
+}
+
+.module-left-pane__compose-search-form {
+  &__input {
+    flex-grow: 1;
+  }
+}
+
+.module-left-pane__list--measure {
+  flex-grow: 1;
+  flex-shrink: 1;
+  outline: none;
+}
+
+.module-left-pane__list--wrapper {
+  position: relative;
+}
+
+.module-left-pane__list {
+  position: absolute;
+  outline: none;
+}
+
+.module-left-pane__footer {
+  bottom: 0;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  inset-inline-start: 0;
+  padding: 12px;
+  position: absolute;
+  width: 100%;
+
+  @include mixins.light-theme {
+    background: linear-gradient(transparent, variables.$color-gray-02);
+  }
+
+  @include mixins.dark-theme {
+    background: linear-gradient(transparent, variables.$color-gray-80);
+  }
+}
+
+.module-left-pane__resize-grab-area {
+  position: absolute;
+  width: 8px;
+  height: 100%;
+  inset-inline-end: -8px;
+  top: 0;
+  z-index: variables.$z-index-above-base;
+  cursor: col-resize;
+}
+
+// Module: Timeline
+
+.module-timeline {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+.module-timeline--disabled {
+  user-select: none;
+}
+
+.module-timeline__messages__container {
+  flex: 1 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  scrollbar-width: auto;
+
+  // Unset this for buttons in the timeline so that it doesn't prevent the higher z-index
+  // ConversationHeader from being draggable
+  button {
+    -webkit-app-region: initial;
+  }
+}
+
+.module-timeline__messages {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1;
+  padding-bottom: 6px;
+  position: relative;
+  justify-content: flex-end;
+
+  // This is a modified version of ["Pin Scrolling to Bottom"][0].
+  // [0]: https://css-tricks.com/books/greatest-css-tricks/pin-scrolling-to-bottom/
+  &::after {
+    content: '';
+    height: 1px; // Always show the element to not mess with the height of the scroll area
+    display: block;
+  }
+  &--have-newest:not(&--scroll-locked) {
+    & > * {
+      overflow-anchor: none;
+    }
+    &::after {
+      overflow-anchor: auto;
+    }
+  }
+  &--scroll-locked {
+    // Component also applies flex-basis to prevent shrinkage
+    flex-shrink: 0;
+  }
+
+  &--have-oldest {
+    justify-content: flex-start;
+  }
+
+  &__at-bottom-detector {
+    position: absolute;
+    bottom: 0;
+  }
+}
+
+.module-timeline__scrolldown-buttons {
+  z-index: variables.$z-index-scroll-down-button;
+  position: absolute;
+  inset-inline-end: 16px;
+  bottom: 12px;
+
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ReactVirtualized__List {
+  outline: none;
+}
+
+.CollapseSet__height-container {
+  overflow: hidden;
+  height: 0px;
+  display: none;
+  /* stylelint-disable-next-line property-no-unknown */
+  interpolate-size: allow-keywords;
+  transition-property: display, height;
+  transition-behavior: allow-discrete;
+  transition-duration: 200ms;
+  transition-timing-function: linear(
+    0,
+    0.024 1.7%,
+    0.097 3.7%,
+    0.55 12%,
+    0.75 16.6%,
+    0.887 21.4%,
+    0.935 24%,
+    0.97 26.8%,
+    1.002 31.5%,
+    1.013 37.5%,
+    1.001 62.7%,
+    1
+  );
+}
+
+.CollapseSet__height-container--expanded {
+  display: block;
+  height: auto;
+
+  @starting-style {
+    height: 0;
+  }
+}
+
+.CollapseSet__transparency-container {
+  opacity: 0;
+  transition: opacity 25ms linear;
+}
+
+.CollapseSet__transparency-container--expanded {
+  transition-duration: 120ms;
+  transition-delay: 200ms;
+  opacity: 1;
+  @starting-style {
+    opacity: 0;
+  }
+}
+
+// Module: Last Seen Indicator
+
+.module-last-seen-indicator {
+  padding-top: 25px;
+  padding-bottom: 35px;
+}
+
+.module-last-seen-indicator__bar {
+  background-color: variables.$color-gray-45;
+  width: 100%;
+  height: 1px;
+}
+
+.module-last-seen-indicator__text {
+  margin-top: 3px;
+
+  @include mixins.font-body-2-bold;
+
+  text-align: center;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-90;
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-gray-05;
+  }
+}
+
+/* Calling: Device Selection */
+
+.module-calling-device-selection {
+  position: relative;
+}
+
+.module-calling-device-selection__close-button {
+  @include mixins.button-reset;
+
+  & {
+    @include mixins.color-svg(
+      '../images/icons/v3/x/x.svg',
+      variables.$color-gray-15
+    );
+  }
+  & {
+    height: 24px;
+    position: absolute;
+    inset-inline-end: 5px;
+    top: 0;
+    width: 24px;
+    z-index: variables.$z-index-above-base;
+  }
+
+  @include mixins.keyboard-mode {
+    &:focus,
+    &:active,
+    &:hover {
+      background-color: variables.$color-ultramarine;
+    }
+  }
+}
+
+.module-calling-device-selection__title {
+  @include mixins.font-title-2;
+  margin-top: 12px;
+  margin-bottom: 20px;
+}
+
+.module-calling-device-selection__label {
+  @include mixins.font-body-1-bold;
+  display: block;
+  margin-bottom: 16px;
+}
+
+.module-calling-device-selection__select {
+  margin-bottom: 20px;
+  position: relative;
+}
+
+// Module: GroupV1 Disabled Actions
+
+.module-group-v1-disabled-actions {
+  padding-block: 8px 12px;
+  padding-inline: 16px;
+  max-width: 650px;
+  margin-inline: auto;
+
+  @include mixins.light-theme {
+    background: variables.$color-white;
+  }
+
+  @include mixins.dark-theme {
+    background: variables.$color-gray-95;
+  }
+}
+
+.module-group-v1-disabled-actions__message {
+  @include mixins.font-body-2;
+  text-align: center;
+  margin-bottom: 12px;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-60;
+  }
+
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+  }
+}
+
+.module-group-v1-disabled-actions__message__learn-more {
+  text-decoration: none;
+}
+
+.module-group-v1-disabled-actions__buttons {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+}
+.module-group-v1-disabled-actions__buttons__button {
+  @include mixins.button-reset;
+  & {
+    @include mixins.font-body-1-bold;
+    border-radius: 4px;
+
+    padding: 8px;
+    padding-inline: 30px;
+
+    @include mixins.button-primary;
+  }
+}
+
+// Module: GroupV2 Pending Approval Actions
+
+.module-group-v2-pending-approval-actions {
+  padding-block: 8px 12px;
+  padding-inline: 16px;
+  max-width: 650px;
+  margin-inline: auto;
+
+  @include mixins.light-theme {
+    background: variables.$color-white;
+  }
+
+  @include mixins.dark-theme {
+    background: variables.$color-gray-95;
+  }
+}
+
+.module-group-v2-pending-approval-actions__message {
+  @include mixins.font-body-2;
+  text-align: center;
+  margin-bottom: 12px;
+
+  @include mixins.light-theme {
+    color: variables.$color-gray-60;
+  }
+
+  @include mixins.dark-theme {
+    color: variables.$color-gray-25;
+  }
+}
+
+.module-group-v2-pending-approval-actions__buttons {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+}
+.module-group-v2-pending-approval-actions__buttons__button {
+  @include mixins.button-reset;
+  & {
+    @include mixins.font-body-1-bold;
+    border-radius: 4px;
+
+    padding: 8px;
+    padding-inline: 30px;
+
+    @include mixins.button-secondary;
+
+    @include mixins.light-theme {
+      color: variables.$color-gray-60;
+      background-color: variables.$color-gray-05;
+    }
+  }
+  &:focus {
+    outline: none;
+    @include mixins.keyboard-mode {
+      @include mixins.axo-focus-ring;
+    }
+  }
+}
+
+// Module: Modal Host
+
+.module-modal-host__overlay {
+  background: variables.$color-black-alpha-40;
+  width: 100vw;
+  height: 100vh;
+  inset-inline-start: 0;
+  top: 0;
+  position: fixed;
+  z-index: variables.$z-index-modal-host;
+}
+
+.module-modal-host__overlay-container {
+  display: flex;
+  flex-direction: row;
+  width: 100vw;
+  height: 100vh;
+  inset-inline-start: 0;
+  top: 0;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+  padding: 20px;
+  position: fixed;
+  z-index: variables.$z-index-modal-host;
+}
+
+.module-modal-host__width-container {
+  max-width: 360px;
+  width: 95%;
+}
+
+.module-modal-host--on-top-of-everything {
+  $loading-screen-modal-overlay: variables.$z-index-on-top-of-everything + 1;
+
+  .module-modal-host__overlay,
+  .module-modal-host__overlay-container {
+    z-index: $loading-screen-modal-overlay;
+  }
+}
+
+// Module: GroupV2 Join Dialog
+
+.module-group-v2-join-dialog {
+  @include mixins.font-body-1;
+  border-radius: 8px;
+  width: 360px;
+  margin-inline: auto;
+  padding: 20px;
+
+  position: relative;
+
+  @include mixins.light-theme {
+    background-color: variables.$color-white;
+  }
+  @include mixins.dark-theme {
+    background-color: variables.$color-gray-95;
+  }
+}
+.module-group-v2-join-dialog__close-button {
+  @include mixins.button-reset;
+  & {
+    position: absolute;
+    inset-inline-end: 12px;
+    top: 12px;
+
+    height: 24px;
+    width: 24px;
+
+    @include mixins.light-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/x/x.svg',
+        variables.$color-gray-75
+      );
+    }
+
+    @include mixins.dark-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/x/x.svg',
+        variables.$color-gray-15
+      );
+    }
+  }
+
+  &:focus {
+    @include mixins.keyboard-mode {
+      background-color: variables.$color-ultramarine;
+    }
+    @include mixins.dark-keyboard-mode {
+      background-color: variables.$color-ultramarine-light;
+    }
+  }
+}
+.module-group-v2-join-dialog__title {
+  @include mixins.font-title-2;
+  text-align: center;
+  margin-top: 12px;
+  margin-bottom: 2px;
+}
+.module-group-v2-join-dialog__avatar {
+  text-align: center;
+}
+.module-group-v2-join-dialog__metadata {
+  color: variables.$color-gray-60;
+  text-align: center;
+}
+.module-group-v2-join-dialog__prompt {
+  margin-top: 40px;
+
+  &--approval {
+    @include mixins.font-subtitle;
+    color: variables.$color-gray-45;
+    margin-top: 40px;
+  }
+}
+.module-group-v2-join-dialog__buttons {
+  margin-top: 16px;
+
+  text-align: center;
+
+  display: flex;
+}
+.module-group-v2-join-dialog__button {
+  // Start flex basis at zero so text width doesn't affect layout. We want the buttons
+  //   evenly distributed.
+  flex: 1 1 0px;
+
+  &:not(:first-of-type) {
+    margin-inline-start: 16px;
+  }
+}
+.module-group-v2-join-dialog__description {
+  color: variables.$color-gray-60;
+  margin-top: 12px;
+}
+
+// Module: Progress Dialog
+
+.module-progress-dialog {
+  width: 138px;
+  padding: 18px;
+  border-radius: 8px;
+  @include mixins.popper-shadow();
+
+  & {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+
+    @include mixins.light-theme() {
+      background: variables.$color-white;
+      color: variables.$color-gray-90;
+    }
+
+    @include mixins.dark-theme() {
+      background: variables.$color-gray-80;
+      color: variables.$color-gray-05;
+    }
+  }
+}
+
+.module-progress-dialog__spinner {
+  padding: 10px;
+}
+
+.module-progress-dialog__text {
+  @include mixins.font-body-2;
+}
+
+.module-progress-dialog__overlay {
+  background: variables.$color-black-alpha-40;
+  position: fixed;
+  inset-inline-start: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: variables.$z-index-popup-overlay;
+}
+
+.module-button {
+  &__small {
+    @include mixins.font-body-2;
+    @include mixins.button-reset;
+
+    @include mixins.keyboard-mode {
+      &:focus {
+        box-shadow: 0px 0px 0px 2px variables.$color-ultramarine;
+      }
+    }
+
+    & {
+      @include mixins.light-theme {
+        color: variables.$color-gray-90;
+        border-color: variables.$color-gray-15;
+      }
+
+      @include mixins.dark-theme {
+        color: variables.$color-gray-05;
+        border-color: variables.$color-gray-65;
+      }
+    }
+
+    & {
+      border-radius: 4px;
+      border-style: solid;
+      border-width: 1px;
+      outline: none;
+      padding-block: 7px;
+      padding-inline: 12px;
+    }
+  }
+}
+
+.module-tooltip {
+  --tooltip-text-color: #{variables.$color-gray-75};
+  --tooltip-background-color: #{variables.$color-gray-02};
+
+  @mixin tooltip-dark-theme-variables {
+    --tooltip-text-color: #{variables.$color-gray-05};
+    --tooltip-background-color: #{variables.$color-gray-65};
+  }
+  &--dark-theme {
+    @include tooltip-dark-theme-variables;
+  }
+  @include mixins.dark-theme {
+    @include tooltip-dark-theme-variables;
+  }
+
+  & {
+    background-color: var(--tooltip-background-color);
+    border-radius: 8px;
+    color: var(--tooltip-text-color);
+    display: inline-block;
+    padding-block: 8px;
+    padding-inline: 21px;
+    position: fixed;
+    text-align: center;
+    z-index: variables.$z-index-tooltip;
+  }
+
+  .module-tooltip-arrow {
+    position: absolute;
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
+    direction: ltr;
+  }
+
+  .module-tooltip-arrow::after {
+    border: solid 6px transparent;
+    content: '';
+    display: block;
+    height: 0;
+    /* stylelint-disable-next-line liberty/use-logical-spec */
+    margin-left: -6px;
+    margin-top: -6px;
+    position: absolute;
+    width: 0;
+  }
+
+  &[data-placement='top'] {
+    .module-tooltip-arrow {
+      bottom: 0;
+    }
+
+    .module-tooltip-arrow::after {
+      bottom: -12px;
+      border-top-color: var(--tooltip-background-color);
+    }
+  }
+
+  &[data-placement='right'] {
+    .module-tooltip-arrow {
+      /* stylelint-disable-next-line liberty/use-logical-spec */
+      left: 0;
+    }
+
+    .module-tooltip-arrow::after {
+      /* stylelint-disable-next-line liberty/use-logical-spec */
+      left: -6px;
+      /* stylelint-disable-next-line liberty/use-logical-spec */
+      border-right-color: var(--tooltip-background-color);
+    }
+  }
+
+  &[data-placement='bottom'] {
+    .module-tooltip-arrow {
+      top: 0;
+    }
+
+    .module-tooltip-arrow::after {
+      top: -6px;
+      border-bottom-color: var(--tooltip-background-color);
+    }
+  }
+
+  &[data-placement='left'] {
+    .module-tooltip-arrow {
+      /* stylelint-disable-next-line liberty/use-logical-spec */
+      right: 0;
+    }
+
+    .module-tooltip-arrow::after {
+      /* stylelint-disable-next-line liberty/use-logical-spec */
+      right: -12px;
+      /* stylelint-disable-next-line liberty/use-logical-spec */
+      border-left-color: var(--tooltip-background-color);
+    }
+  }
+}
+
+// Module: Chat Session Refreshed Dialog
+
+.module-chat-session-refreshed-dialog__image {
+  text-align: center;
+}
+.module-chat-session-refreshed-dialog__title {
+  @include mixins.font-body-1-bold;
+  margin-top: 10px;
+  margin-bottom: 3px;
+}
+
+// Module: Delivery Issue Dialog
+
+.module-delivery-issue-dialog__image {
+  text-align: center;
+}
+.module-delivery-issue-dialog__title {
+  @include mixins.font-body-1-bold;
+  margin-top: 10px;
+  margin-bottom: 3px;
+}
+
+// To limit messages with things forcing them wider, like long attachment names
+.module-message__container {
+  max-width: 100%;
+
+  &--incoming {
+    align-self: flex-start;
+  }
+
+  &--outgoing {
+    align-self: flex-end;
+  }
+
+  &--with-reactions {
+    margin-bottom: -6px;
+  }
+}
+
+.module-message__container--sticker-like {
+  overflow: initial;
+}
+
+.module-message__context {
+  &--icon::before {
+    content: ' ';
+    display: inline-block;
+    height: 16px;
+    margin-inline-end: 8px;
+    width: 16px;
+    vertical-align: middle;
+  }
+
+  &__copy-timestamp::before {
+    @include mixins.light-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/copy/copy-compact.svg',
+        variables.$color-black
+      );
+    }
+
+    @include mixins.dark-theme {
+      @include mixins.color-svg(
+        '../images/icons/v3/copy/copy-compact.svg',
+        variables.$color-gray-15
+      );
+    }
+  }
+}
+
+.module-message__action {
+  @include mixins.button-reset();
+  & {
+    border-radius: 30px;
+    margin-top: 14px;
+    margin-bottom: 4px;
+    padding: 8px;
+    text-align: center;
+    width: 100%;
+
+    @include mixins.font-body-1-bold();
+  }
+}
+.module-message__action--outgoing {
+  color: variables.$color-white;
+  background-color: rgba(variables.$color-white, 0.22);
+  &:hover {
+    background-color: rgba(variables.$color-white, 0.36);
+  }
+}
+.module-message__action--outgoing--in-another-call {
+  color: rgba(variables.$color-white, 0.5);
+}
+.module-message__action--incoming {
+  @include mixins.light-theme {
+    color: variables.$color-link;
+    background-color: variables.$color-white-alpha-70;
+    &:hover {
+      background-color: variables.$color-white;
+    }
+  }
+  @include mixins.dark-theme {
+    color: variables.$color-white;
+    background-color: rgba(variables.$color-white, 0.07);
+    &:hover {
+      background-color: rgba(variables.$color-white, 0.17);
+    }
+  }
+}
+.module-message__action--incoming--in-another-call {
+  @include mixins.light-theme {
+    color: rgba(variables.$color-link, 0.5);
+  }
+  @include mixins.dark-theme {
+    color: rgba(variables.$color-white, 0.5);
+  }
+}
+
+.module-message__link-preview__call-link-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-inline-end: 12px;
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
