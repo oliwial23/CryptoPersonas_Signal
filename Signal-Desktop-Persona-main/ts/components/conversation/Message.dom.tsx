@@ -128,6 +128,7 @@ import type { MemberLabelType } from '../../types/GroupMemberLabels.std.ts';
 import type { ContactModalStateType } from '../../types/globalModals.std.ts';
 import { tw } from '../../axo/tw.dom.tsx';
 import { PersonaBadgeChip } from './PersonaBadgeChip.dom.tsx';
+import { PersonaContextChip } from './PersonaContextChip.dom.tsx';
 import { PersonaAuthorshipMessage } from './PersonaAuthorshipMessage.dom.tsx';
 import { Emoji } from '../../axo/emoji.std.ts';
 import { AxoButton } from '../../axo/AxoButton.dom.tsx';
@@ -276,6 +277,11 @@ export type PropsData = {
   // it — see personasBadges.std.ts — so it is rendered provisionally and never as a
   // credential.
   personaBadge?: string;
+  // Personas demo: the context a rate-limited persona post was made under. Shown beside
+  // the persona name so a reader can tell which conversation thread it belongs to, and
+  // so the two persona kinds are visually distinguishable at a glance: a context chip
+  // means rate-limited, its absence means an unlimited pseudonym or anonymous.
+  personaContextName?: string;
   // Personas demo: an UNVERIFIED authorship claim linking two personas. Rendered as a
   // labelled claim, never as a verified fact — see personasAuthorship.preload.ts.
   personaAuthorship?: { first: string; second: string };
@@ -1173,6 +1179,7 @@ export class Message extends PureComponent<Props, State> {
       persona,
       personaAnonymous,
       personaBadge,
+      personaContextName,
       quote,
     } = this.props;
 
@@ -1202,6 +1209,9 @@ export class Message extends PureComponent<Props, State> {
           }
           module={moduleName}
         />
+        {personaContextName ? (
+          <PersonaContextChip contextName={personaContextName} />
+        ) : null}
         {personaBadge ? <PersonaBadgeChip badge={personaBadge} /> : null}
       </div>
     );

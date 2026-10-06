@@ -16,6 +16,11 @@ export const KNOWN_LIMITATIONS: ReadonlyArray<{
   detail: string;
 }> = [
   {
+    title: 'Self-rating is undetectable by the protocol',
+    detail:
+      'A member can rate their own persona post and inflate their own reputation, and no replica can tell. The tally dedupes one rating per pseudonym per target, but the author\u2019s pseudonym is H(sk, post context) while the rater\u2019s is H(sk, target context), so the two look unrelated \u2014 which is exactly the unlinkability the scheme is built on. This client refuses to offer self-rating, but that is a UI choice, not enforcement: a modified client can still do it. Closing it properly needs the circuit to prove rater \u2260 author without revealing either.',
+  },
+  {
     title: 'Authorship claims are unverified assertions',
     detail:
       'Claim authorship sends "these two personas are both me" as a plain statement. Nothing proves it, and anyone can claim any pair of petnames including ones that are not theirs. The real feature is a zero-knowledge proof and is unusually close — authorship_pred exists in personas-core and its proving key already ships — but the serverless Member has no method to build the statement, so there is nothing to verify against. See PERSONAS_SERVERLESS_TODO.md section 1.',
@@ -38,8 +43,7 @@ export const KNOWN_LIMITATIONS: ReadonlyArray<{
   {
     title: 'Admin checks are advisory, not enforcement',
     detail:
-      "Signal's group-admin role is server-enforced for Signal's own group operations, but persona records are ordinary message bodies the server never inspects — so any admin check the client makes can be ignored by a modified client. Attributable actions (creating a topic) are gated as a convenience; anonymous ones are not gated at all, because checking who opened a ban poll would require de-anonymising them. Real admin gating needs the credential to live in the proof — that is what badges are for.",
-  },
+      "Opening a revocation poll is now limited to holders of Signal's GroupV2 admin role, and creating a context likewise. Both are CLIENT-SIDE gates: persona records are ordinary message bodies the storage-service never inspects, so a modified client ignores them. The gate also costs a little anonymity by inference rather than by data \u2014 the ban poll itself still rides the shared phantom, so no recipient learns who opened it, but if only admins ever open one then an observer who knows the admin set can narrow the opener to it, and with a single admin that identifies them. Real enforcement needs the moderator credential inside the proof, which is what badges are for.",},
   {
     title: 'Joining is ungated at the protocol level',
     detail:

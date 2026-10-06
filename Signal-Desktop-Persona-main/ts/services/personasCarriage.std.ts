@@ -109,13 +109,23 @@ export function encodeRecordBody(bytes: Buffer | Uint8Array): string {
 // record is the engine's and the engine has no notion of badges in the serverless model.
 export function encodePostBody(
   bytes: Buffer | Uint8Array,
-  badge?: string
+  badge?: string,
+  contextName?: string
 ): string {
   const record = Buffer.from(bytes).toString('base64');
-  if (!badge) {
+  if (!badge && !contextName) {
     return PERSONAS_POST_MARKER + record;
   }
-  const envelope = { r: record, b: badge };
+  // `c` is the CONTEXT NAME, display metadata exactly like the badge and a poll's option
+  // labels. The record already carries the context NUMBER in its public inputs, so the
+  // number is authoritative and provable; the human-readable name is not, and a peer
+  // could mislabel its own post's context. That is a display-integrity limit, not a
+  // soundness one — the rate-limit still binds to the number inside the proof.
+  //
+  // Carried rather than resolved locally because a recipient may not have heard the
+  // context announcement (PZT2) yet, and a post that renders with no context at all is
+  // worse than one that renders with an unverified name.
+  const envelope = { r: record, b: badge, c: contextName };
   return (
     PERSONAS_POST_MARKER +
     Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64')
@@ -134,24 +144,41 @@ export function decodePostBadge(
   return typeof envelope?.b === 'string' ? envelope.b : undefined;
 }
 
+// The context NAME a post was made under, if it carried one. Undefined for an anonymous
+// or context-free pseudonymous post. Untrusted — see encodePostBody.
+export function decodePostContextName(
+  body: string | undefined | null
+): string | undefined {
+  if (!body?.startsWith(PERSONAS_POST_MARKER)) {
+    return undefined;
+  }
+  const envelope = parsePostEnvelope(body);
+  return typeof envelope?.c === 'string' ? envelope.c : undefined;
+}
+
 // A post body is an envelope only if its base64 decodes to JSON with an `r` field.
 // A plain post's payload is raw record bytes, which will not parse as JSON — so this
 // distinguishes the two shapes without a second marker and without a version bump.
 function parsePostEnvelope(
   body: string
-): { r: string; b?: string } | undefined {
+): { r: string; b?: string; c?: string } | undefined {
   try {
     const json = Buffer.from(
       body.slice(PERSONAS_POST_MARKER.length),
       'base64'
     ).toString('utf8');
-    const parsed = JSON.parse(json) as { r?: unknown; b?: unknown };
+    const parsed = JSON.parse(json) as {
+      r?: unknown;
+      b?: unknown;
+      c?: unknown;
+    };
     if (typeof parsed?.r !== 'string') {
       return undefined;
     }
     return {
       r: parsed.r,
       b: typeof parsed.b === 'string' ? parsed.b : undefined,
+      c: typeof parsed.c === 'string' ? parsed.c : undefined,
     };
   } catch {
     // Not JSON: a plain post. Expected, not exceptional.

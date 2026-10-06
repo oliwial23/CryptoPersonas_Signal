@@ -179,6 +179,7 @@ Starting personas demo instance: $INSTANCE
   roster dir  $PERSONAS_ROSTER_DIR
   keys dir    $PERSONAS_KEYS_DIR
   barrier     ${PERSONAS_BARRIER_PERIOD_MS:-10000}ms per settlement barrier
+  auto-scan   ${PERSONAS_AUTO_SCAN:-off - use the Scan now menu item}
 
 First launch on a fresh keys dir generates ~51MB of proving keys and takes minutes.
 EOF

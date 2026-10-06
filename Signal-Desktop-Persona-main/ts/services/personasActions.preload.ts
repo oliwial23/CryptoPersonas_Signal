@@ -39,7 +39,7 @@ import {
   type PersonaPollDescriptor,
 } from './personasEngine.preload.ts';
 import { ensurePersonaJoined } from './personasMembership.preload.ts';
-import { withPersonaProofLock } from './personasProofLock.preload.ts';
+import { isOutgoing } from '../messages/helpers.std.ts';
 
 const log = createLogger('personasActions');
 
@@ -71,9 +71,7 @@ export async function sendPersonaRate(
       log.warn('sendPersonaRate: not joined; refusing to rate');
       return false;
     }
-    const rate = await withPersonaProofLock('rating', () =>
-      composePersonaRate(targetEh, delta)
-    );
+    const rate = composePersonaRate(targetEh, delta);
     if (!rate) {
       return false;
     }
@@ -111,9 +109,7 @@ export async function sendPersonaPoll(
       log.warn('sendPersonaPoll: not joined; refusing to open a poll');
       return false;
     }
-    const poll = await withPersonaProofLock('poll', () =>
-      composePersonaPoll(descriptor, targetEh)
-    );
+    const poll = composePersonaPoll(descriptor, targetEh);
     if (!poll) {
       return false;
     }
@@ -177,9 +173,7 @@ export async function sendPersonaVote(
       log.warn('sendPersonaVote: not joined; refusing to vote');
       return false;
     }
-    const vote = await withPersonaProofLock('vote', () =>
-      composePersonaVote(pollEh, optionIndex)
-    );
+    const vote = composePersonaVote(pollEh, optionIndex);
     if (!vote) {
       return false;
     }
@@ -269,6 +263,31 @@ function rateDeltaForEmoji(emoji: string): number | undefined {
 // engine's append-only rating model gets to a retraction. Ratings accumulate, so this
 // nets back to zero rather than deleting the original ballot — appropriate for a
 // system whose whole point is that history is not rewritten.
+// `handled` means "this was a thumbs on a persona post, so do NOT fall through to an
+// ordinary Signal reaction". `sent` reports whether the rate record actually went out.
+//
+// These have to be separate. Previously this returned a bare `true` as soon as it
+// decided to handle the reaction, so a rating that FAILED still told the caller the
+// gesture was dealt with: the ordinary reaction was skipped, no record was sent, and the
+// user saw nothing whatsoever. Silent failure on a privacy-relevant action is the worst
+// of the three outcomes, and it was the one that looked identical to success.
+export type PersonaRateOutcome = {
+  handled: boolean;
+  sent: boolean;
+  delta: number;
+  /**
+   * True when we blocked a non-thumbs reaction on a persona post because sending it
+   * would have de-anonymised the reactor. The caller explains this rather than letting
+   * the gesture fail mutely.
+   */
+  refusedEmoji?: boolean;
+  /**
+   * True when we declined to rate the user's OWN persona post. Distinct from a failure:
+   * nothing went wrong, we chose not to (see the comment at the guard).
+   */
+  refusedSelf?: boolean;
+};
+
 export async function maybeSendPersonaRateForReaction({
   messageId,
   emoji,
@@ -277,36 +296,80 @@ export async function maybeSendPersonaRateForReaction({
   messageId: string;
   emoji: string;
   remove: boolean;
-}): Promise<boolean> {
+}): Promise<PersonaRateOutcome> {
+  const NOT_OURS: PersonaRateOutcome = {
+    handled: false,
+    sent: false,
+    delta: 0,
+  };
   if (!isPersonasEngineEnabled()) {
-    return false;
+    return NOT_OURS;
   }
 
   const delta = rateDeltaForEmoji(emoji);
-  if (delta == null) {
-    return false;
-  }
 
   const message = window.MessageCache.getById(messageId);
   const targetEh = message?.get('personaEh');
   if (!message || !targetEh || message.get('personaPoll') != null) {
-    // Not a persona post (a poll is not rateable), so not ours to handle.
-    return false;
+    // Not a persona post (a poll is not rateable), so not ours to handle. A
+    // non-thumbs reaction on an ORDINARY message is likewise none of our business.
+    return NOT_OURS;
+  }
+
+  // On a persona post, a non-thumbs reaction is REFUSED rather than passed through.
+  //
+  // An ordinary Signal reaction is sent from the reactor's REAL account and addressed to
+  // (target author, timestamp). On an anonymous or pseudonymous post that publicly ties
+  // a named member to that specific post — it does not expose the author, but it does
+  // expose the reactor, permanently and to everyone in the group. A heart is a much
+  // weaker signal than a rating and carries a much higher disclosure cost, which is
+  // precisely the trade nobody makes knowingly.
+  //
+  // Thumbs are safe because they are intercepted below and become rate records that
+  // ride the phantom identity. Everything else is not, so it is declined with an
+  // explanation rather than silently dropped.
+  if (delta == null) {
+    log.info(
+      `maybeSendPersonaRateForReaction: refusing ${emoji} on a persona post (would send from the real account)`
+    );
+    return { handled: true, sent: false, delta: 0, refusedEmoji: true };
+  }
+
+  // SELF-RATING is refused, and this is a deliberate product decision rather than a
+  // limitation we ran into.
+  //
+  // The protocol cannot catch it. `tally.rate` (personas-bulletin replica/tally.rs)
+  // dedupes on `(target, claimed)` — one rating per pseudonym per target — but there is
+  // no check that the rater is not the author, and there CANNOT usefully be one: the
+  // author's pseudonym is H(sk, post_context) while the rater's is
+  // H(sk, target.context()), so a replica sees two unrelated pseudonyms. That
+  // unlinkability is the whole point of the scheme, and it means a member can inflate
+  // their own reputation undetectably.
+  //
+  // So the client declines to offer it. That is ADVISORY — a modified client can still
+  // do it, and the honest framing is that self-rating is an open soundness gap in the
+  // serverless design, documented in the status panel's known limitations. Refusing it
+  // here simply avoids shipping a button for it.
+  if (isOutgoing(message.attributes)) {
+    log.info(
+      'maybeSendPersonaRateForReaction: refusing to rate our own persona post'
+    );
+    return { handled: true, sent: false, delta: 0, refusedSelf: true };
   }
 
   const conversation = window.ConversationController.get(
     message.get('conversationId')
   );
   if (!conversation) {
-    return false;
+    return NOT_OURS;
   }
 
   const applied = delta * (remove ? -1 : 1);
   log.info(
     `maybeSendPersonaRateForReaction: routing ${emoji} to a rate of ${applied}`
   );
-  await sendPersonaRate(conversation, targetEh, applied);
-  return true;
+  const sent = await sendPersonaRate(conversation, targetEh, applied);
+  return { handled: true, sent, delta: applied };
 }
 
 // Emit a scan, absorbing the revocation callbacks fired since our last one. This is
@@ -329,7 +392,8 @@ export async function maybeSendPersonaRateForReaction({
 let scanInFlight = false;
 
 export async function sendPersonaScan(
-  conversation: ConversationModel
+  conversation: ConversationModel,
+  { quiet = false }: { quiet?: boolean } = {}
 ): Promise<boolean> {
   if (!isPersonasEngineEnabled()) {
     return false;
@@ -338,11 +402,16 @@ export async function sendPersonaScan(
     log.info('sendPersonaScan: a scan is already in flight; skipping');
     return false;
   }
+  // `quiet` is for the SPECULATIVE scan attempted before each send. The engine refuses a
+  // scan with fewer than NUM_SCANS_PER_FOLD (=1) outstanding callbacks — `NothingToScan`
+  // — which for a send-time attempt is the overwhelmingly common case and is not an
+  // error in any sense. Logging it at error level on every message would bury real
+  // failures in noise.
   scanInFlight = true;
   try {
     // A scan is only meaningful once we are a member, but unlike the others it should
     // not CAUSE a join — a lurking instance that never posted has nothing to absorb.
-    const scan = await withPersonaProofLock('scan', composePersonaScan);
+    const scan = composePersonaScan();
     if (!scan) {
       return false;
     }
@@ -353,6 +422,11 @@ export async function sendPersonaScan(
     log.info(`sendPersonaScan: scan sent (eh ${scan.eh.slice(0, 12)}…)`);
     return true;
   } catch (error) {
+    const message = String(error);
+    if (quiet && message.includes('nothing to scan')) {
+      // Expected: no callbacks outstanding. Say nothing.
+      return false;
+    }
     log.error(`sendPersonaScan failed: ${toLogFormat(error)}`);
     return false;
   } finally {

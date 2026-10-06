@@ -293,6 +293,12 @@ function getToast(toastType: ToastType): AnyToast {
         toastType: ToastType.VideoFileSize,
         parameters: { limit: 100, units: 'MB' },
       };
+    case ToastType.PersonaRated:
+      return { toastType: ToastType.PersonaRated, parameters: { delta: 1 } };
+    case ToastType.PersonaReactionBlocked:
+      return { toastType: ToastType.PersonaReactionBlocked };
+    case ToastType.PersonaSelfRateBlocked:
+      return { toastType: ToastType.PersonaSelfRateBlocked };
     case ToastType.ViewOnceDisabled:
       return { toastType: ToastType.ViewOnceDisabled };
     case ToastType.ViewOnceEnabled:

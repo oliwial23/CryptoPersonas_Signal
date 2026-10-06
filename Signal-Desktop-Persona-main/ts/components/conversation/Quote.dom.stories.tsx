@@ -75,6 +75,7 @@ const defaultMessageProps: TimelineMessagesProps = {
     title: 'Person X',
   }),
   canCopy: true,
+  canOpenPersonaBanPoll: false,
   canEditMessage: true,
   canEndPoll: false,
   canForward: true,

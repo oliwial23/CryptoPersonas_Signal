@@ -36,6 +36,7 @@ import {
   decodeTopicAnnouncement,
   isPersonaPhantomBody,
   decodePostBadge,
+  decodePostContextName,
   type PersonaPollDescriptor,
 } from '../../services/personasCarriage.std.ts';
 
@@ -213,5 +214,41 @@ describe('post badge claims', () => {
     const body = `PZP2:${Buffer.from(envelope, 'utf8').toString('base64')}`;
     assert.strictEqual(decodePostBadge(body), undefined);
     assert.deepStrictEqual(decodeRecordBody(body), record);
+  });
+});
+
+describe('post context names', () => {
+  const record = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x7b, 0x22, 0x00]);
+
+  it('keeps a plain post byte-identical to the pre-context format', () => {
+    assert.strictEqual(
+      encodePostBody(record),
+      `PZP2:${record.toString('base64')}`
+    );
+  });
+
+  it('round-trips a context-only post', () => {
+    const body = encodePostBody(record, undefined, 'Union');
+    assert.deepStrictEqual(decodeRecordBody(body), record);
+    assert.strictEqual(decodePostContextName(body), 'Union');
+    assert.strictEqual(decodePostBadge(body), undefined);
+  });
+
+  it('round-trips a badge AND a context together', () => {
+    const body = encodePostBody(record, 'Faculty', 'Union');
+    assert.deepStrictEqual(decodeRecordBody(body), record);
+    assert.strictEqual(decodePostBadge(body), 'Faculty');
+    assert.strictEqual(decodePostContextName(body), 'Union');
+  });
+
+  it('ignores a non-string context from a hostile peer', () => {
+    const envelope = JSON.stringify({ r: record.toString('base64'), c: 42 });
+    const body = `PZP2:${Buffer.from(envelope, 'utf8').toString('base64')}`;
+    assert.strictEqual(decodePostContextName(body), undefined);
+    assert.deepStrictEqual(decodeRecordBody(body), record);
+  });
+
+  it('still routes a context-labelled post over the phantom', () => {
+    assert.ok(isPersonaPhantomBody(encodePostBody(record, undefined, 'Union')));
   });
 });

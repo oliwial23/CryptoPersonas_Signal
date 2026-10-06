@@ -74,6 +74,16 @@ export enum ToastType {
   PinnedConversationsFull = 'PinnedConversationsFull',
   PinnedMessageNotFound = 'PinnedMessageNotFound',
   PollNotFound = 'PollNotFound',
+  // Personas demo: a thumbs reaction on a persona post becomes a ZK RATE record rather
+  // than a visible Signal reaction, so without a toast the gesture produces no feedback
+  // at all and reads as broken. See personasActions maybeSendPersonaRateForReaction.
+  PersonaRated = 'PersonaRated',
+  // Personas demo: a non-thumbs reaction on a persona post was blocked because an
+  // ordinary Signal reaction would be sent from the reactor's real account.
+  PersonaReactionBlocked = 'PersonaReactionBlocked',
+  // Personas demo: declined to rate the user's own persona post, because self-rating is
+  // undetectable to the protocol and would inflate their own reputation.
+  PersonaSelfRateBlocked = 'PersonaSelfRateBlocked',
   ReactionFailed = 'ReactionFailed',
   ReceiptSaved = 'ReceiptSaved',
   ReceiptSaveFailed = 'ReceiptSaveFailed',
@@ -224,6 +234,9 @@ export type AnyToast =
     }
   | { toastType: ToastType.PinnedMessageNotFound }
   | { toastType: ToastType.PollNotFound }
+  | { toastType: ToastType.PersonaRated; parameters: { delta: number } }
+  | { toastType: ToastType.PersonaReactionBlocked }
+  | { toastType: ToastType.PersonaSelfRateBlocked }
   | { toastType: ToastType.ReactionFailed }
   | {
       toastType: ToastType.RemoteConfigChanged;

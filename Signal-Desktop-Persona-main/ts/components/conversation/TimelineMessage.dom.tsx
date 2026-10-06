@@ -54,6 +54,8 @@ export type PropsData = {
   canReact: boolean;
   canReply: boolean;
   canPinMessage: boolean;
+  // Personas demo: do we hold Signal's group-admin role? Gates the revocation poll.
+  canOpenPersonaBanPoll: boolean;
   selectedReaction?: Emoji.Variant;
   isTargeted?: boolean;
   isSignalConversation: boolean;
@@ -117,6 +119,7 @@ export function TimelineMessage(props: Props): JSX.Element {
     canRetry,
     canRetryDeleteForEveryone,
     canPinMessage,
+    canOpenPersonaBanPoll,
     containerElementRef,
     containerWidthBreakpoint,
     conversationId,
@@ -357,8 +360,24 @@ export function TimelineMessage(props: Props): JSX.Element {
           // Personas demo: offered only on a persona POST (something with an
           // envelope hash to target) and never on a poll — you cannot open a
           // revocation poll about a poll.
+          // Personas demo: offered only on a persona POST (something with an envelope
+          // hash to target), never on a poll, and now only to a Signal group ADMIN.
+          //
+          // The gate leaks nothing by itself: a ban poll still rides the shared phantom,
+          // so the record on the wire is byte-identical and no recipient learns who
+          // opened it. What the gate costs is subtler and worth stating — if in practice
+          // only admins open ban polls, then an observer who knows the admin set can
+          // INFER the opener from the poll's existence. With a single admin, a ban poll
+          // identifies them. That is an inference leak, not a data leak, and it is the
+          // anonymity this trade actually spends.
+          //
+          // It is also NOT enforcement. Persona records are ordinary message bodies the
+          // storage-service never inspects, so a modified client ignores this check
+          // entirely and can open a ban poll regardless. Real enforcement needs the
+          // moderator credential inside the proof — that is what badges are for
+          // (PERSONAS_SERVERLESS_TODO.md section 2).
           onPersonaBanPoll={
-            personaEh != null && personaPoll == null
+            personaEh != null && personaPoll == null && canOpenPersonaBanPoll
               ? () => personaBanPoll(id)
               : null
           }
@@ -408,6 +427,7 @@ export function TimelineMessage(props: Props): JSX.Element {
       canEditMessage,
       canForward,
       canPinMessage,
+      canOpenPersonaBanPoll,
       canReact,
       canRetry,
       canSelect,

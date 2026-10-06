@@ -11,6 +11,7 @@ import { ThemeType } from '../types/Util.std.ts';
 
 import type { ViewStoryActionCreatorType } from '../state/ducks/stories.preload.ts';
 import type { AppStateType } from '../state/ducks/app.preload.ts';
+import { PersonaAccountBanner } from './PersonaAccountBanner.dom.tsx';
 
 type PropsType = {
   state: AppStateType;
@@ -104,6 +105,10 @@ export function App({
 
   return (
     <div className="App">
+      {/* Personas demo: which account is this window? Renders nothing outside the demo. */}
+      <PersonaAccountBanner
+        instance={window.SignalContext.config.appInstance}
+      />
       {contents}
       {renderGlobalModalContainer()}
       {renderCallManager()}

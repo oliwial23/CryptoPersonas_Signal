@@ -1076,7 +1076,9 @@ export const CompositionArea = memo(function CompositionArea({
               AGAIN as that persona rather than as a new stranger. A pseudonym's
               petname is only known once it has posted — the engine reveals it on
               emit, there is no way to ask for it in advance. */}
-          <AxoDropdownMenu.Label>Pseudonyms (unlimited)</AxoDropdownMenu.Label>
+          <AxoDropdownMenu.Label>
+            Pseudonyms \u00b7 unlimited, no context
+          </AxoDropdownMenu.Label>
           <AxoDropdownMenu.RadioGroup
             value={personaValue}
             onValueChange={setPersonaValue}
@@ -1088,7 +1090,7 @@ export const CompositionArea = memo(function CompositionArea({
               >
                 {pseudonym.petname != null
                   ? `~${pseudonym.petname}`
-                  : `Pseudonym ${pseudonym.index} (unused)`}
+                  : `Pseudonym ${pseudonym.index} \u00b7 unused`}
               </AxoDropdownMenu.RadioItem>
             ))}
           </AxoDropdownMenu.RadioGroup>
@@ -1101,12 +1103,16 @@ export const CompositionArea = memo(function CompositionArea({
 
           <AxoDropdownMenu.Separator />
 
-          {/* Rate-limited personas are bound to a topic's context, so they are
-              only selectable once a topic is chosen. MAX_PSEUDO of them. */}
+          {/* Rate-limited personas are bound to a CONTEXT, so they are only selectable
+              once a context is chosen. At most MAX_PSEUDO of them per context, which is
+              the whole point: an unlimited pseudonym costs a member nothing, while these
+              are a scarce resource within a context, so a reputation attached to one
+              actually means something. The label carries that distinction because the
+              two kinds are otherwise indistinguishable in a menu. */}
           <AxoDropdownMenu.Label>
             {personaTopic != null
-              ? `Rate-limited in "${personaTopic}"`
-              : 'Rate-limited (pick a topic first)'}
+              ? `Rate-limited \u00b7 max ${MAX_PSEUDO} in \u201c${personaTopic}\u201d`
+              : `Rate-limited \u00b7 max ${MAX_PSEUDO} per context \u2014 pick a context below`}
           </AxoDropdownMenu.Label>
           <AxoDropdownMenu.RadioGroup
             value={personaValue}
@@ -1119,14 +1125,16 @@ export const CompositionArea = memo(function CompositionArea({
                 value={`rate:${index}`}
                 disabled={personaTopicContext == null}
               >
-                {`Persona #${index + 1}`}
+                {personaTopic != null
+                  ? `#${index + 1} in \u201c${personaTopic}\u201d`
+                  : `#${index + 1}`}
               </AxoDropdownMenu.RadioItem>
             ))}
           </AxoDropdownMenu.RadioGroup>
 
           <AxoDropdownMenu.Separator />
 
-          <AxoDropdownMenu.Label>Topic</AxoDropdownMenu.Label>
+          <AxoDropdownMenu.Label>Context</AxoDropdownMenu.Label>
           <AxoDropdownMenu.RadioGroup
             value={personaTopic ?? ''}
             onValueChange={value => setPersonaTopic(value || undefined)}
@@ -1152,7 +1160,7 @@ export const CompositionArea = memo(function CompositionArea({
               setIsTopicDialogOpen(true);
             }}
           >
-            {areWeAdmin ? 'New topic…' : 'New topic… (admins only)'}
+            {areWeAdmin ? 'New context\u2026' : 'New context\u2026 (admins only)'}
           </AxoDropdownMenu.Item>
 
           <AxoDropdownMenu.Separator />
@@ -1205,12 +1213,6 @@ export const CompositionArea = memo(function CompositionArea({
           </AxoDropdownMenu.Item>
 
           <AxoDropdownMenu.Item
-            symbol="refresh"
-            onSelect={() => scanPersonaCallbacksNow(conversationId)}
-          >
-            Scan now
-          </AxoDropdownMenu.Item>
-          <AxoDropdownMenu.Item
             symbol="info"
             onSelect={() => setIsStatusDialogOpen(true)}
           >
@@ -1236,13 +1238,13 @@ export const CompositionArea = memo(function CompositionArea({
     <AxoDialog.Root open onOpenChange={setIsTopicDialogOpen}>
       <AxoDialog.Content size="sm" escape="cancel-is-destructive">
         <AxoDialog.Header>
-          <AxoDialog.Title>New topic</AxoDialog.Title>
+          <AxoDialog.Title>New context</AxoDialog.Title>
           <AxoDialog.Close />
         </AxoDialog.Header>
         <AxoDialog.Body>
           <input
             type="text"
-            placeholder="Topic name (e.g. Union)"
+            placeholder="Context name (e.g. Union)"
             value={newTopicName}
             onChange={event => setNewTopicName(event.target.value)}
             className={tw(
@@ -1837,6 +1839,7 @@ export const CompositionArea = memo(function CompositionArea({
       {personaAuthorshipDialog}
       {isStatusDialogOpen && (
         <PersonaStatusDialog
+          onScanNow={() => scanPersonaCallbacksNow(conversationId)}
           status={personaStatus}
           i18n={i18n}
           onClose={() => setIsStatusDialogOpen(false)}

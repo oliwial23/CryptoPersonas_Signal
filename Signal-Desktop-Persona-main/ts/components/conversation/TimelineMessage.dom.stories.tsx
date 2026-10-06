@@ -237,6 +237,7 @@ const createProps = (overrideProps: Partial<Props> = {}): Props => ({
   author: overrideProps.author || getDefaultConversation(),
   bodyRanges: overrideProps.bodyRanges,
   canCopy: true,
+  canOpenPersonaBanPoll: true,
   canEditMessage: true,
   canEndPoll: overrideProps.direction === 'outgoing',
   canPinMessage: overrideProps.canPinMessage ?? true,

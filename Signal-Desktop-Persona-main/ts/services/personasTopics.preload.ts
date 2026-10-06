@@ -80,6 +80,14 @@ export function listTopics(): Array<{ name: string; context: number }> {
  * THE seam: a server-backed registry would replace only this function (and
  * `createTopic`), leaving every caller untouched.
  */
+// The reverse of resolveTopicContext: the human name for a context number, if this
+// instance has heard its announcement. Used when SENDING, to label a post with the
+// context it was made under so recipients can show it even before their own registry has
+// caught up.
+export function nameForContext(context: number): string | undefined {
+  return listTopics().find(topic => topic.context === context)?.name;
+}
+
 export function resolveTopicContext(name: string): number | undefined {
   return contextByTopic.get(name.trim());
 }
