@@ -210,6 +210,9 @@ export type MessageAttributesType = {
   // Personas demo: the UNVERIFIED badge claim carried beside a persona post. Stored so
   // the chip survives a reload; never trusted (personasBadges.std.ts).
   personaBadge?: string;
+  // Personas demo: the context name a rate-limited persona post was made under.
+  // Display metadata, untrusted (personasCarriage encodePostBody).
+  personaContextName?: string;
   // Personas demo: an UNVERIFIED authorship claim ("these two personas are both me").
   // Not a proof — see personasAuthorship.preload.ts.
   personaAuthorship?: { first: string; second: string };

@@ -54,8 +54,10 @@ import {
   type PersonaChoice,
 } from '../../services/personasEngine.preload.ts';
 import { ensurePersonaJoined } from '../../services/personasMembership.preload.ts';
-import { withPersonaProofLock } from '../../services/personasProofLock.preload.ts';
-import { createTopic } from '../../services/personasTopics.preload.ts';
+import {
+  createTopic,
+  nameForContext,
+} from '../../services/personasTopics.preload.ts';
 import { getSelectedBadge } from '../../services/personasBadgeState.preload.ts';
 import { sendAuthorshipClaim as doSendAuthorshipClaim } from '../../services/personasAuthorship.preload.ts';
 import {
@@ -889,6 +891,7 @@ function sendMultiMediaMessage(
             personaAnonymous?: boolean;
             personaRecordBase64?: string;
             personaBadge?: string;
+            personaContextName?: string;
           }
         | undefined;
       if (options.personaChoice && message) {
@@ -908,9 +911,20 @@ function sendMultiMediaMessage(
           });
           return;
         }
-        const post = await withPersonaProofLock('post', () =>
-          composePersonaPost(message, options.personaChoice)
-        );
+        // Absorb anything outstanding BEFORE posting. The protocol wants this: the post
+        // predicate constrains `num_interactions_since_last_scan != NUM_INTS_BEFORE_SCAN`
+        // (200), so a member who never scans eventually cannot post at all — their proof
+        // becomes unsatisfiable. Scanning on send keeps that counter from ever reaching
+        // the wall, and absorbs a revocation promptly instead of on a timer.
+        //
+        // `quiet` because the engine refuses a scan with no outstanding callbacks
+        // (NothingToScan), which is the normal case for most messages and is not a
+        // failure. When it DOES have something to absorb this adds a Groth16 proof's
+        // worth of delay before the message goes out — that is the cost of doing it here
+        // rather than in the background.
+        await sendPersonaScan(conversation, { quiet: true });
+
+        const post = composePersonaPost(message, options.personaChoice);
         if (!post) {
           log.error(
             'sendMultiMediaMessage: persona post emit failed; refusing to send attributably'
@@ -938,6 +952,13 @@ function sendMultiMediaMessage(
           // Read at send time rather than baked into the choice so toggling it takes
           // effect on the next message without re-picking a persona.
           personaBadge: getSelectedBadge(),
+          // Only a RATE-LIMITED persona has a context; an unlimited pseudonym and an
+          // anonymous post deliberately have none, and the absence of the chip is what
+          // distinguishes them in the timeline.
+          personaContextName:
+            options.personaChoice.kind === 'rate'
+              ? nameForContext(options.personaChoice.context)
+              : undefined,
         };
       }
 
@@ -1758,13 +1779,32 @@ function reactToMessage(
       //
       // Only thumbs are re-routed. Every other emoji stays an ordinary Signal
       // reaction, and a reaction on a non-persona message is untouched.
-      const routed = await maybeSendPersonaRateForReaction({
+      const outcome = await maybeSendPersonaRateForReaction({
         messageId,
         emoji,
         remove,
       });
-      if (routed) {
-        dispatch(noopAction('reactToMessage'));
+      if (outcome.handled) {
+        // A rating is deliberately invisible — it is a proof-carrying record, not a
+        // reaction, and rendering it would attach the rater's real account to a
+        // pseudonymous act. So the toast IS the feedback; without it the gesture does
+        // nothing observable and users reasonably conclude it is broken.
+        let payload: AnyToast;
+        if (outcome.refusedEmoji) {
+          payload = { toastType: ToastType.PersonaReactionBlocked };
+        } else if (outcome.refusedSelf) {
+          payload = { toastType: ToastType.PersonaSelfRateBlocked };
+        } else if (outcome.sent) {
+          payload = {
+            toastType: ToastType.PersonaRated,
+            parameters: { delta: outcome.delta },
+          };
+        } else {
+          // Refused self-rating also lands here; ReactionFailed is the honest answer
+          // either way, since no record went out.
+          payload = { toastType: ToastType.ReactionFailed };
+        }
+        dispatch({ type: SHOW_TOAST, payload });
         return;
       }
 

@@ -8,6 +8,7 @@ import { createLogger } from '../logging/log.std.ts';
 import { ingestRecordForTimeline } from '../services/personasEngine.preload.ts';
 import {
   decodePostBadge,
+  decodePostContextName,
   decodeAuthorshipClaim,
 } from '../services/personasCarriage.std.ts';
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
@@ -661,6 +662,7 @@ export async function handleDataMessage(
           // as sent, with no validation beyond "is a string": validating it would imply
           // it means something. The chip that renders it says so.
           personaBadge: decodePostBadge(initialMessage.body),
+          personaContextName: decodePostContextName(initialMessage.body),
         });
         trackPersonaPost(personasRecord.eh, message.id);
       }

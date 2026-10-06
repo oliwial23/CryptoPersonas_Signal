@@ -999,6 +999,9 @@ const getPropsForMessage = (
     canEndPoll: canEndPoll(message) && !isGroupTerminated,
     canForward: canForward(message),
     canPinMessage: canPinMessage(conversation, message),
+    // Personas demo: gate the revocation-poll action on Signal's GroupV2 admin role.
+    // A UI gate only — see the note at the action site in TimelineMessage.
+    canOpenPersonaBanPoll: Boolean(conversation.areWeAdmin),
     canReact: canReact(message, ourConversationId, conversationSelector),
     canReply: canReply(message, ourConversationId, conversationSelector),
     canRetry: hasErrors(message),
@@ -1022,6 +1025,7 @@ const getPropsForMessage = (
     personaEh: message.personaEh,
     personaAnonymous: message.personaAnonymous,
     personaBadge: message.personaBadge,
+    personaContextName: message.personaContextName,
     personaAuthorship: message.personaAuthorship,
     // A ZK poll renders from its descriptor plus the engine's own status line. The
     // status line is read live rather than cached on the message so a tally that moves

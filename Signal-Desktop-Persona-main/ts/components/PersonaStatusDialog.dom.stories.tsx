@@ -15,6 +15,7 @@ export default {
 } satisfies Meta<typeof PersonaStatusDialog>;
 
 const onClose = action('onClose');
+const onScanNow = action('onScanNow');
 
 const healthyStatus: PersonaStatusForUI = {
   enabled: true,
@@ -30,18 +31,14 @@ const healthyStatus: PersonaStatusForUI = {
   polls: ['Should we meet weekly or biweekly? — 3 votes'],
   recordCount: 128,
   reputation: 7,
-  proof: {
-    state: 'completed',
-    operation: 'post',
-    completedAt: Date.now(),
-  },
   isSignalAdmin: true,
+  autoScan: true,
   stateLost: false,
 };
 
 export function Healthy(): JSX.Element {
   return (
-    <PersonaStatusDialog status={healthyStatus} i18n={i18n} onClose={onClose} />
+    <PersonaStatusDialog status={healthyStatus} i18n={i18n} onClose={onClose} onScanNow={onScanNow} />
   );
 }
 
@@ -62,6 +59,7 @@ export function NotJoinedYet(): JSX.Element {
       }}
       i18n={i18n}
       onClose={onClose}
+      onScanNow={onScanNow}
     />
   );
 }
@@ -72,6 +70,7 @@ export function StateLost(): JSX.Element {
       status={{ ...healthyStatus, stateLost: true }}
       i18n={i18n}
       onClose={onClose}
+      onScanNow={onScanNow}
     />
   );
 }
@@ -82,6 +81,7 @@ export function Disabled(): JSX.Element {
       status={{ ...healthyStatus, enabled: false }}
       i18n={i18n}
       onClose={onClose}
+      onScanNow={onScanNow}
     />
   );
 }

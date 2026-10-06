@@ -38,13 +38,8 @@ export type PersonaStatusForUI = {
   polls: ReadonlyArray<string>;
   recordCount: number;
   reputation?: number;
-  proof: {
-    state: 'idle' | 'running' | 'completed' | 'failed';
-    operation?: string;
-    completedAt?: number;
-    error?: string;
-  };
   isSignalAdmin: boolean;
+  autoScan: boolean;
   stateLost: boolean;
 };
 
@@ -52,6 +47,8 @@ export type PersonaStatusDialogProps = {
   status: PersonaStatusForUI | undefined;
   i18n: LocalizerType;
   onClose: () => void;
+  /** Emit a scan immediately. See the note on the footer action. */
+  onScanNow: () => void;
 };
 
 function Row({
@@ -90,6 +87,7 @@ export function PersonaStatusDialog({
   status,
   i18n,
   onClose,
+  onScanNow,
 }: PersonaStatusDialogProps): JSX.Element {
   return (
     <AxoDialog.Root open onOpenChange={onClose}>
@@ -105,26 +103,21 @@ export function PersonaStatusDialog({
               PERSONAS_AUTO_REGISTER or PERSONAS_KEYS_DIR set.
             </div>
           ) : (
-            <div className={tw('divide-border-primary divide-y')}>
+            <div className={tw('divide-y divide-border-primary')}>
               {status.stateLost && (
                 <div
                   className={tw(
-                    'bg-fill-secondary mb-2 rounded-lg p-3 type-body-medium'
+                    'mb-2 rounded-lg bg-fill-secondary p-3 type-body-medium'
                   )}
                 >
-                  <div
-                    className={tw(
-                      'mb-1 flex items-center gap-1.5 font-semibold'
-                    )}
-                  >
+                  <div className={tw('mb-1 flex items-center gap-1.5 font-semibold')}>
                     <AxoSymbol.InlineGlyph symbol="x-circle" label={null} />
                     Protocol state was lost
                   </div>
-                  This conversation shows persona messages, but the replica
-                  holds no records — so the app was restarted. The bulletin is
-                  memory-only and does not survive a restart, while the chat
-                  history does. Tallies read as zero and bans cannot settle
-                  until the group is re-established.
+                  This conversation shows persona messages, but the replica holds no
+                  records — so the app was restarted. The bulletin is memory-only and
+                  does not survive a restart, while the chat history does. Tallies read
+                  as zero and bans cannot settle until the group is re-established.
                 </div>
               )}
               <Row
@@ -159,9 +152,7 @@ export function PersonaStatusDialog({
               <Row
                 label="Replica fingerprint"
                 value={
-                  status.fingerprint
-                    ? `${status.fingerprint.slice(0, 16)}…`
-                    : '—'
+                  status.fingerprint ? `${status.fingerprint.slice(0, 16)}…` : '—'
                 }
                 detail="Must be identical on every instance. If they differ, the replicas have diverged and tallies, flags and bans are unreliable."
               />
@@ -177,21 +168,17 @@ export function PersonaStatusDialog({
                 }
               />
               <Row
-                label="Last ZK proof"
-                ok={status.proof.state === 'completed'}
-                value={
-                  status.proof.state === 'idle'
-                    ? 'None yet'
-                    : status.proof.state === 'running'
-                      ? 'Running'
-                      : status.proof.state === 'completed'
-                        ? 'Completed'
-                        : 'Failed'
-                }
+                label="Scanning"
+                value={status.autoScan ? 'On send + daily' : 'On send only'}
                 detail={
-                  status.proof.operation == null
-                    ? 'Proof operations are serialized per instance.'
-                    : `${status.proof.operation} proof${status.proof.completedAt == null ? '' : ` at ${new Date(status.proof.completedAt).toLocaleTimeString()}`}${status.proof.error == null ? '' : `: ${status.proof.error}`}`
+                  'A scan is attempted before every persona message, which is what keeps ' +
+                  'you under the 200-interaction limit the post predicate enforces \u2014 ' +
+                  'past it, your proofs stop being satisfiable and you cannot post at all. ' +
+                  'Most attempts do nothing, because the engine refuses a scan with no ' +
+                  'callbacks outstanding.' +
+                  (status.autoScan
+                    ? ' A 24-hour catch-up also runs, for a client left open without sending.'
+                    : ' The 24-hour catch-up is disabled (PERSONAS_AUTO_SCAN=off), so an idle client will not absorb a revocation until it sends something.')
                 }
               />
               <Row
@@ -199,8 +186,8 @@ export function PersonaStatusDialog({
                 value={status.isSignalAdmin ? 'Yes' : 'No'}
                 detail={
                   status.isSignalAdmin
-                    ? 'You can create topics. Note this gates only ATTRIBUTABLE actions — anonymous ones (ban polls, ballots) are not gated, because checking who performed them would de-anonymise them.'
-                    : 'Topic creation is limited to group admins. This is a client-side convenience, not enforcement — persona records are ordinary message bodies the server never inspects.'
+                    ? 'You can create contexts and open revocation polls. The poll itself still rides the shared phantom, so nobody learns you opened it \u2014 but if only admins ever open one, an observer who knows the admin set can infer it. A client-side gate, not enforcement.'
+                    : 'Creating a context and opening a revocation poll are limited to group admins. A client-side gate, not enforcement \u2014 persona records are ordinary message bodies the server never inspects, so a modified client ignores it.'
                 }
               />
               <Row
@@ -209,7 +196,7 @@ export function PersonaStatusDialog({
                 detail="Joins, posts, polls, ballots and scans this replica has folded in."
               />
               <Row
-                label="Topics"
+                label="Contexts"
                 value={String(status.topics.length)}
                 detail={
                   status.topics.length > 0
@@ -222,8 +209,8 @@ export function PersonaStatusDialog({
                   Known limitations
                 </div>
                 <div className={tw('type-body-small text-secondary')}>
-                  Real gaps in this build, not boilerplate — worth knowing
-                  before describing what the demo proves.
+                  Real gaps in this build, not boilerplate — worth knowing before
+                  describing what the demo proves.
                 </div>
                 <ul className={tw('mt-2 flex flex-col gap-2')}>
                   {KNOWN_LIMITATIONS.map(limitation => (
@@ -255,6 +242,13 @@ export function PersonaStatusDialog({
         </AxoDialog.Body>
         <AxoDialog.Footer>
           <AxoDialog.Actions>
+            {/* Moved here out of the composer menu: scanning is automatic now, so this
+                is a demo affordance rather than something a user needs. Kept because it
+                is still the only way to make a settled ban bite on a keystroke in front
+                of an audience. */}
+            <AxoDialog.Action variant="strong-secondary" onClick={onScanNow}>
+              Scan now
+            </AxoDialog.Action>
             <AxoDialog.Action variant="strong-primary" onClick={onClose}>
               {i18n('icu:ok')}
             </AxoDialog.Action>

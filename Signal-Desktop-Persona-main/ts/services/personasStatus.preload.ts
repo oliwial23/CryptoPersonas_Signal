@@ -28,10 +28,7 @@ import {
 import { hasJoinedPersonaGroup } from './personasMembership.preload.ts';
 import { getSealedSenderReadiness } from './personasSealedSender.preload.ts';
 import { listTopics } from './personasTopics.preload.ts';
-import {
-  getPersonaProofStatus,
-  type PersonaProofStatus,
-} from './personasProofLock.preload.ts';
+import { isAutoScanEnabled } from './personasFlags.preload.ts';
 
 export { KNOWN_LIMITATIONS } from './personasLimitations.std.ts';
 
@@ -63,7 +60,6 @@ export type PersonaStatus = {
    * addon built before `getReputation` existed).
    */
   reputation?: number;
-  proof: PersonaProofStatus;
   /**
    * Whether we hold Signal's GroupV2 ADMINISTRATOR role in this conversation.
    *
@@ -75,6 +71,13 @@ export type PersonaStatus = {
    * checking who performed them would de-anonymise them.
    */
   isSignalAdmin: boolean;
+  /**
+   * Whether scans are emitted automatically. Off by default: a scan is a synchronous
+   * Groth16 proof and a wire record, so it runs on demand rather than on a timer. With
+   * it off a revoked member's own object is only marked banned once they scan, so this
+   * is worth being able to see.
+   */
+  autoScan: boolean;
   /**
    * True when the timeline shows persona messages the replica has never heard of —
    * i.e. protocol state was lost. The bulletin lives only in memory, so a restart
@@ -104,8 +107,8 @@ export function getPersonaStatus(
     topics: listTopics(),
     polls: [],
     recordCount: 0,
-    proof: getPersonaProofStatus(),
     isSignalAdmin: conversation?.areWeAdmin() ?? false,
+    autoScan: isAutoScanEnabled(),
     stateLost: false,
   };
 
@@ -125,12 +128,10 @@ export function getPersonaStatus(
       // Guarded: a Desktop build can outrun the native addon, and an older .node
       // without this method must degrade to "unavailable" rather than throwing
       // inside the status panel.
-      if (typeof engine.getReputation === 'function') {
-        const reputation = Number(engine.getReputation());
-        if (Number.isSafeInteger(reputation)) {
-          status.reputation = reputation;
-        }
-      }
+      status.reputation =
+        typeof engine.getReputation === 'function'
+          ? engine.getReputation()
+          : undefined;
       // The chat outlives the replica, so a populated timeline over an empty replica
       // is the signature of a restart having dropped the protocol state.
       status.stateLost = uiPersonaMessageCount > 0 && status.recordCount === 0;

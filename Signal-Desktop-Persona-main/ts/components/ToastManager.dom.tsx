@@ -797,6 +797,39 @@ function renderToast({
     );
   }
 
+  if (toastType === ToastType.PersonaRated) {
+    // Literal English, like the rest of the persona UI: the demo strings are not in
+    // _locales, and adding keys there means touching generated translation files.
+    //
+    // Worded to say what actually happened — a rating is a proof-carrying record, not a
+    // reaction — because the absence of a visible reaction is the thing being explained.
+    return (
+      <Toast onClose={hideToast}>
+        {toast.parameters.delta > 0
+          ? 'Rated +1 as a persona (sent as a ZK record, not a reaction)'
+          : 'Rated \u22121 as a persona (sent as a ZK record, not a reaction)'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaReactionBlocked) {
+    return (
+      <Toast onClose={hideToast}>
+        {'Only \ud83d\udc4d / \ud83d\udc4e work on persona posts. Other reactions ' +
+          'would be sent from your real account and link you to this post.'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaSelfRateBlocked) {
+    return (
+      <Toast onClose={hideToast}>
+        {'You cannot rate your own persona post \u2014 the protocol cannot detect ' +
+          'self-rating, so it is declined here.'}
+      </Toast>
+    );
+  }
+
   if (toastType === ToastType.ReactionFailed) {
     return <Toast onClose={hideToast}>{i18n('icu:Reactions--error')}</Toast>;
   }

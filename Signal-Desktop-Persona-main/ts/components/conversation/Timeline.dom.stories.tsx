@@ -39,6 +39,7 @@ function mockMessageTimelineItem(
       id,
       author: getDefaultConversation({}),
       canCopy: true,
+      canOpenPersonaBanPoll: false,
       canDeleteForEveryone: false,
       canDownload: true,
       canEditMessage: true,

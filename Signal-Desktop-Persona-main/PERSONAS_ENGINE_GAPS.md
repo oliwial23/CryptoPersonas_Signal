@@ -116,16 +116,18 @@ in `circuits.rs`. A persona minted for one topic can be replayed in another.
 
 ---
 
-## Fixed since this document was written
+## Enforced, but more weakly than the paper states
 
-**`MAX_PSEUDO` was an inequality, not a range check — now fixed (`CryptoPersonas_Signal`
-FINDINGS.md F8).** The circuit used to check `i != 4` (excludes exactly 4, accepts
-`i = 5` and anything else off the intended range) instead of `i < 4`. `circuits.rs`'s
-`standard_pseudo_rate_predicate` now enumerates `i ∈ {0, 1, 2, 3}` explicitly, matching the
-paper's `assert(i < k)`. Desktop's own constant and slot offering (`0..3`) were already
-correct, so this required no Desktop-side change — the circuit now enforces what Desktop
-always assumed. Needs a fresh proving/verifying key (constraint count changed); the
-content-addressed key cache regenerates it automatically on next boot.
+**`MAX_PSEUDO` is 4, and the bound is an inequality, not a range check.**
+
+```rust
+pub const MAX_PSEUDO: usize = 4;                                   // circuits.rs:45
+let x9 = i.is_neq(&FpVar::Constant(F::from(MAX_PSEUDO as u64)))?;  // circuits.rs:484
+```
+
+The paper says `assert(i < k)`. The circuit says `i != 4`, which excludes exactly 4 and
+would happily accept `i = 5`. Desktop only ever offers slots `0..3`, so a well-behaved
+client is fine, but the cap is not what it looks like.
 
 ---
 

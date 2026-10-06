@@ -666,7 +666,8 @@ async function getMessageSendData({
     // byte-identical output to the old string concatenation.
     body = encodePostBody(
       Buffer.from(personaRecordBase64, 'base64'),
-      message.get('personaBadge')
+      message.get('personaBadge'),
+      message.get('personaContextName')
     );
   } else if (personaCarriageBody) {
     body = personaCarriageBody;
