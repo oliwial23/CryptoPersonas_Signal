@@ -128,7 +128,7 @@ import type { MemberLabelType } from '../../types/GroupMemberLabels.std.ts';
 import type { ContactModalStateType } from '../../types/globalModals.std.ts';
 import { tw } from '../../axo/tw.dom.tsx';
 import { PersonaBadgeChip } from './PersonaBadgeChip.dom.tsx';
-import { PersonaContextChip } from './PersonaContextChip.dom.tsx';
+import { PersonaContextBar } from './PersonaContextBar.dom.tsx';
 import { PersonaAuthorshipMessage } from './PersonaAuthorshipMessage.dom.tsx';
 import { Emoji } from '../../axo/emoji.std.ts';
 import { AxoButton } from '../../axo/AxoButton.dom.tsx';
@@ -1179,7 +1179,6 @@ export class Message extends PureComponent<Props, State> {
       persona,
       personaAnonymous,
       personaBadge,
-      personaContextName,
       quote,
     } = this.props;
 
@@ -1209,11 +1208,23 @@ export class Message extends PureComponent<Props, State> {
           }
           module={moduleName}
         />
-        {personaContextName ? (
-          <PersonaContextChip contextName={personaContextName} />
-        ) : null}
         {personaBadge ? <PersonaBadgeChip badge={personaBadge} /> : null}
       </div>
+    );
+  }
+
+  // Personas demo: the context (thread) this message belongs to, drawn like a quote.
+  // See PersonaContextBar for why it borrows the quote's shape rather than being one.
+  #renderPersonaContextBar(): ReactNode {
+    const { personaContextName, direction } = this.props;
+    if (!personaContextName) {
+      return null;
+    }
+    return (
+      <PersonaContextBar
+        contextName={personaContextName}
+        direction={direction}
+      />
     );
   }
 
@@ -3209,6 +3220,7 @@ export class Message extends PureComponent<Props, State> {
 
     return (
       <>
+        {this.#renderPersonaContextBar()}
         {this.renderQuote()}
         {this.renderStoryReplyContext()}
         {this.renderAttachment()}

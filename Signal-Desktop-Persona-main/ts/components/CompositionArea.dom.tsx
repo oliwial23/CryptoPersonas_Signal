@@ -195,6 +195,8 @@ export type OwnProps = Readonly<{
       voiceNoteAttachment?: InMemoryAttachmentDraftType;
       // Personas demo: post this message as a persona (routed through the engine).
       personaChoice?: PersonaChoice;
+      /** The context (thread) selected in the composer, for display on the message. */
+      personaContextName?: string;
     }
   ) => unknown;
   sendPoll: (
@@ -565,6 +567,13 @@ export const CompositionArea = memo(function CompositionArea({
           timestamp,
           isViewOnce,
           personaChoice: personaValueToChoice(personaValue, personaTopicContext),
+          // The selected CONTEXT travels on every persona send, not just a
+          // rate-limited one. Context is a conversational thread in the UI — the
+          // thing a reader follows — whereas in the protocol it only binds
+          // rate-limited personas. Deriving the label from the persona kind meant
+          // picking a context and then posting anonymously produced an unlabelled
+          // message, which is not what anyone means by "post in this context".
+          personaContextName: personaTopic,
         });
       }
       setLarge(false);
@@ -572,6 +581,7 @@ export const CompositionArea = memo(function CompositionArea({
       return true;
     },
     [
+      personaTopic,
       conversationId,
       canSend,
       draftAttachments,
@@ -1077,7 +1087,7 @@ export const CompositionArea = memo(function CompositionArea({
               petname is only known once it has posted — the engine reveals it on
               emit, there is no way to ask for it in advance. */}
           <AxoDropdownMenu.Label>
-            Pseudonyms \u00b7 unlimited, no context
+            Pseudonyms · unlimited, no context
           </AxoDropdownMenu.Label>
           <AxoDropdownMenu.RadioGroup
             value={personaValue}
@@ -1090,7 +1100,7 @@ export const CompositionArea = memo(function CompositionArea({
               >
                 {pseudonym.petname != null
                   ? `~${pseudonym.petname}`
-                  : `Pseudonym ${pseudonym.index} \u00b7 unused`}
+                  : `Pseudonym ${pseudonym.index} · unused`}
               </AxoDropdownMenu.RadioItem>
             ))}
           </AxoDropdownMenu.RadioGroup>
@@ -1111,8 +1121,8 @@ export const CompositionArea = memo(function CompositionArea({
               two kinds are otherwise indistinguishable in a menu. */}
           <AxoDropdownMenu.Label>
             {personaTopic != null
-              ? `Rate-limited \u00b7 max ${MAX_PSEUDO} in \u201c${personaTopic}\u201d`
-              : `Rate-limited \u00b7 max ${MAX_PSEUDO} per context \u2014 pick a context below`}
+              ? `Rate-limited · max ${MAX_PSEUDO} in “${personaTopic}”`
+              : `Rate-limited · max ${MAX_PSEUDO} per context — pick a context below`}
           </AxoDropdownMenu.Label>
           <AxoDropdownMenu.RadioGroup
             value={personaValue}
@@ -1126,7 +1136,7 @@ export const CompositionArea = memo(function CompositionArea({
                 disabled={personaTopicContext == null}
               >
                 {personaTopic != null
-                  ? `#${index + 1} in \u201c${personaTopic}\u201d`
+                  ? `#${index + 1} in “${personaTopic}”`
                   : `#${index + 1}`}
               </AxoDropdownMenu.RadioItem>
             ))}
@@ -1160,7 +1170,7 @@ export const CompositionArea = memo(function CompositionArea({
               setIsTopicDialogOpen(true);
             }}
           >
-            {areWeAdmin ? 'New context\u2026' : 'New context\u2026 (admins only)'}
+            {areWeAdmin ? 'New context…' : 'New context… (admins only)'}
           </AxoDropdownMenu.Item>
 
           <AxoDropdownMenu.Separator />

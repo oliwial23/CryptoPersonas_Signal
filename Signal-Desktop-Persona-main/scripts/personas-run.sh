@@ -146,6 +146,70 @@ if [[ "$RESET" == "1" ]]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Pre-flight: is there enough memory to launch another Electron instance?
+#
+# A Signal instance needs roughly 1 GB across its main/renderer/GPU/utility
+# processes, plus this demo holds a ~51 MB proving-key set resident per instance. When
+# the machine is short, macOS's jetsam kills the new RENDERER and Electron reports only
+# "Render process is gone / Exit Code: 9" — a SIGKILL with no cause attached, no stack,
+# and no crash report. That message has had five unrelated root causes on this project,
+# so it is worth almost nothing as a diagnostic and has cost days.
+#
+# Checking here turns that into an immediate, named answer BEFORE a 200-line boot log.
+# Override with PERSONAS_SKIP_MEM_CHECK=1 if you want to try anyway.
+# ---------------------------------------------------------------------------
+if [[ "${PERSONAS_SKIP_MEM_CHECK:-}" != "1" ]] && command -v vm_stat >/dev/null 2>&1; then
+  mem_report="$(python3 - <<'PYMEM' 2>/dev/null || true
+import re, subprocess
+vm = subprocess.check_output(["vm_stat"], text=True)
+page = int(re.search(r"page size of (\d+)", vm).group(1))
+def pages(label):
+    m = re.search(rf"{label}:\s+(\d+)", vm)
+    return int(m.group(1)) if m else 0
+free_gb = (pages("Pages free") + pages("Pages speculative")) * page / 1024**3
+swap = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
+m = re.search(r"total = ([\d.]+)M.*used = ([\d.]+)M", swap)
+total, used = (float(m.group(1)), float(m.group(2))) if m else (0.0, 0.0)
+pct = (100 * used / total) if total else 0.0
+# Tight = under ~1.2 GB free, or swap over 80% full. Either alone is enough to get a
+# fresh renderer killed.
+tight = free_gb < 1.2 or pct > 80
+print(f"{free_gb:.2f}|{used/1024:.1f}|{total/1024:.1f}|{pct:.0f}|{int(tight)}")
+PYMEM
+)"
+  if [[ -n "$mem_report" ]]; then
+    IFS='|' read -r MEM_FREE SWAP_USED SWAP_TOTAL SWAP_PCT MEM_TIGHT <<< "$mem_report"
+    if [[ "${MEM_TIGHT:-0}" == "1" ]]; then
+      cat >&2 <<EOF
+
+!! NOT ENOUGH MEMORY to safely launch another Signal instance.
+
+   free RAM   ${MEM_FREE} GB
+   swap       ${SWAP_USED} GB used of ${SWAP_TOTAL} GB (${SWAP_PCT}% full)
+
+   An instance needs ~1 GB. Launching now will most likely end with
+   "Render process is gone / Exit Code: 9" — macOS killing the new renderer.
+   That is not a bug in this repo and no code change fixes it.
+
+   Biggest wins, usually:
+     * quit VS Code (several hundred MB per renderer, plus any language-server JVMs)
+     * quit other Electron apps and browsers
+     * close any VM / container runtime you are not using
+     * run fewer instances: the demo works with two
+
+   See what is actually holding memory:
+     ps -Ao rss,pid,comm -m | head -20
+
+   To launch anyway:  PERSONAS_SKIP_MEM_CHECK=1 $0 $INSTANCE${RESET:+ --reset}
+
+EOF
+      exit 1
+    fi
+    echo "memory      ${MEM_FREE} GB free, swap ${SWAP_PCT}% full"
+  fi
+fi
+
 export NODE_ENV=development
 export NODE_APP_INSTANCE="$INSTANCE"
 export PERSONAS_AUTO_REGISTER="$NUMBER"

@@ -405,4 +405,56 @@ impl Engine {
     pub fn current_barrier(&self) -> f64 {
         self.inner.replica().current_barrier() as f64
     }
+
+    // ==================================================================
+    // BISECT STAGE 1 of 4 — see PERSONAS_ZK_WORKPLAN.md step 2.
+    //
+    // An earlier `get_reputation` compiled cleanly and then SIGKILLed the Electron
+    // render process (exit code 9, no catchable error). Rebuilding from unmodified
+    // upstream Rust is stable, so the fault is somewhere in that ~15-line change —
+    // but it was never narrowed, and authorship (~60 lines) and badges (several
+    // hundred) are the same shape. So before building either, find out which LAYER
+    // breaks, by adding one capability at a time:
+    //
+    //   STAGE 1 (this)  two methods that touch no data at all.
+    //                   Crash  => adding ANY napi method to this crate breaks the
+    //                             addon. Nothing else should be attempted. Suspect
+    //                             napi-derive/codegen, the Electron ABI, or the
+    //                             build itself.
+    //                   Stable => napi codegen and f64/Option marshalling are fine.
+    //                             Go to stage 2.
+    //
+    //   STAGE 2  `self.inner.member().map(|_| 0.0)`  — borrowing the Member.
+    //            Crash => the fault is in reaching into `inner`, not in arithmetic.
+    //
+    //   STAGE 3  return a hardcoded field element through the real conversion, e.g.
+    //            `field_to_f64(&F::from(7u64))` — the arithmetic alone.
+    //            Crash => `field_to_f64` is the culprit (it was my code: it does
+    //            `into_bigint().to_bytes_le()` and a negation `-*value`).
+    //
+    //   STAGE 4  the real thing: `member().map(|m| field_to_f64(&m.user.data.reputation))`.
+    //            Crash here, with 1-3 stable, means the specific field access is at
+    //            fault.
+    //
+    // Rebuild and run between EVERY stage. One variable at a time is the only thing
+    // that has produced a reliable answer on this bug so far.
+    //
+    // Capture the kill reason while it reproduces — this was never obtained:
+    //   log stream --predicate 'eventMessage CONTAINS "Signal"' --info
+    //
+    // DELETE this whole block once the answer is known.
+
+    /// Bisect probe: the simplest possible added method. Returns a constant.
+    #[napi]
+    pub fn bisect_ping(&self) -> f64 {
+        1.0
+    }
+
+    /// Bisect probe: same, but through `Option<f64>` — the return type the real
+    /// `get_reputation` used, so this separates "a new method" from "Option
+    /// marshalling".
+    #[napi]
+    pub fn get_reputation(&self) -> Option<f64> {
+        Some(0.0)
+    }
 }

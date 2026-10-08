@@ -825,6 +825,8 @@ function sendMultiMediaMessage(
     // Personas demo: when set, this message is posted as a persona — routed
     // through the ZK engine and sent as a record (see composePersonaPost).
     personaChoice?: PersonaChoice;
+    /** The context (thread) selected in the composer, for display on the message. */
+    personaContextName?: string;
   }
 ): ThunkAction<
   void,
@@ -955,10 +957,13 @@ function sendMultiMediaMessage(
           // Only a RATE-LIMITED persona has a context; an unlimited pseudonym and an
           // anonymous post deliberately have none, and the absence of the chip is what
           // distinguishes them in the timeline.
+          // Whatever context the composer had selected, or the rate-limited
+          // persona's own context as a fallback when the UI did not supply one.
           personaContextName:
-            options.personaChoice.kind === 'rate'
+            options.personaContextName ??
+            (options.personaChoice.kind === 'rate'
               ? nameForContext(options.personaChoice.context)
-              : undefined,
+              : undefined),
         };
       }
 

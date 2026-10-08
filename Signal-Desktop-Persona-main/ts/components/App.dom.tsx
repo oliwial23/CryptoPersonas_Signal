@@ -107,7 +107,11 @@ export function App({
     <div className="App">
       {/* Personas demo: which account is this window? Renders nothing outside the demo. */}
       <PersonaAccountBanner
-        instance={window.SignalContext.config.appInstance}
+        // Optional chaining deliberately: preconnect.preload.ts reads this as
+        // `config?.serverUrl`, so `config` is not guaranteed to be populated at every
+        // point in renderer startup. An unguarded read here would throw during App's
+        // first render — which blanks the whole window over a cosmetic demo badge.
+        instance={window.SignalContext?.config?.appInstance}
       />
       {contents}
       {renderGlobalModalContainer()}
