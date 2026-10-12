@@ -78,6 +78,16 @@ export type PersonaStatus = {
    * is worth being able to see.
    */
   autoScan: boolean;
+  /** A callback sweep is unfinished. While true, posting/rating/voting are REFUSED. */
+  /**
+   * Banned in THIS group. Undefined while unknown (observer, or an addon without the
+   * binding) so the UI can distinguish "not banned" from "cannot tell" — reporting an
+   * unknown as "No" would be the reassuring-but-wrong answer this panel exists to avoid.
+   */
+  banned?: boolean;
+  scanStuck: boolean;
+  /** Callbacks outstanding mid-sweep; scanning until zero is the way out. */
+  outstandingCallbacks: number;
   /**
    * True when the timeline shows persona messages the replica has never heard of —
    * i.e. protocol state was lost. The bulletin lives only in memory, so a restart
@@ -109,6 +119,8 @@ export function getPersonaStatus(
     recordCount: 0,
     isSignalAdmin: conversation?.areWeAdmin() ?? false,
     autoScan: isAutoScanEnabled(),
+    scanStuck: false,
+    outstandingCallbacks: 0,
     stateLost: false,
   };
 
@@ -128,10 +140,62 @@ export function getPersonaStatus(
       // Guarded: a Desktop build can outrun the native addon, and an older .node
       // without this method must degrade to "unavailable" rather than throwing
       // inside the status panel.
-      status.reputation =
-        typeof engine.getReputation === 'function'
-          ? engine.getReputation()
-          : undefined;
+      // Log the RAW value and its type. The status row shows "—" for anything nullish,
+      // which collapses three very different situations into one appearance: the method
+      // is absent from the addon, the method exists and returns null/None, or it returns
+      // a real number that something downstream drops. The shipped .node does export
+      // `getReputation`, so "—" on screen means one of the latter two — and only the
+      // raw value distinguishes them.
+      // An unfinished sweep used to be invisible AND fatal: the callbacks crate
+      // asserts rather than erroring, so the next post aborted the renderer with
+      // nothing in the JS logs. The addon now refuses those calls, so this has to be
+      // SHOWN — a refusal nobody can see is almost as bad as a crash.
+      if (typeof engine.isBanned === 'function') {
+        status.banned = engine.isBanned();
+      }
+
+      if (typeof engine.isScanning === 'function') {
+        status.scanStuck = engine.isScanning();
+        status.outstandingCallbacks =
+          typeof engine.outstandingCallbacks === 'function'
+            ? engine.outstandingCallbacks()
+            : 0;
+        if (status.scanStuck) {
+          log.warn(
+            `personas: callback sweep unfinished (${status.outstandingCallbacks} ` +
+            'outstanding) — posting is refused until it completes'
+          );
+        }
+      }
+
+      // KILL SWITCH, independent of the addon. The status panel polls this every 2s
+      // while open, so if `getReputation` is what kills the renderer, the panel becomes
+      // unusable — and the panel is where every other diagnostic lives. Setting
+      // PERSONAS_SKIP_REPUTATION=1 keeps the panel working while the Rust side is being
+      // bisected, and separates "opening the panel crashes" from "reading reputation
+      // crashes" without a rebuild.
+      if (process.env.PERSONAS_SKIP_REPUTATION === '1') {
+        log.info('personas: getReputation skipped (PERSONAS_SKIP_REPUTATION=1)');
+        status.reputation = undefined;
+      } else if (typeof engine.getReputation === 'function') {
+        let raw: unknown;
+        try {
+          raw = engine.getReputation();
+        } catch (error) {
+          // A throwing read must not take out the whole status panel.
+          log.error(`getPersonaStatus: getReputation threw: ${toLogFormat(error)}`);
+          raw = undefined;
+        }
+        log.info(
+          `personas: getReputation -> ${JSON.stringify(raw) ?? 'undefined'} (typeof ${typeof raw})`
+        );
+        status.reputation = typeof raw === 'number' ? raw : undefined;
+      } else {
+        log.warn(
+          'personas: this .node does not export getReputation; reputation will read "—"'
+        );
+        status.reputation = undefined;
+      }
       // The chat outlives the replica, so a populated timeline over an empty replica
       // is the signature of a restart having dropped the protocol state.
       status.stateLost = uiPersonaMessageCount > 0 && status.recordCount === 0;

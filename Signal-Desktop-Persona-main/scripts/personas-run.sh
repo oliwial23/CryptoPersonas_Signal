@@ -172,9 +172,14 @@ swap = subprocess.check_output(["sysctl", "-n", "vm.swapusage"], text=True)
 m = re.search(r"total = ([\d.]+)M.*used = ([\d.]+)M", swap)
 total, used = (float(m.group(1)), float(m.group(2))) if m else (0.0, 0.0)
 pct = (100 * used / total) if total else 0.0
-# Tight = under ~1.2 GB free, or swap over 80% full. Either alone is enough to get a
-# fresh renderer killed.
-tight = free_gb < 1.2 or pct > 80
+# Tight = under ~1.2 GB free (an instance needs ~1 GB), or actively thrashing: swap
+# nearly full AND little RAM left to absorb the next allocation.
+#
+# A full swap file ALONE means nothing. macOS grows its swap file and never shrinks it,
+# so "used" is a high-water mark from whatever paged out earlier in the session — with
+# 8 GB free, 81% swap is history, not pressure. Blocking on it alone produced a false
+# refusal with plenty of memory available.
+tight = free_gb < 1.2 or (pct > 80 and free_gb < 3.0)
 print(f"{free_gb:.2f}|{used/1024:.1f}|{total/1024:.1f}|{pct:.0f}|{int(tight)}")
 PYMEM
 )"
@@ -231,10 +236,39 @@ The ZK engine will not be constructed. Auto-registration is off too, so this onl
 works on a userData that is ALREADY registered — do not combine with --reset.
 EOF
 else
-  export PERSONAS_ROSTER_DIR="${PERSONAS_ROSTER_DIR:-/tmp/personas-roster}"
+  # DURABLE BY DEFAULT. This used to be /tmp/personas-roster, which macOS purges — and
+  # the roster dir holds the shared PHANTOM BUNDLE whose self-minted trust root is what
+  # lets one instance accept another's anonymous posts. Lose the bundle and each instance
+  # mints its own on next boot; the recipient then rejects the sender's certificate and
+  # DROPS the message, while the sender still renders its own copy. That presents as
+  # "anonymous posts send but never arrive", with no error on the sending side.
+  #
+  # Migrate rather than mint: a bundle still sitting in /tmp is the one the currently
+  # registered accounts were established with, so prefer it over generating a new one.
+  export PERSONAS_ROSTER_DIR="${PERSONAS_ROSTER_DIR:-$HOME/.personas-roster}"
   export PERSONAS_KEYS_DIR="${PERSONAS_KEYS_DIR:-$HOME/.personas-demo-keys}"
 
   mkdir -p "$PERSONAS_ROSTER_DIR" "$PERSONAS_KEYS_DIR"
+
+  LEGACY_ROSTER=/tmp/personas-roster
+  if [ -f "$LEGACY_ROSTER/phantom-bundle.json" ] &&
+     [ ! -f "$PERSONAS_ROSTER_DIR/phantom-bundle.json" ]; then
+    # -n: never clobber. If the durable dir already has a bundle it is authoritative.
+    cp -n "$LEGACY_ROSTER"/* "$PERSONAS_ROSTER_DIR"/ 2>/dev/null || true
+    echo "migrated phantom bundle from $LEGACY_ROSTER -> $PERSONAS_ROSTER_DIR"
+  fi
+
+  # A phantom trust root is read ONCE, at boot. An instance started before the bundle
+  # changed is still validating against the old root, so a partial restart looks like a
+  # fix that does not work. Say so rather than letting it be rediscovered.
+  if pgrep -f "NODE_APP_INSTANCE" >/dev/null 2>&1 ||
+     pgrep -f "Signal-development-" >/dev/null 2>&1; then
+    echo
+    echo "NOTE: another Signal instance is already running. If anonymous posts are not"
+    echo "      arriving, quit ALL instances and start them again — each one reads the"
+    echo "      phantom trust root once at boot, so restarting only one cannot fix a"
+    echo "      mismatch. Diagnose with: ./scripts/personas-phantom-check.sh"
+  fi
 
   cat <<EOF
 Starting personas demo instance: $INSTANCE

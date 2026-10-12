@@ -67,18 +67,54 @@ Reputation *read-back* is a separate problem — see Step 2.
 
 ---
 
-## Step 2 — `get_reputation`: the gate. Do this before any other Rust.
+## Step 2 — `get_reputation`: **DONE. And the exit-9 gate is resolved.**
 
-**Fifteen lines of Rust compiled cleanly and SIGKILLed the render process.** Isolated by
-rebuilding from unmodified upstream Rust, which is stable (`PERSONAS_DEMO.md` §8.0).
-Mechanism unknown; signing and Cargo feature unification were both checked and match the
-working build exactly.
+> **RESOLVED 2026-10-11.** Exit 9 was a **build** problem, not a limit on this layer.
+>
+> Adding `ark-ff` as a direct dependency of `personas-node` — to get `PrimeField` for a
+> field-to-number conversion — produced an addon that killed the Electron renderer **at
+> load**, before `background.html` rendered and before any method in the crate ran. The
+> decisive evidence was a stage-1 build whose body was the byte-identical `Some(0.0)`
+> stub that had always been stable: it crashed the same way. That isolates the fault to
+> the dependency graph, where `Cargo.lock` showed exactly one new edge (`+ "ark-ff"`).
+> One extra edge changed Cargo's feature unification and the result would not initialise.
+>
+> **Fix:** put the conversion in `personas-core`, which already depends on `ark-ff`, and
+> leave `personas-node`'s dependency graph identical to the known-good one. With that,
+> the real read works:
+>
+> ```rust
+> self.inner.member().map(|m| personas_core::field_to_f64_signed(&m.user.data.reputation))
+> ```
+>
+> **Consequences for the rest of this plan:**
+> * Adding napi methods to `personas-node` is **not** inherently unsafe. Authorship
+>   (~60 lines) and badges are no longer gated on this question.
+> * The rule that matters is narrower and easy to follow: **do not add dependencies to
+>   `personas-node`.** Put anything needing a new crate behind a helper in a crate that
+>   already has it.
+> * A SIGKILL at *startup* means the addon, not your code. A SIGKILL later, under load,
+>   is the separate memory problem (see `personas-run.sh`'s pre-flight check).
+>
+> The four-stage ladder survives as a runtime switch (`PERSONAS_REPUTATION_STAGE`,
+> default 4) for the next bisect of this kind. One build, four behaviours.
 
-Authorship is ~60 lines of the same shape. Badges are several hundred. **If adding a napi
-method to `personas-node` is itself broken, both will fail the same way** — and you will
-be debugging a 300-line change instead of a 15-line one.
+### The trap this stub was hiding
 
-So bisect first. The patch is in `stash@{0}` in the CryptoPersonas working tree.
+The placeholder returned a constant `Some(0.0)`. On a fresh member a *correct*
+implementation also reads zero, so the panel showed a plausible `0` that never moved —
+and there was no way to tell "working, nothing to report" from "not implemented". That is
+exactly the failure mode the status panel exists to prevent, and it is why the panel now
+logs the raw value and type (`personas: getReputation -> 2 (typeof number)`).
+
+### One correctness detail worth keeping
+
+Reputation is a running sum of +1/-1 ratings, so it can go negative, and field
+arithmetic has no negatives: `-1` is stored as `p - 1`. Reading the limbs naively reports
+a reputation of -1 as roughly `2.7e76`. `field_to_f64_signed` treats values above
+`(p-1)/2` as `v - p`.
+
+### Historical: the bisect procedure (kept for reuse)
 
 ```rust
 // crates/personas-node/src/lib.rs, inside #[napi] impl Engine
@@ -135,9 +171,18 @@ Prove one member owns two pseudonyms without revealing which member.
 | Circuit | `personas-core/src/circuits.rs:341` `authorship_pred` | done |
 | Proving key generated | `personas-bulletin/src/merkle/params.rs:214-225` | done |
 | Key in `ServerKeys` | `personas-core/src/params.rs:83-84` | **already ships** |
+| **Working prover** | `personas-client/src/flows.rs:386` `make_authorship_proof` | **already written** |
+| **Working verifier** | `personas-server/src/routes/post.rs:692` `verify_predicate` | **already written** |
 
 The key is in the ~51 MB bundle every instance already generates, so **no keygen change
 and no regeneration for existing users.** This is what makes authorship the cheap one.
+
+The last two rows matter more than the rest: both halves already exist in the
+**as-a-service** crates. `make_authorship_proof` builds the `PseudonymArgsPair`, calls
+`prove_statement_and_in` with `authorship_pred`, and encodes a `Kind::Predicate` record
+with public inputs **`[context1, claimed1, context2, claimed2]`**. `verify_predicate` is
+ten lines of `Snark::verify` against the verifying key. Neither has to be invented — the
+serverless path needs them ported, not designed.
 
 ### Missing
 
@@ -159,7 +204,97 @@ and no regeneration for existing users.** This is what makes authorship the chea
    disclaimer and calling the real binding. Delete `AUTHORSHIP_DISCLAIMER` in the same
    commit that makes it false — do not soften it.
 
-**Estimate:** ~60 lines of Rust across two crates, plus binding and UI.
+6. **A verify binding, not just a prove one.** `verify_authorship(record) -> Option<[F;4]>`
+   wrapping `Snark::verify` against `authorship_pred_verifying_key`, modelled on
+   `verify_predicate`. Without this the recipient has a proof it cannot check, which is
+   no better than today's unverified claim.
+
+### The trap that makes a "verified" badge a lie
+
+**The proof's public inputs are field elements; the UI shows petnames.** A verified
+authorship proof asserts a statement about `claimed1` and `claimed2` — the pseudonym
+field elements. It says nothing about the two NAMES the bubble happens to display.
+
+So this is not sufficient:
+
+```
+verify(proof) == true   →   render "✓ verified: ~alice-1 = ~alice-2"
+```
+
+A sender could carry a valid proof about two pseudonyms they do own, alongside display
+names belonging to someone else's personas, and the UI would vouch for it. The checkmark
+would be real and the statement false.
+
+The recipient must therefore **derive the displayed names from the proof's own public
+inputs** — map `claimed1`/`claimed2` to petnames the same way a post's petname is
+derived — and render those, ignoring any names carried in the carriage. Equivalently:
+verify, then recompute the labels; never verify and then trust labels.
+
+This is the one place where an incremental "make it verified" change can produce
+something worse than the honest unverified version, because a wrong checkmark is
+believed. It is also why `AUTHORSHIP_DISCLAIMER` must not be deleted until the label
+derivation is in place, not merely when the proof verifies.
+
+**Estimate:** ~60 lines of Rust across two crates, plus the verify binding, the petname
+derivation, and the UI. The proving and verifying logic is a port of existing code; the
+petname binding is the part that needs thought.
+
+---
+
+## Step 3b — Outright admin ban (no poll)
+
+**Correction to an earlier claim in this document.** "The protocol has no unilateral
+ban" was wrong. Banning is not a `Record` variant — it is a **callback invocation**, and
+the serverless replica already performs it. The as-a-service server did:
+
+```rust
+let arg = F::from(BAN_FLAG);
+let called = db.call(cb, arg, FakeSigPrivkey::sk())?;   // handle_send_ban_request
+CStore::verify_call_and_append(&mut db.callback_bul, called.0, called.1, called.2, epoch)?;
+```
+
+The replica's own settlement does the same thing (`replica/mod.rs:862-890`):
+
+```rust
+let arg = if out.banned { F::from(BAN_FLAG) } else { arg_rep(out.clamped_rep()) };
+if invoke(cbs, &out, arg) { /* ... */ }
+if out.banned { derived.flag_author(&author); }   // rendering gate, §9
+```
+
+Proven end to end in `replica/e2e_tests.rs:504-520`: `invoke_into(.., F::from(BAN_FLAG))`
+and then "T's object, having absorbed BAN_FLAG, is now banned."
+
+### So what is actually missing
+
+Only the TRIGGER. `out.banned = true` is set in exactly one place
+(`replica/mod.rs:843`), reachable only from a ban poll that closed `yes > no`.
+
+1. **`Record::Ban { target: Eh, sig }`** — a new variant whose accept rule sets
+   `derived.outstanding.get_mut(&target).banned = true`. Everything downstream is
+   untouched: the next barrier invokes `BAN_FLAG`, the target's next scan absorbs it,
+   `circuits.rs:588/616` sets `banned` in their object, and their post proofs stop being
+   satisfiable. The author's existing posts get flagged by `flag_author` on sight.
+2. **An admin identity in the protocol** — the one real gap. Nothing today distinguishes
+   an admin, so any member could emit `Record::Ban`. Two options:
+   * **`admin_pubkey` in `ReplicaConfig`** plus a signature check in the accept rule.
+     Every replica knows the key, so the rule is deterministic and convergent — which is
+     the hard requirement (§d1). This makes the ban genuinely enforced.
+   * **Client-side gate only** (what the menu item does today). Unenforced: a modified
+     client ignores it.
+3. **The banned user's notification.** Their scan is where they learn, because that is
+   when `banned` flips. Surface it from the scan result, not from the ban record — a
+   banned member may never see the record, but they cannot avoid the scan.
+4. **Composer gate.** With `banned` set, persona sends must be refused *before*
+   attempting a proof, so the user gets the notification rather than an opaque failure.
+   Real-identity sends stay allowed.
+
+**Estimate:** much smaller than previously written here. One record variant, one accept
+rule, one config field and a signature check. No new circuit, no new callback mechanism,
+no change to settlement timing.
+
+**Note on timing, which the UI must not misrepresent:** the ban takes effect at the next
+*barrier* (invocation) and bites at the target's next *scan*. It is not instantaneous,
+so "banned" in the admin's UI means "ban recorded", not "already powerless".
 
 ---
 
@@ -229,8 +364,12 @@ badge is.
 
 1. **Step 0** — confirm the baseline works.
 2. **Step 1** — reaction UX. TypeScript only, zero risk to the addon, immediate payoff.
-3. **Step 2** — bisect `get_reputation`. **Gates all remaining Rust.**
-4. **Step 3** — authorship. Cheapest real ZK; proving key already ships.
+3. ~~**Step 2** — bisect `get_reputation`.~~ **DONE** — exit 9 was the `ark-ff`
+   dependency edge, not this layer. No longer gates anything.
+4. **Step 3** — authorship. **Now the next piece of real work.** Cheapest real ZK: the
+   proving key already ships, and both a reference prover
+   (`personas-client::make_authorship_proof`) and a reference verifier
+   (`personas-server::verify_predicate`) already exist to port.
 5. **Step 4** — badges. Settle the approval authority before writing code.
 6. **Step 5** — persistence first among the rest; it undermines every demo.
 

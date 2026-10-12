@@ -40,6 +40,9 @@ export type PersonaStatusForUI = {
   reputation?: number;
   isSignalAdmin: boolean;
   autoScan: boolean;
+  banned?: boolean;
+  scanStuck: boolean;
+  outstandingCallbacks: number;
   stateLost: boolean;
 };
 
@@ -120,6 +123,39 @@ export function PersonaStatusDialog({
                   as zero and bans cannot settle until the group is re-established.
                 </div>
               )}
+              {status.banned === true && (
+                <div
+                  className={tw(
+                    'mb-2 rounded-lg bg-fill-secondary p-3 type-body-medium'
+                  )}
+                >
+                  <div className={tw('mb-1 flex items-center gap-1.5 font-semibold')}>
+                    <AxoSymbol.InlineGlyph symbol="x-circle" label={null} />
+                    You are banned in this group
+                  </div>
+                  {'A group admin flagged your posts. Anonymous and pseudonymous ' +
+                    'posting are disabled HERE — your proofs for them are no longer ' +
+                    'satisfiable, so the protocol enforces this, not just the app. You ' +
+                    'can still send ordinary messages under your real identity in this ' +
+                    'group, and your persona privileges in other groups are unaffected.'}
+                </div>
+              )}
+              {status.scanStuck && (
+                <div
+                  className={tw(
+                    'mb-2 rounded-lg bg-fill-secondary p-3 type-body-medium'
+                  )}
+                >
+                  <div className={tw('mb-1 flex items-center gap-1.5 font-semibold')}>
+                    <AxoSymbol.InlineGlyph symbol="x-circle" label={null} />
+                    Unfinished scan — posting is blocked
+                  </div>
+                  {`${status.outstandingCallbacks} callback(s) still outstanding. A partly
+                  finished sweep leaves the engine in a state where posting, rating and
+                  voting are refused — before this was detected they aborted the whole
+                  window instead. Press Scan now until this message clears.`}
+                </div>
+              )}
               <Row
                 label="Sealed sender"
                 ok={status.sealedSenderReady}
@@ -163,8 +199,8 @@ export function PersonaStatusDialog({
                 }
                 detail={
                   status.reputation != null
-                    ? 'Moves when others 👍/👎 your persona posts. This is your own score — a member\u2019s reputation lives in their own user object, so nobody can look up anyone else\u2019s.'
-                    : 'Unavailable — this instance has no member yet, or the native addon predates getReputation().'
+                    ? 'Your own score, and only yours — reputation lives inside your zk user object, so nobody can look up anyone else\u2019s. It moves when a SCAN absorbs a 👍/👎 on one of your persona posts, not when the rating is sent: they rate, then you scan. 0 on a new member is correct, not a failure.'
+                    : 'Unavailable — this instance is an observer with no member object. A member with no ratings yet reads 0, not this.'
                 }
               />
               <Row
@@ -188,6 +224,24 @@ export function PersonaStatusDialog({
                   status.isSignalAdmin
                     ? 'You can create contexts and open revocation polls. The poll itself still rides the shared phantom, so nobody learns you opened it \u2014 but if only admins ever open one, an observer who knows the admin set can infer it. A client-side gate, not enforcement.'
                     : 'Creating a context and opening a revocation poll are limited to group admins. A client-side gate, not enforcement \u2014 persona records are ordinary message bodies the server never inspects, so a modified client ignores it.'
+                }
+              />
+              <Row
+                label="Am I banned?"
+                ok={status.banned === false}
+                value={
+                  status.banned == null
+                    ? 'Unknown'
+                    : status.banned
+                      ? 'Yes — personas disabled here'
+                      : 'No'
+                }
+                detail={
+                  status.banned == null
+                    ? 'Cannot tell: this instance has no member object, or the addon predates the isBanned() binding. Shown as Unknown rather than No, because a wrong "No" here is the reassuring answer that hides the problem.'
+                    : status.banned
+                      ? 'Set when your own scan absorbed a BAN callback. It is your object that carries it, which is why only you can read it — and why a ban only takes effect once you scan.'
+                      : 'No ban has been absorbed by any of your scans. A ban cast moments ago may not have settled yet: it is invoked at the next settlement barrier and lands at your next scan.'
                 }
               />
               <Row

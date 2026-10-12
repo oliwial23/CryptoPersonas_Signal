@@ -830,6 +830,20 @@ function renderToast({
     );
   }
 
+  if (toastType === ToastType.PersonaBanned) {
+    // No auto-dismiss timeout is passed, so this stays until dismissed. A ban changes
+    // what the member can do in this group; a toast that vanished after four seconds
+    // would be worse than none, because they would be left with a silently different UI
+    // and no idea why.
+    return (
+      <Toast onClose={hideToast}>
+        {'Your posts were flagged by a group admin. You have lost anonymous and ' +
+          'pseudonymous posting in THIS group and can now only send messages under ' +
+          'your real identity here. Other groups are unaffected.'}
+      </Toast>
+    );
+  }
+
   if (toastType === ToastType.ReactionFailed) {
     return <Toast onClose={hideToast}>{i18n('icu:Reactions--error')}</Toast>;
   }

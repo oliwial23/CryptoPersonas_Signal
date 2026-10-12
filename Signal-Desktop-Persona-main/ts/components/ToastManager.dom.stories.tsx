@@ -309,6 +309,8 @@ function getToast(toastType: ToastType): AnyToast {
       return { toastType: ToastType.VoiceNoteMustBeTheOnlyAttachment };
     case ToastType.WhoCanFindMeReadOnly:
       return { toastType: ToastType.WhoCanFindMeReadOnly };
+    case ToastType.PersonaBanned:
+      return { toastType: ToastType.PersonaBanned };
     default:
       throw missingCaseError(toastType);
   }

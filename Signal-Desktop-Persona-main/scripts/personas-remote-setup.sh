@@ -11,6 +11,10 @@
 #
 # Usage:
 #   ./scripts/personas-remote-setup.sh --remote signalserver00.umiacs.umd.edu
+#   ./scripts/personas-remote-setup.sh --remote-vpn signalserver00.umiacs.umd.edu
+#       straight to the VM's own TLS proxy on :8443 over the UMD VPN, trusting the
+#       VM's self-signed CA (fetched over ssh). Use this before a public endpoint
+#       exists.
 #   ./scripts/personas-remote-setup.sh --local      # restore the laptop backend config
 #   ./scripts/personas-remote-setup.sh --probe signalserver00.umiacs.umd.edu
 #
@@ -226,7 +230,55 @@ go_local() {
   echo "tls-proxy.sh up, and minio.sh up (all four, or registration will hang)"
 }
 
+# ---------------------------------------------------------------------------
+# VPN mode: talk STRAIGHT to the VM's own TLS proxy on 8443, bypassing any public
+# fronting proxy. For when the VM is on a private address you can route to over the
+# university VPN — the common case before a public endpoint exists.
+#
+# Two differences from --remote that matter:
+#   * the port is explicit (8443); we are not going through a 443 proxy;
+#   * certificateAuthority is REQUIRED, not removed. The VM mints its own self-signed
+#     CA, so the trust store must be replaced with exactly that. (--remote removes it
+#     because a public proxy presents a publicly-trusted certificate.)
+#
+# The CA is fetched over ssh, so this needs ssh access to the VM.
+# ---------------------------------------------------------------------------
+go_remote_vpn() {
+  local host="$1"
+  local user="${2:-$USER}"
+  [[ -f "$CFG" ]] || die "no $CFG - run personas-demo-setup.sh first"
+
+  if [[ -f "$BACKUP" ]]; then
+    echo "note: keeping existing backup at $(basename "$BACKUP")"
+  else
+    cp "$CFG" "$BACKUP" && echo "backed up local config -> $(basename "$BACKUP")"
+  fi
+
+  echo "fetching the VM's CA over ssh ..."
+  local remote_ca='$WORK/repos/CryptoPersonas_Signal/deploy/signal-test-server/.local/tls/ca.crt'
+  local ca
+  ca="$(ssh "$user@$host" "cat $remote_ca" 2>/dev/null)"
+  if [[ "$ca" != *"BEGIN CERTIFICATE"* ]]; then
+    die "could not read ca.crt from $host. Has tls-proxy.sh been run there yet?
+     Expected at: $remote_ca"
+  fi
+
+  CA_PEM="$ca" HOSTNAME_ARG="$host" python3 "$HERE/_write_vpn_config.py" "$CFG"
+
+  echo
+  echo "Requirements for this to work:"
+  echo "  * you must be on the UMD VPN (the VM is on a private address);"
+  echo "  * tls-proxy.sh must run on the VM with the hostname in its certificate:"
+  echo "      PERSONAS_TLS_DNS=$host ./tls-proxy.sh up"
+  echo "    (delete .local/tls first if the cert was minted without it);"
+  echo "  * serverPublicParams / serverTrustRoots must match THAT deployment."
+  echo
+  echo "Then:  pnpm run build:rolldown && ./scripts/personas-run.sh alice --reset"
+  echo "Back:  $0 --local"
+}
+
 case "${1:-}" in
+  --remote-vpn) [[ -n "${2:-}" ]] || die "usage: $0 --remote-vpn <host> [sshuser]"; go_remote_vpn "$2" "${3:-}" ;;
   --remote) [[ -n "${2:-}" ]] || die "usage: $0 --remote <host>"; go_remote "$2" ;;
   --local)  go_local ;;
   --probe)  [[ -n "${2:-}" ]] || die "usage: $0 --probe <host>"; probe "$2" ;;

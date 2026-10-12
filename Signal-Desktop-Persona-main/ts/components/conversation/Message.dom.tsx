@@ -128,7 +128,7 @@ import type { MemberLabelType } from '../../types/GroupMemberLabels.std.ts';
 import type { ContactModalStateType } from '../../types/globalModals.std.ts';
 import { tw } from '../../axo/tw.dom.tsx';
 import { PersonaBadgeChip } from './PersonaBadgeChip.dom.tsx';
-import { PersonaContextBar } from './PersonaContextBar.dom.tsx';
+import { PersonaContextChip } from './PersonaContextChip.dom.tsx';
 import { PersonaAuthorshipMessage } from './PersonaAuthorshipMessage.dom.tsx';
 import { Emoji } from '../../axo/emoji.std.ts';
 import { AxoButton } from '../../axo/AxoButton.dom.tsx';
@@ -282,6 +282,11 @@ export type PropsData = {
   // so the two persona kinds are visually distinguishable at a glance: a context chip
   // means rate-limited, its absence means an unlimited pseudonym or anonymous.
   personaContextName?: string;
+  // Personas demo: whether the adjacent message is in the SAME context, so a run of
+  // messages can be drawn as one chain. Computed in TimelineItem, which is the only
+  // place that can see a message's neighbours.
+  personaContextContinuesAbove?: boolean;
+  personaContextContinuesBelow?: boolean;
   // Personas demo: an UNVERIFIED authorship claim linking two personas. Rendered as a
   // labelled claim, never as a verified fact — see personasAuthorship.preload.ts.
   personaAuthorship?: { first: string; second: string };
@@ -1179,6 +1184,7 @@ export class Message extends PureComponent<Props, State> {
       persona,
       personaAnonymous,
       personaBadge,
+      personaContextName,
       quote,
     } = this.props;
 
@@ -1209,24 +1215,36 @@ export class Message extends PureComponent<Props, State> {
           module={moduleName}
         />
         {personaBadge ? <PersonaBadgeChip badge={personaBadge} /> : null}
+        {/* Personas demo: the context label, on EVERY message in the context rather
+            than once per run. Sits next to the badge because both answer "what is this
+            post claiming about itself?", and is shaped differently so the two are not
+            confusable — see PersonaContextChip. */}
+        {personaContextName ? (
+          <PersonaContextChip contextName={personaContextName} />
+        ) : null}
       </div>
     );
   }
 
-  // Personas demo: the context (thread) this message belongs to, drawn like a quote.
-  // See PersonaContextBar for why it borrows the quote's shape rather than being one.
-  #renderPersonaContextBar(): ReactNode {
-    const { personaContextName, direction } = this.props;
-    if (!personaContextName) {
-      return null;
-    }
-    return (
-      <PersonaContextBar
-        contextName={personaContextName}
-        direction={direction}
-      />
-    );
-  }
+  // REMOVED: the context "chain bar".
+  //
+  // It drew an accent strip at the top of each bubble, carrying the context name on the
+  // first message of a run and a bare 6px spine on the rest. Two problems, and the
+  // second is the one that matters:
+  //
+  //   * the continuation spine was a thin grey horizontal strip with no text, which read
+  //     as a rendering fault rather than as a thread;
+  //   * it was redundant. PersonaContextChip now puts the context name beside the
+  //     persona on EVERY message, which is both what was asked for and strictly more
+  //     informative than a spine the reader has to scroll up to interpret.
+  //
+  // Showing both meant the name appeared twice on the first message of a run and the
+  // squeezed strip appeared alone on the others. The chip is the better of the two, so
+  // the bar goes.
+  //
+  // `personaContextContinuesAbove/Below` are still computed and still passed down (see
+  // areMessagesInSameContext): they cost nothing and they are what a real reply-chain
+  // treatment would be built from, e.g. indenting continuation bubbles.
 
   public renderAttachment(): JSX.Element | null {
     const {
@@ -3220,7 +3238,6 @@ export class Message extends PureComponent<Props, State> {
 
     return (
       <>
-        {this.#renderPersonaContextBar()}
         {this.renderQuote()}
         {this.renderStoryReplyContext()}
         {this.renderAttachment()}

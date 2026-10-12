@@ -9,6 +9,7 @@ import { MINUTE, SECOND } from '../../util/durations/index.std.ts';
 import type { MaybeMessageTimelineItemType } from '../../util/timelineUtil.std.ts';
 import {
   ScrollAnchor,
+  areMessagesInSameContext,
   areMessagesInSameGroup,
   getScrollAnchorBeforeUpdate,
   shouldCurrentMessageHideMetadata,
@@ -18,6 +19,76 @@ import {
 const { times } = lodash;
 
 describe('<Timeline> utilities', () => {
+  // Personas demo. These guard the distinction that makes a context CHAIN different
+  // from a message GROUP: a chain must survive different authors and different
+  // personas, because several personas posting into one context is the whole point.
+  describe('areMessagesInSameContext', () => {
+    const withContext = (
+      personaContextName: string | undefined,
+      extra: Record<string, unknown> = {}
+    ): MaybeMessageTimelineItemType => ({
+      type: 'message' as const,
+      data: {
+        author: { id: uuid() },
+        timestamp: new Date(1998, 10, 21, 12, 34, 56, 123).valueOf(),
+        status: 'delivered' as LastMessageStatus,
+        personaContextName,
+        ...extra,
+      },
+    });
+
+    it('returns false if either item is missing', () => {
+      assert.isFalse(areMessagesInSameContext(undefined, undefined));
+      assert.isFalse(areMessagesInSameContext(withContext('Hiring'), undefined));
+      assert.isFalse(areMessagesInSameContext(undefined, withContext('Hiring')));
+    });
+
+    it('returns false when either message has no context', () => {
+      // The important one: two ordinary messages must NOT chain. `undefined ===
+      // undefined` would otherwise link every non-persona message in the timeline.
+      assert.isFalse(
+        areMessagesInSameContext(withContext(undefined), withContext(undefined))
+      );
+      assert.isFalse(
+        areMessagesInSameContext(withContext('Hiring'), withContext(undefined))
+      );
+      assert.isFalse(
+        areMessagesInSameContext(withContext(undefined), withContext('Hiring'))
+      );
+    });
+
+    it('returns false for different contexts', () => {
+      assert.isFalse(
+        areMessagesInSameContext(withContext('Hiring'), withContext('Budget'))
+      );
+    });
+
+    it('returns false for an empty context name', () => {
+      assert.isFalse(areMessagesInSameContext(withContext(''), withContext('')));
+    });
+
+    it('chains the same context across different authors and personas', () => {
+      // `withContext` mints a fresh author id each call, so these differ already.
+      assert.isTrue(
+        areMessagesInSameContext(
+          withContext('Hiring', { persona: '~alpha' }),
+          withContext('Hiring', { persona: '~beta' })
+        )
+      );
+    });
+
+    it('chains the same context across a long time gap', () => {
+      // Unlike grouping, a context is not time-bounded: it is a persistent grouping,
+      // so a reply a week later still belongs to the thread.
+      const baseTimestamp = new Date(1998, 10, 21, 12, 34, 56, 123).valueOf();
+      const older = withContext('Hiring', { timestamp: baseTimestamp });
+      const newer = withContext('Hiring', {
+        timestamp: baseTimestamp + 7 * 24 * 60 * MINUTE,
+      });
+      assert.isTrue(areMessagesInSameContext(older, newer));
+    });
+  });
+
   describe('areMessagesInSameGroup', () => {
     const defaultNewer: MaybeMessageTimelineItemType = {
       type: 'message' as const,

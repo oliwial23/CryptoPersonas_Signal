@@ -261,6 +261,11 @@ export type PropsType = PropsLocalType &
     | 'shouldCollapseAbove'
     | 'shouldCollapseBelow'
     | 'shouldHideMetadata'
+    // Personas demo: context-chain flags. Computed from a message's neighbours in the
+    // smart TimelineItem, so they arrive as props rather than inside `item.data`, and
+    // must be forwarded explicitly for that reason.
+    | 'personaContextContinuesAbove'
+    | 'personaContextContinuesBelow'
   >;
 
 export const TimelineItem = memo(function TimelineItem({
@@ -295,6 +300,8 @@ export const TimelineItem = memo(function TimelineItem({
   shouldCollapseAbove,
   shouldCollapseBelow,
   shouldHideMetadata,
+  personaContextContinuesAbove,
+  personaContextContinuesBelow,
   shouldRenderDateHeader,
   targetedMessage,
   theme,
@@ -324,6 +331,8 @@ export const TimelineItem = memo(function TimelineItem({
         shouldCollapseAbove={shouldCollapseAbove}
         shouldCollapseBelow={shouldCollapseBelow}
         shouldHideMetadata={shouldHideMetadata}
+        personaContextContinuesAbove={personaContextContinuesAbove}
+        personaContextContinuesBelow={personaContextContinuesBelow}
         containerElementRef={containerElementRef}
         getPreferredBadge={getPreferredBadge}
         platform={platform}

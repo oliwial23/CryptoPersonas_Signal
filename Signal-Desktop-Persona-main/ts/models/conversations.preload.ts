@@ -4231,6 +4231,17 @@ export class ConversationModel {
       personaEh,
       personaAnonymous,
       personaBadge,
+      // Personas demo: WAS MISSING FROM THIS DESTRUCTURE, which silently dropped it.
+      // The composer set it and the duck logged it, but because this function takes an
+      // explicit allow-list of fields, anything absent here never reaches the saved
+      // message. Consequences, all of which looked like unrelated bugs:
+      //   * the sender's own copy had no context, so no chip on their own message;
+      //   * `sendNormalMessage` reads `message.get('personaContextName')` to build the
+      //     wire envelope, got undefined, and sent a post with no context at all;
+      //   * every recipient therefore decoded `context=(none)`.
+      // `personaBadge` was in the list, which is exactly why badges worked and
+      // contexts did not.
+      personaContextName,
       personaAuthorship,
       personaPoll,
       personaRecordBase64,
@@ -4257,6 +4268,10 @@ export class ConversationModel {
       // Applies to anonymous and pseudonymous posts alike — it says something about
       // the AUTHOR's claimed affiliation, not about which persona they used.
       personaBadge?: string;
+      // The context (thread) this post was made under. Display metadata: the context
+      // NUMBER is bound in-circuit for a rate-limited persona, but this human-readable
+      // NAME is carried alongside the record and is not verified.
+      personaContextName?: string;
       // An UNVERIFIED authorship claim; the bubble renders from this while
       // `personaCarriageBody` carries the claim on the wire.
       personaAuthorship?: MessageAttributesType['personaAuthorship'];
@@ -4413,6 +4428,7 @@ export class ConversationModel {
       personaEh,
       personaAnonymous,
       personaBadge,
+      personaContextName,
       personaAuthorship,
       personaPoll,
       personaRecordBase64,

@@ -33,6 +33,7 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 import {
   IdentityKeyPair,
@@ -82,6 +83,20 @@ const BUNDLE_FILE = 'phantom-bundle.json';
 // The advancing shared send chain lives apart from the immutable bundle so
 // senders can load-before / save-after (serial-posting coordination).
 const SEND_STATE_FILE = 'phantom-sendkey-state.b64';
+
+// Which BUNDLE an instance's installed receive chain came from, one marker file per
+// account. See installPhantomReceiveKey for why presence of a record is not enough.
+const receiveMarkerFile = (aci: string): string =>
+  `phantom-receive-${aci}.id`;
+
+// Identifies a bundle. The trust root is minted fresh for each bundle and is public,
+// so hashing it distinguishes bundles without writing key material to disk in a new
+// place. Truncated: this only has to be distinct, not collision-resistant.
+const bundleFingerprint = (mat: PhantomMaterial): string =>
+  createHash('sha256')
+    .update(mat.trustRootPublicBase64)
+    .digest('hex')
+    .slice(0, 16);
 
 export const phantomAddress = (): ProtocolAddress =>
   ProtocolAddress.new(PHANTOM_ACI, PHANTOM_DEVICE_ID);
@@ -313,6 +328,13 @@ export async function ensurePhantomMaterial(): Promise<PhantomMaterial | undefin
     }
 
     material = deserialize(bundle);
+    // Log the DIRECTORY and the bundle FINGERPRINT together. Two instances can both
+    // report "loaded shared bundle" while reading different files — which is exactly
+    // what happens if one was launched before PERSONAS_ROSTER_DIR changed and another
+    // after. Without these two values in the log, that case is invisible.
+    log.info(
+      `ensurePhantomMaterial: using bundle ${bundleFingerprint(material)} from ${dir}`
+    );
     return material;
   } catch (error) {
     loadFailed = true;
@@ -346,20 +368,102 @@ export function loadPhantomSendStore(): { store: MemSenderKeyStore; save: () => 
   }
   const store = new MemSenderKeyStore();
   const statePath = join(dir, SEND_STATE_FILE);
+  const fingerprint = bundleFingerprint(material);
+
+  // The send state is TAGGED with the bundle it belongs to, as `<fingerprint>:<base64>`.
+  //
+  // Same trap as the receive side, in the other direction: `SHARED_DISTRIBUTION_ID` is a
+  // constant, so an advanced chain left over from a previous bundle looks loadable while
+  // carrying the wrong chain key. Senders would then encrypt with a chain no recipient
+  // installed, and every post would be dropped at the receiver with no sending error.
+  //
+  // AN UNTAGGED FILE IS ADOPTED, NOT DISCARDED. It predates tagging; that makes its
+  // provenance unrecorded, not wrong. Discarding it was a real bug:
+  //
+  //   A sender-key RECEIVE chain only ever moves forward. Resetting the SEND chain to
+  //   the bundle's initial record while recipients sat at counter 8 made every post
+  //   replay counters 3, 4, 5 — which libsignal rejects as
+  //   `DuplicatedMessage: message with old counter 8 / 3`. Posts stopped arriving again,
+  //   now for the opposite reason, and only until the chain climbed back past 8.
+  //
+  // The asymmetry was the mistake: the receive side keeps its chain whenever the marker
+  // matches the bundle, so the two sides must agree on what counts as stale. Rewinding
+  // one while keeping the other can only break them.
+  //
+  // So discard ONLY on a tag that is present and DIFFERENT — the one case that really
+  // does mean another bundle. An untagged file is tagged in place on the next save.
+  // INSTRUMENTATION. The chain counter is the only thing that explains a
+  // `DuplicatedMessage: old counter N / M`, and libsignal does not expose the iteration
+  // from JS — so log a short digest of the record plus its length. Two sends that log
+  // the SAME digest encrypted at the same counter, which is what a lost save or a
+  // cross-process race looks like. Without this the failure is only visible from the
+  // recipient's error, which cannot distinguish the two causes.
+  const digest = (bytes: Uint8Array<ArrayBuffer>): string =>
+    `${createHash('sha256').update(bytes).digest('hex').slice(0, 12)}/${bytes.length}b`;
+
   let recordBytes: Uint8Array<ArrayBuffer>;
+  let origin: string;
   try {
-    recordBytes = unb64(readFileSync(statePath, 'utf8'));
-  } catch {
+    const raw = readFileSync(statePath, 'utf8').trim();
+    const separator = raw.indexOf(':');
+    const tag = separator === -1 ? undefined : raw.slice(0, separator);
+    origin = 'state file';
+    if (tag === undefined) {
+      log.info(
+        'loadPhantomSendStore: adopting an untagged send chain (written before ' +
+        `tagging existed); it will be tagged ${fingerprint} on the next save.`
+      );
+      recordBytes = unb64(raw);
+    } else if (tag !== fingerprint) {
+      log.warn(
+        `loadPhantomSendStore: send state belongs to bundle ${tag}, but this bundle ` +
+        `is ${fingerprint}; starting a fresh send chain. Recipients must also reinstall ` +
+        'their receive chains, which the marker check does on their next boot.'
+      );
+      recordBytes = material.initialSendKeyRecord;
+      origin = 'BUNDLE INITIAL (wrong bundle tag)';
+    } else {
+      recordBytes = unb64(raw.slice(separator + 1));
+    }
+  } catch (error) {
+    // Distinguish "no file yet" from "file unreadable". The first is normal on the very
+    // first send; seeing it on EVERY send means saves are not landing, which resets the
+    // chain to counter 0 each time and makes every post a duplicate at the receiver.
+    const missing = (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+    origin = missing
+      ? 'BUNDLE INITIAL (no state file)'
+      : `BUNDLE INITIAL (unreadable: ${toLogFormat(error)})`;
     recordBytes = material.initialSendKeyRecord;
   }
   store.rawSet(phantomAddress(), material.distributionId, recordBytes);
+  log.info(
+    `loadPhantomSendStore: loaded chain ${digest(recordBytes)} from ${origin} [${statePath}]`
+  );
 
   const save = () => {
     const advanced = store.rawGet(phantomAddress(), material!.distributionId);
-    if (advanced) {
+    if (!advanced) {
+      log.error(
+        'loadPhantomSendStore/save: store has no record to persist — the shared chain ' +
+        'will restart from the bundle on the next send, and every post will be a ' +
+        'duplicate at the receiver.'
+      );
+      return;
+    }
+    try {
       const tmp = `${statePath}.${process.pid}.tmp`;
-      writeFileSync(tmp, b64(advanced), 'utf8');
+      writeFileSync(tmp, `${fingerprint}:${b64(advanced)}`, 'utf8');
       renameSync(tmp, statePath);
+      log.info(
+        `loadPhantomSendStore/save: advanced ${digest(recordBytes)} -> ${digest(advanced)}`
+      );
+    } catch (error) {
+      // Previously unguarded: a failed write threw out of the send job, so the post
+      // appeared to fail for an unrelated reason while the chain silently did not move.
+      log.error(
+        `loadPhantomSendStore/save: FAILED to persist the advanced chain to ${statePath}: ` +
+        `${toLogFormat(error)}. The next send will reuse counter ${digest(recordBytes)}.`
+      );
     }
   };
   return { store, save };
@@ -380,8 +484,25 @@ export function buildPhantomIdentityStore(
 // Boot-time install of the shared phantom RECEIVE chain into Desktop's real sender-key
 // store, so an incoming phantom SenderKey message (sealed under PHANTOM_ACI) decrypts
 // via `groupDecrypt`. Mirrors what `#handleSenderKeyDistributionMessage` would do, but
-// for the pre-shared bundle SKDM instead of a wire one. Idempotent: skips if a record
-// already exists so a reboot does not reset the ratcheted receive chain.
+// for the pre-shared bundle SKDM instead of a wire one.
+//
+// IDEMPOTENT, BUT ONLY PER BUNDLE. An earlier version skipped whenever a record already
+// existed, to avoid resetting a ratcheted receive chain on reboot. That is right as long
+// as the bundle never changes — but `SHARED_DISTRIBUTION_ID` is a hardcoded constant, so
+// a NEW bundle reuses the same distribution id while carrying a DIFFERENT chain key.
+// The guard then saw the old record, kept the old chain, and never installed the new one.
+//
+// The symptom was badly misleading: senders encrypted with the new chain, recipients
+// decrypted with the old, and every anonymous and pseudonymous post was dropped at the
+// receiver while still rendering locally for its sender. No error appeared on the sending
+// side, and the certificate check passed, because the trust root was fine.
+//
+// A bundle is reminted whenever the roster dir loses it — which happened routinely while
+// the dir defaulted to /tmp. So this was reachable from an ordinary reboot.
+//
+// Fix: remember WHICH bundle the installed chain came from and reinstall when it differs.
+// A ratcheted chain is still preserved across restarts on the same bundle, which is what
+// the original guard was protecting.
 export async function installPhantomReceiveKey(): Promise<void> {
   const mat = await ensurePhantomMaterial();
   if (!mat) {
@@ -401,6 +522,20 @@ export async function installPhantomReceiveKey(): Promise<void> {
     ourServiceId: ourAci,
     zone: GLOBAL_ZONE,
   });
+  const dir = getRosterDir();
+  const fingerprint = bundleFingerprint(mat);
+  const markerPath = dir ? join(dir, receiveMarkerFile(ourAci)) : undefined;
+  let installedFrom: string | undefined;
+  if (markerPath) {
+    try {
+      installedFrom = readFileSync(markerPath, 'utf8').trim();
+    } catch {
+      // No marker: either a first run, or a record installed before this check
+      // existed. Both are handled below — an unknown provenance is treated as stale.
+      installedFrom = undefined;
+    }
+  }
+
   try {
     await signalProtocolStore.enqueueSenderKeyJob(
       address,
@@ -409,16 +544,62 @@ export async function installPhantomReceiveKey(): Promise<void> {
           phantomAddress(),
           mat.distributionId
         );
-        if (existing) {
-          log.info('installPhantomReceiveKey: already installed; keeping chain');
+        // Keep the ratcheted chain ONLY when it provably came from this bundle.
+        if (existing && installedFrom === fingerprint) {
+          log.info(
+            `installPhantomReceiveKey: already installed from bundle ${fingerprint}; keeping chain`
+          );
           return;
+        }
+        if (existing) {
+          // The loud case. Overwriting a receive chain loses any ratchet position,
+          // which is correct here — the old chain belongs to a bundle nobody is
+          // sending with any more — but it is worth saying out loud, because it is
+          // also the signature of a roster dir that keeps being recreated.
+          log.warn(
+            `installPhantomReceiveKey: existing chain is from bundle ${installedFrom ?? 'unknown'}, ` +
+            `but the current bundle is ${fingerprint}. Reinstalling — a stale chain ` +
+            'silently drops every phantom message at the receiver.'
+          );
+          // DELETE IT FIRST. `processSenderKeyDistributionMessage` ADDS a state to the
+          // SenderKeyRecord; it does not replace the record. The bundle's SKDM has a
+          // fixed chain id, so reprocessing it layers a fresh state alongside the old
+          // ratcheted one under the SAME id, and decryption kept resolving to the stale
+          // state. The reinstall then logged success while changing nothing:
+          //
+          //   receive chain stuck at counter 8, senders restarting from 0, every post
+          //   rejected as `DuplicatedMessage: message with old counter 8 / 0` — and no
+          //   amount of resetting the SEND side could ever satisfy it.
+          //
+          // Removing the record makes the reinstall real.
+          await signalProtocolStore.removeSenderKey(address, mat.distributionId);
+          log.info(
+            'installPhantomReceiveKey: removed the stale sender key record so the ' +
+            'reinstall actually replaces it'
+          );
         }
         await processSenderKeyDistributionMessage(
           phantomAddress(),
           mat.skdm,
           store
         );
-        log.info('installPhantomReceiveKey: installed shared phantom receive key');
+        if (markerPath) {
+          // Written only after a successful install, so a crash mid-install leaves the
+          // marker absent (treated as stale) rather than falsely claiming this bundle.
+          try {
+            const tmp = `${markerPath}.${process.pid}.tmp`;
+            writeFileSync(tmp, fingerprint, 'utf8');
+            renameSync(tmp, markerPath);
+          } catch (error) {
+            // Non-fatal: the next boot reinstalls rather than wrongly keeping a chain.
+            log.warn(
+              `installPhantomReceiveKey: could not record bundle marker: ${toLogFormat(error)}`
+            );
+          }
+        }
+        log.info(
+          `installPhantomReceiveKey: installed shared phantom receive key from bundle ${fingerprint}`
+        );
       },
       GLOBAL_ZONE
     );

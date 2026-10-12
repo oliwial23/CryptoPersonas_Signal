@@ -189,9 +189,79 @@ impl Engine {
             .map_err(|e| napi::Error::from_reason(format!("emit failed: {e}")))
     }
 
+    /// Am I banned? `None` for an observer with no member object.
+    ///
+    /// This is the member's OWN `banned` flag, read out of their zk user object. It is
+    /// written by the circuit when a scan absorbs a `BAN_FLAG` callback
+    /// (`personas-core/src/circuits.rs`), which is the only thing that sets it — so it
+    /// flips at the banned member's next SCAN, not when the ban is cast. A banned
+    /// member's post proofs then stop being satisfiable.
+    ///
+    /// Exposed because the effect was otherwise invisible: a banned member saw an
+    /// unchanged UI and simply found that posting stopped working, with no explanation
+    /// anywhere. The protocol makes a ban self-evident to its subject by design; the
+    /// client has to actually surface it.
+    ///
+    /// Non-zero rather than `== 1`: the field is an `F`, and the circuit's own test is
+    /// "is it the ban flag", so anything other than zero means banned here. Reading it
+    /// as a strict equality against 1 would silently report `false` if the
+    /// representation ever changed.
+    #[napi]
+    pub fn is_banned(&self) -> Option<bool> {
+        self.inner
+            .member()
+            .map(|m| m.user.data.banned != F::from(0u64))
+    }
+
+    /// Is a callback sweep unfinished? While true, EVERY proving flow except another
+    /// `emit_scan` will abort the process.
+    ///
+    /// The underlying callbacks crate ASSERTS `self.scan_index.is_none()` rather than
+    /// returning an error (`callbacks/src/generic/user.rs:1465`). A failed assertion in
+    /// Rust aborts, which from Electron's side is `Render process is gone ... Exit Code:
+    /// 6` with no catchable JS error — the whole window dies.
+    ///
+    /// `personas-client` has guarded this since it was first found (`ensure_not_scanning`,
+    /// FINDINGS O2). The serverless/messenger path that Desktop uses never got the same
+    /// guard, so an interrupted scan left a member permanently unusable: every later
+    /// action aborted the renderer on sight, which presents as "this one instance just
+    /// keeps crashing" with nothing in the JS logs.
+    #[napi]
+    pub fn is_scanning(&self) -> bool {
+        self.inner
+            .member()
+            .map(|m| m.user.is_scanning())
+            .unwrap_or(false)
+    }
+
+    /// How many callbacks are still outstanding mid-sweep. Useful in the status panel:
+    /// the remedy for a stuck scan is to keep scanning until this reaches zero.
+    #[napi]
+    pub fn outstanding_callbacks(&self) -> u32 {
+        self.inner
+            .member()
+            .map(|m| m.user.num_outstanding_callbacks() as u32)
+            .unwrap_or(0)
+    }
+
+    /// Refuse a proving flow that would hit the assertion above, with an error the JS
+    /// side can catch and show. `emit_scan` is deliberately exempt: continuing the scan
+    /// is the only way OUT of this state.
+    fn guard_not_scanning(&self, what: &str) -> napi::Result<()> {
+        if self.is_scanning() {
+            return napi::Result::Err(napi::Error::from_reason(format!(
+                "{what} refused: a callback scan is unfinished ({} outstanding). \
+                 Scan until it completes first — proceeding would abort the process.",
+                self.outstanding_callbacks()
+            )));
+        }
+        Ok(())
+    }
+
     /// Emit a join record (a member advertising itself to the group).
     #[napi]
     pub fn emit_join(&mut self) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_join")?;
         Self::emit(self.inner.emit_join())
     }
 
@@ -203,6 +273,7 @@ impl Engine {
         body: String,
         context: f64,
     ) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_post_pseudo")?;
         let ctx = F::from(context as u64);
         Self::emit(self.inner.emit_post_pseudo(&mut self.rng, body, ctx))
     }
@@ -210,6 +281,7 @@ impl Engine {
     /// Emit an anonymous post (no linkable persona).
     #[napi]
     pub fn emit_post_anon(&mut self, body: String) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_post_anon")?;
         Self::emit(self.inner.emit_post_anon(&mut self.rng, body))
     }
 
@@ -223,6 +295,7 @@ impl Engine {
         context: f64,
         i: f64,
     ) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_post_pseudo_rate")?;
         let ctx = F::from(context as u64);
         let idx = F::from(i as u64);
         Self::emit(
@@ -241,6 +314,7 @@ impl Engine {
         kind: String,
         target: Option<String>,
     ) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_poll")?;
         let poll_kind = match kind.as_str() {
             "ban" => PollKind::Ban,
             "standard" => PollKind::Standard,
@@ -260,6 +334,7 @@ impl Engine {
     /// Cast a ballot (`option` index) in the poll named by hex `Eh` `poll`.
     #[napi]
     pub fn emit_vote(&mut self, poll: String, option: u32) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_vote")?;
         let poll_eh = eh_from_hex(&poll)?;
         Self::emit(self.inner.emit_vote(&mut self.rng, poll_eh, option))
     }
@@ -267,6 +342,7 @@ impl Engine {
     /// Rate the record named by hex `Eh` `target` by `delta` (§10).
     #[napi]
     pub fn emit_rate(&mut self, target: String, delta: i32) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_rate")?;
         let target_eh = eh_from_hex(&target)?;
         Self::emit(self.inner.emit_rate(&mut self.rng, target_eh, delta as i8))
     }
@@ -450,11 +526,57 @@ impl Engine {
         1.0
     }
 
-    /// Bisect probe: same, but through `Option<f64>` — the return type the real
-    /// `get_reputation` used, so this separates "a new method" from "Option
-    /// marshalling".
+    /// This member's own reputation, or `None` for an observer (no member) — the UI
+    /// renders that as "—".
+    ///
+    /// Reputation is a member's OWN state: it lives in their zk user object, which is
+    /// why nobody can look up anyone else's. It moves when a `Rate` callback is absorbed
+    /// by a scan (`personas-core/src/circuits.rs`, `u.data.reputation += argument`), NOT
+    /// when the rating is sent. So the sequence that changes this value is
+    /// rate -> scan, and a scan with no outstanding callbacks correctly changes nothing.
+    ///
+    /// This replaces a bisect stub that returned a constant `Some(0.0)`. The stub was
+    /// indistinguishable from a working implementation on a fresh member — both read
+    /// zero — so the status panel showed a plausible 0 that never moved, for either
+    /// reason. That is the kind of "working" display this panel exists to avoid.
+    /// RESOLVED: the exit-9 crash was NOT in this function.
+    ///
+    /// Adding `ark-ff` as a direct dependency of this crate (to get `PrimeField`) made
+    /// the built `.node` kill the Electron renderer at LOAD — before `background.html`
+    /// rendered and long before any method here ran. A stage-1 build, whose body was the
+    /// byte-identical `Some(0.0)` stub that had always been stable, crashed the same way.
+    /// That isolated it to the dependency graph: one new edge in `Cargo.lock` changed
+    /// Cargo's feature unification and produced an addon that would not initialise.
+    ///
+    /// The conversion therefore lives in `personas-core`, which already depends on
+    /// `ark-ff`, leaving this crate's dependency graph identical to the known-good one.
+    /// With that change the real read below runs fine.
+    ///
+    /// Worth keeping, because it answers a question that blocked all Rust work on this
+    /// project for weeks: exit 9 here was a BUILD problem, not a sign that this layer
+    /// cannot be extended. Authorship and badges are the same shape and are not
+    /// inherently unsafe to attempt — just do not add dependencies to this crate.
+    ///
+    /// `PERSONAS_REPUTATION_STAGE` is retained for a future bisect of the same kind:
+    ///   1  constant, no data access        3  convert a hardcoded field
+    ///   2  borrow the Member, ignore it    4  the real read (DEFAULT)
     #[napi]
     pub fn get_reputation(&self) -> Option<f64> {
-        Some(0.0)
+        let stage = std::env::var("PERSONAS_REPUTATION_STAGE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u8>().ok())
+            .unwrap_or(4);
+
+        match stage {
+            1 => Some(0.0),
+            2 => self.inner.member().map(|_| 0.0),
+            3 => Some(personas_core::field_to_f64_signed(&F::from(7u64))),
+            // The real read. `None` for an observer with no member — the UI shows "—".
+            _ => self
+                .inner
+                .member()
+                .map(|m| personas_core::field_to_f64_signed(&m.user.data.reputation)),
+        }
     }
 }
+

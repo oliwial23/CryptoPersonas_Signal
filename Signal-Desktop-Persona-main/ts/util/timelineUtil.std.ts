@@ -53,6 +53,9 @@ export type MessageTimelineItemDataType = Readonly<{
   // same account but different personas must not visually group, so each shows its
   // own persona label.
   persona?: string;
+  // Personas demo: the context this message was posted into, if any. Used to chain
+  // consecutive messages in one context — see `areMessagesInSameContext`.
+  personaContextName?: string;
 }>;
 
 // This lets us avoid passing a full `MessageType`. That's useful for tests and for
@@ -144,6 +147,38 @@ export function areMessagesInSameGroup(
       newerMessage.timestamp >= olderMessage.timestamp) &&
     newerMessage.timestamp - olderMessage.timestamp < COLLAPSE_WITHIN &&
     isSameDay(olderMessage.timestamp, newerMessage.timestamp)
+  );
+}
+
+/**
+ * Personas demo: do two adjacent messages belong to the same CONTEXT?
+ *
+ * Deliberately a much weaker test than `areMessagesInSameGroup`, because it answers a
+ * different question. Grouping asks "is this the same speaker continuing?" — so it
+ * requires the same author, the same persona, and closeness in time. A context chain
+ * asks "do these belong to the same conversation?", and the entire point of a context
+ * is that SEVERAL personas post into it. So this ignores author, persona, reactions and
+ * elapsed time, and compares only the context name.
+ *
+ * Consequence worth knowing: a chain stays unbroken across a day divider and across
+ * speakers, which is correct — the context genuinely continues — but it means a chain
+ * can span a long gap. That is the grouping the advisors asked to be able to see.
+ */
+export function areMessagesInSameContext(
+  olderTimelineItem: MaybeMessageTimelineItemType,
+  newerTimelineItem: MaybeMessageTimelineItemType
+): boolean {
+  const older = getMessageTimelineItemData(olderTimelineItem);
+  const newer = getMessageTimelineItemData(newerTimelineItem);
+  if (!older || !newer) {
+    return false;
+  }
+  // Both must actually HAVE a context: two messages with no context are not a chain,
+  // and `undefined === undefined` would otherwise link every ordinary message.
+  return Boolean(
+    older.personaContextName &&
+    newer.personaContextName &&
+    older.personaContextName === newer.personaContextName
   );
 }
 

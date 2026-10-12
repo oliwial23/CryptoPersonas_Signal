@@ -84,6 +84,10 @@ export enum ToastType {
   // Personas demo: declined to rate the user's own persona post, because self-rating is
   // undetectable to the protocol and would inflate their own reputation.
   PersonaSelfRateBlocked = 'PersonaSelfRateBlocked',
+  // Personas demo: this member's own scan just absorbed a ban. Raised at the moment the
+  // flag flips, because that is the only moment the client can be sure the member knows
+  // — the ban record itself is anonymous and they may never see it.
+  PersonaBanned = 'PersonaBanned',
   ReactionFailed = 'ReactionFailed',
   ReceiptSaved = 'ReceiptSaved',
   ReceiptSaveFailed = 'ReceiptSaveFailed',
@@ -237,6 +241,7 @@ export type AnyToast =
   | { toastType: ToastType.PersonaRated; parameters: { delta: number } }
   | { toastType: ToastType.PersonaReactionBlocked }
   | { toastType: ToastType.PersonaSelfRateBlocked }
+  | { toastType: ToastType.PersonaBanned }
   | { toastType: ToastType.ReactionFailed }
   | {
       toastType: ToastType.RemoteConfigChanged;

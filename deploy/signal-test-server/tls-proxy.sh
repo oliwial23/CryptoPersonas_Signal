@@ -46,7 +46,18 @@ if [ ! -f "$TLS/leaf.crt" ] || [ ! -f "$TLS/ca.crt" ]; then
   mkdir -p "$TLS"; cd "$TLS"
   openssl genrsa -out ca.key 4096 2>/dev/null
   openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 -subj "/CN=personas-test-server-ca" -out ca.crt 2>/dev/null
-  cat > leaf.cnf <<'EOF'
+  # Extra SANs for reaching this proxy by NAME rather than on loopback — e.g. a client
+  # on the UMD VPN talking to signalserver00.umiacs.umd.edu. Without the hostname in the
+  # certificate, TLS fails hostname verification even though the connection succeeds, and
+  # the error points at certificates rather than at configuration.
+  #
+  #   PERSONAS_TLS_DNS=host1,host2   extra DNS names
+  #   PERSONAS_TLS_IP=10.0.0.5      extra IP addresses
+  #
+  # NOTE: the cert is only minted when absent. To pick up new SANs, delete the .local/tls
+  # directory first and re-run — then re-copy ca.crt to every client.
+  {
+    cat <<'EOF'
 [req]
 distinguished_name = dn
 req_extensions = ext
@@ -60,6 +71,19 @@ IP.1 = 127.0.0.1
 DNS.1 = localhost
 DNS.2 = host.docker.internal
 EOF
+    n=2
+    IFS=, read -ra _dns <<< "${PERSONAS_TLS_DNS:-}"
+    for d in "${_dns[@]}"; do
+      [ -n "$d" ] || continue
+      n=$((n+1)); echo "DNS.$n = $d"
+    done
+    m=1
+    IFS=, read -ra _ips <<< "${PERSONAS_TLS_IP:-}"
+    for i in "${_ips[@]}"; do
+      [ -n "$i" ] || continue
+      m=$((m+1)); echo "IP.$m = $i"
+    done
+  } > leaf.cnf
   openssl genrsa -out leaf.key 2048 2>/dev/null
   openssl req -new -key leaf.key -out leaf.csr -config leaf.cnf 2>/dev/null
   openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out leaf.crt -days 3650 -sha256 -extfile leaf.cnf -extensions ext 2>/dev/null

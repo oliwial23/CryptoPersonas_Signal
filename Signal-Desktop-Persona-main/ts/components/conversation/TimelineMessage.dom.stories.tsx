@@ -327,6 +327,7 @@ const createProps = (overrideProps: Partial<Props> = {}): Props => ({
   sendPollVote: overrideProps.sendPollVote ?? action('sendPollVote'),
   // Personas demo action.
   personaBanPoll: action('personaBanPoll'),
+  personaBanNow: action('personaBanPoll'),
   copyMessageText: action('copyMessageText'),
   retryDeleteForEveryone: action('retryDeleteForEveryone'),
   scrollToQuotedMessage: action('scrollToQuotedMessage'),

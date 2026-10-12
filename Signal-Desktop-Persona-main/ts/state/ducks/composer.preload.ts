@@ -73,6 +73,7 @@ import {
   maybeSendPersonaRateForReaction,
   sendPersonaPoll,
   sendPersonaScan,
+  isPersonaBanned,
 } from '../../services/personasActions.preload.ts';
 import { blockSendUntilConversationsAreVerified } from '../../util/blockSendUntilConversationsAreVerified.dom.ts';
 import { clearConversationDraftAttachments } from '../../util/clearConversationDraftAttachments.preload.ts';
@@ -380,13 +381,17 @@ export function personaPseudonymsChanged(
 // Mint a new unlimited pseudonym. Its petname is unknown until its first post — the
 // engine only reveals it on the `Emitted` from an actual send.
 function createPersonaPseudonym(): ThunkAction<
-  void,
+  // Returns the NEW pseudonym's nonce. The nonce is the identity, so handing it back is
+  // what lets the composer select the thing it just created — previously the caller had
+  // no way to name it, so the menu kept whatever was selected before and the user had to
+  // close the menu, reopen it, and pick the new pseudonym by hand.
+  number,
   RootStateType,
   unknown,
   PersonaPseudonymsChangedActionType
 > {
   return () => {
-    createPseudonym();
+    return createPseudonym().nonce;
   };
 }
 
@@ -902,6 +907,29 @@ function sendMultiMediaMessage(
         // and send the text as a PLAIN message under the real account — a silent
         // de-anonymisation. Now we join first, and if that fails we bail out entirely
         // rather than degrade.
+        // BANNED MEMBERS CANNOT POST AS A PERSONA in this group.
+        //
+        // Checked here, before joining or proving, for two reasons. The protocol
+        // already enforces it — a banned member's post proof is unsatisfiable — but it
+        // fails deep inside proving with an opaque error after seconds of work, and the
+        // honest explanation ("an admin flagged your posts") is not recoverable from
+        // that error. And refusing early means never falling through to an attributable
+        // send, which is the one outcome that would be worse than refusing.
+        //
+        // Scoped to this group by construction: `banned` lives in the member object for
+        // THIS conversation's engine, so a member banned here keeps full persona
+        // privileges in every other group.
+        if (isPersonaBanned() === true) {
+          log.warn(
+            'sendMultiMediaMessage: refusing a persona post from a banned member'
+          );
+          dispatch({
+            type: SHOW_TOAST,
+            payload: { toastType: ToastType.PersonaBanned },
+          });
+          return;
+        }
+
         const joined = await ensurePersonaJoined(conversation);
         if (!joined) {
           log.error(
@@ -965,6 +993,25 @@ function sendMultiMediaMessage(
               ? nameForContext(options.personaChoice.context)
               : undefined),
         };
+      }
+
+      // DIAGNOSTIC, paired with the one in handleDataMessage. Together they localize a
+      // missing context chip to exactly one of two places: a sender that never attached
+      // the name, or a receiver that did not decode it. `personaTopic` lives in
+      // CompositionArea's local state, so it is also the thing that would silently go
+      // undefined if that component ever remounted between sends.
+      if (personaFields != null) {
+        // `personaFields` holds the EMITTED result (petname, eh, record), not the
+        // request. An earlier version of this line looked for `personaChoice` on it and
+        // always printed "(none)", which read as "no persona was used" on posts that
+        // plainly had one — a diagnostic that invented a second bug. Log both sides:
+        // the choice that was asked for, and the persona that came back.
+        log.info(
+          `personas: sending post choice=${JSON.stringify(options.personaChoice)} ` +
+          `persona=${personaFields.persona ?? '(anonymous)'} ` +
+          `context=${personaFields.personaContextName ?? '(none)'} ` +
+          `badge=${personaFields.personaBadge ?? '(none)'}`
+        );
       }
 
       try {

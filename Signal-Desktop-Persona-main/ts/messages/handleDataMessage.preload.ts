@@ -176,6 +176,25 @@ export async function handleDataMessage(
       return;
     }
 
+    // A SILENT poll: ingested and settled like any other, but never rendered.
+    //
+    // This is how an admin's permanent ban stays invisible. The record has already
+    // been ingested by `ingestRecordForTimeline` above — the replica will tally and
+    // settle it, invoke BAN_FLAG at the close barrier, and the target's scan will
+    // absorb it — so returning here costs nothing protocol-side.
+    //
+    // Suppressing it on the sender with `hideFromTimeline` was not enough, and that
+    // was the bug: every RECIPIENT decodes the same record and builds its own poll
+    // bubble, so the poll remained visible to everyone except the admin who cast it.
+    // Rendering has to be declined where the message is built, on each client.
+    if (personasRecord.kind === 'poll' && personasRecord.descriptor.silent) {
+      log.info(
+        `${idLog}: silent ${personasRecord.descriptor.kind} poll ingested (deliberately not rendered)`
+      );
+      confirm();
+      return;
+    }
+
     // First, check for duplicate messages. We dedupe by senderAci + timestamp, in the
     // same way we address messages in the Signal ecosystem.
     const existingMessage = await window.MessageCache.findBySentAt(
@@ -664,6 +683,23 @@ export async function handleDataMessage(
           personaBadge: decodePostBadge(initialMessage.body),
           personaContextName: decodePostContextName(initialMessage.body),
         });
+        // DIAGNOSTIC. Two questions this answers that nothing else can:
+        //
+        //   1. did this instance RECEIVE the post at all? Zero decrypt failures and an
+        //      empty timeline are consistent with both "never arrived" and "arrived but
+        //      did not render", and those have completely different causes.
+        //   2. did the CONTEXT NAME travel? The chip renders only when the name is
+        //      present, so a missing chip is either a sender that never attached one or
+        //      a receiver that failed to decode it. This line distinguishes them.
+        //
+        // Logged at the point the model is written, so it reflects what the UI will
+        // actually read rather than what the wire contained.
+        log.info(
+          `personas: received post eh=${personasRecord.eh.slice(0, 12)} ` +
+          `persona=${personasRecord.persona ?? '(anonymous)'} ` +
+          `context=${decodePostContextName(initialMessage.body) ?? '(none)'} ` +
+          `badge=${decodePostBadge(initialMessage.body) ?? '(none)'}`
+        );
         trackPersonaPost(personasRecord.eh, message.id);
       }
 

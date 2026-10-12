@@ -17,201 +17,191 @@ otherwise. Verify after each step; a failure three steps later is much harder to
 
 ---
 
-## 0. Confirm three unknowns first
+## 0. Known facts about this box
 
-```sh
-uname -m                                   # x86_64 or aarch64 — picks the JDK build
-ls -ld /srv/signalserver00                 # is it ours?
-touch /srv/signalserver00/.w && echo WRITABLE && rm /srv/signalserver00/.w
-df -h /srv /var/tmp
-```
+Established by inspection, so you do not need to re-derive them:
 
-If `/srv/signalserver00` is not writable, use `/var/tmp/personas` and expect it to be
-cleaned periodically, or ask for a writable location.
-
-**Do not put the Maven repository in your NFS home.** `~/.m2` on NFS makes the build
-painfully slow and the tree is 1–2 GB against a 30 GB quota. §2 redirects it.
+| | |
+|---|---|
+| arch | `x86_64` |
+| OS JDK | **17** — too old; the build needs **25** |
+| container runtime | **Podman** only, no Docker; no `compose` provider |
+| RAM / cores | 7 GB / 4 |
+| workspace | `/srv/signalserver00` — local disk, 49 GB free, world-writable |
+| home | `/nfshomes/rthomase` — 30 GB NFS. **Do not** put the Maven repo here |
+| `/var/tmp` | only 4 GB — avoid |
+| reachable from laptop | **only over the UMD VPN** (SSH confirmed). `192.168.25.15` is private |
 
 ---
 
-## 1. Workspace
+## 1. One-time setup (already done — here for a rebuild)
 
 ```sh
-export WORK=/srv/signalserver00          # or /var/tmp/personas
+mkdir -p /srv/signalserver00/personas && chmod 700 /srv/signalserver00/personas
+export WORK=/srv/signalserver00/personas
 mkdir -p "$WORK"/{repos,tools,m2}
-cd "$WORK"
 ```
 
-Put this in `~/.bashrc` so it survives reconnects — you will be back here often:
+`chmod 700` matters: `/srv/signalserver00` is world-writable like `/tmp`, and the server
+will hold the phantom private key.
+
+Then append to `~/.bashrc` so it survives reconnects:
 
 ```sh
-cat >> ~/.bashrc <<'EOF'
-export WORK=/srv/signalserver00
+export WORK=/srv/signalserver00/personas
 export JAVA_HOME="$WORK/tools/jdk-25"
-export PATH="$JAVA_HOME/bin:$PATH"
+export PATH="$JAVA_HOME/bin:$WORK/tools:$PATH"
 export MAVEN_OPTS="-Dmaven.repo.local=$WORK/m2"
+export SIGNAL_SERVER_DIR="$WORK/repos/Signal-Server"
+export STORAGE_SERVICE_DIR="$WORK/repos/storage-service"
+export SIGNAL_SERVER_SECRETS="$SIGNAL_SERVER_DIR/service/src/test/resources/config/test-secrets-bundle.yml"
 export DOCKER_HOST="unix:///run/user/$(id -u)/podman/podman.sock"
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE="/run/user/$(id -u)/podman/podman.sock"
 export TESTCONTAINERS_RYUK_DISABLED=true
-EOF
-source ~/.bashrc
 ```
 
-`TESTCONTAINERS_RYUK_DISABLED` matters: Ryuk is testcontainers' cleanup sidecar and it
-does not work under rootless Podman. Leaving it enabled makes containers fail to start
-with an error that does not mention Ryuk.
+`TESTCONTAINERS_RYUK_DISABLED` is not optional: Ryuk is testcontainers' cleanup sidecar
+and does not work under rootless Podman, failing with an error that never mentions Ryuk.
 
----
-
-## 2. JDK 25
-
-`RUNNING_E2_LOCALLY.md:59` requires JDK 25; the box has 17. No root needed — unpack a
-tarball into `$WORK/tools`.
+### JDK 25
 
 ```sh
 cd "$WORK/tools"
-# pick the URL matching `uname -m` from https://adoptium.net/temurin/releases/?version=25
-curl -LO <temurin-25-linux-$(uname -m)-tarball-url>
-tar xzf OpenJDK25*.tar.gz
-mv jdk-25* jdk-25
-java -version        # must say 25
+curl -L -o jdk25.tar.gz 'https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jdk/hotspot/normal/eclipse'
+tar xzf jdk25.tar.gz && rm jdk25.tar.gz && mv jdk-25* jdk-25
+hash -r && java -version      # must say 25
 ```
 
-**Verify:** `java -version` reports 25 and `echo $JAVA_HOME` points at `$WORK/tools/jdk-25`.
-
----
-
-## 3. Podman as a Docker-compatible socket
-
-Testcontainers starts FoundationDB and the Bigtable emulator; it speaks the Docker API.
+### Podman as a Docker socket, plus Compose
 
 ```sh
 systemctl --user enable --now podman.socket
-systemctl --user status podman.socket --no-pager | head -5
-curl -s --unix-socket "/run/user/$(id -u)/podman/podman.sock" http://d/_ping && echo " <- OK"
-loginctl enable-linger "$USER"     # keeps the socket alive after you log out
+loginctl enable-linger "$USER"        # or the socket dies when you log out
+curl -s --unix-socket "/run/user/$(id -u)/podman/podman.sock" http://d/_ping   # OK
+
+ln -sf "$(command -v podman)" "$WORK/tools/docker"   # scripts call `docker` by name
+
+mkdir -p ~/.docker/cli-plugins         # the path podman searches first
+curl -L -o ~/.docker/cli-plugins/docker-compose \
+  https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64
+chmod +x ~/.docker/cli-plugins/docker-compose
+podman compose version                 # must print a version
 ```
 
-`enable-linger` is easy to miss and its absence is confusing: everything works while you
-are connected and dies when you disconnect.
-
-**Verify:** `_ping` returns `OK`.
-
----
-
-## 4. Clone the three repositories
-
-`boot.sh` needs **three** checkouts, not one:
+### The three repositories — PIN THEM
 
 ```sh
 cd "$WORK/repos"
 git clone https://github.com/oliwial23/CryptoPersonas_Signal.git
 git clone https://github.com/signalapp/Signal-Server.git
 git clone https://github.com/signalapp/storage-service.git
+
+cd "$SIGNAL_SERVER_DIR" && git checkout ed90c1c15
 ```
 
-Then tell the scripts where they are (add to `~/.bashrc`):
-
-```sh
-export SIGNAL_SERVER_DIR="$WORK/repos/Signal-Server"
-export STORAGE_SERVICE_DIR="$WORK/repos/storage-service"
-export SIGNAL_SERVER_SECRETS="$SIGNAL_SERVER_DIR/service/src/test/resources/config/test-secrets-bundle.yml"
-```
-
-If `storage-service` is not public, ask whoever has it — without it there are no GroupV2
-endpoints and **you cannot create the demo group**.
+**Pinning is required, not tidiness.** Upstream `HEAD` now targets **Java 26**, which is
+not released, so a fresh clone fails with `release version 26 not supported`. `ed90c1c15`
+(2026-07-01) is the commit the laptop uses and the one our patches were written against.
+If `storage-service` also drifts, pin it to whatever the laptop has.
 
 ---
 
-## 5. Chat server
+## 2. Starting it — four services, in order
 
-`boot.sh` applies our patches to the Signal-Server checkout, then builds and runs. First
-build downloads a large Maven tree; expect a long wait.
-
-```sh
-cd "$WORK/repos/CryptoPersonas_Signal/deploy/signal-test-server"
-./boot.sh                                  # keep this shell open
-```
-
-In a second shell:
-
-```sh
-curl -sS http://127.0.0.1:8081/ping        # expect: pong
-./verify.sh                                # expect pong / 422 / 405 / 400
-```
-
-The three patches it applies (websocket auth during registration, ASN refresh interval,
-and the paged KEM prekey store pointing at local S3) are in `patches/README.md`. On Linux
-the macOS FoundationDB workaround is skipped — `libfdb_c.so` is already on the loader
-path (`boot.sh:33`), so that is one problem you do not have.
-
----
-
-## 6. MinIO — do not skip this
-
-The prekey store writes to S3. Without it, `PUT /v2/keys` never answers, registration
-dies after ~90 s with `HTTPError -1`, and clients show a device-link QR screen. This
-exact failure has already cost days once.
+Use `nohup` and a log file, not `tmux`. Each service needs its own.
 
 ```sh
 cd "$WORK/repos/CryptoPersonas_Signal/deploy/signal-test-server"
+
+# 1. chat server  (applies the three patches, then builds)
+nohup ./boot.sh > "$WORK/chat.log" 2>&1 &
+
+# 2. MinIO — the prekey store. WITHOUT THIS, REGISTRATION HANGS ~90s AND FAILS
 ./minio.sh up
+podman exec personas-minio ls /data        # must list prekey-bucket
+
+# 3. storage-service — GroupV2. Without it you cannot create the demo group
+cd ../storage-service
+nohup ./boot.sh > "$WORK/storage.log" 2>&1 &
+
+# 4. TLS proxy on 8443, WITH the hostname in the certificate
+cd ../signal-test-server
+PERSONAS_TLS_DNS=signalserver00.umiacs.umd.edu ./tls-proxy.sh up
+```
+
+On the proxy: use `tls-proxy.sh`, not `plain-proxy.sh`, while reaching the VM directly
+over the VPN — the client speaks TLS and there is no public proxy terminating it. The
+`PERSONAS_TLS_DNS` variable is required because the minted certificate otherwise covers
+only `127.0.0.1`, `localhost` and `host.docker.internal`; connecting by hostname would
+fail hostname verification. **The cert is only minted when absent** — to change the names,
+`rm -rf .local/tls` first, then re-copy the new `ca.crt` to every client.
+
+Watching progress, any time:
+
+```sh
+tail -f "$WORK/chat.log"        # Ctrl-C stops watching, not the server
+grep -nE "applied patch|BUILD|ERROR|Caused by|Started" "$WORK/chat.log" | tail -20
+```
+
+---
+
+## 3. Verifying — from the VM
+
+```sh
+curl -sS http://127.0.0.1:8081/ping                                        # pong
+cd "$WORK/repos/CryptoPersonas_Signal/deploy/signal-test-server" && ./verify.sh
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9100/minio/health/live   # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/v1/groups           # not 000
+curl -k -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:8443/v1/config       # 404 = routed
+curl -k -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:8443/v1/storage      # not 404
 ```
 
-`minio.sh` calls `docker`. With `DOCKER_HOST` set to the Podman socket you may still need
-a shim: `alias docker=podman`, or `ln -s $(which podman) "$WORK/tools/docker"` with
-`$WORK/tools` on `PATH`.
-
-**Also confirm the bucket exists** — the script has reported success while failing to
-create it:
-
-```sh
-podman exec personas-minio ls /data        # expect: prekey-bucket
-```
+`verify.sh` should give pong / 422 / 405 / 400. A `404` on `/v1/storage` means the proxy
+is not path-routing to storage-service, and groups will not work.
 
 ---
 
-## 7. storage-service (GroupV2)
+## 4. Stopping everything
 
 ```sh
-cd "$WORK/repos/CryptoPersonas_Signal/deploy/storage-service"
-./boot.sh                                  # starts the Bigtable emulator, then :8090
+pkill -f 'mvnw|TextSecure' ; pkill -f storage-service
+podman ps -q  | xargs -r podman stop
+podman ps -aq | xargs -r podman rm
+podman ps -a                                  # should be empty
 ```
 
-```sh
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/v1/groups   # 401/403/405, not 000
-```
+Nothing survives a reboot in any case — every service is a foreground process or an
+unmanaged container. For a study you would want systemd user units; not worth it yet.
 
 ---
 
-## 8. Expose 8443 — use `plain-proxy.sh`, not `tls-proxy.sh`
+## 5. Current status
 
-UMIACS terminates TLS at their fronting proxy, so the VM should serve **plain HTTP** on
-8443. That is exactly what Oliwia's `plain-proxy.sh` is for.
+**Where it stops today:** the chat server build fails starting a Redis cluster through
+testcontainers' `ComposeContainer`:
 
-```sh
-cd "$WORK/repos/CryptoPersonas_Signal/deploy/signal-test-server"
-./plain-proxy.sh up
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8443/v1/config    # 404 = routing works
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8443/v1/storage   # not 404 = storage routed
+```
+ContainerLaunchException: Local Docker Compose exited abnormally with code 1
+  whilst running command: compose up -d
 ```
 
-**Podman gotcha:** the script's upstreams are `host.docker.internal:8080` and `:8090`,
-which Podman does not resolve by default. Either add
-`--add-host=host.docker.internal:host-gateway` to its `docker run`, or set the upstreams
-explicitly:
+This is **progress** — the earlier failure was code **125** ("cannot run compose at
+all"), fixed by installing the Compose binary. Code **1** means compose runs and fails
+for its own reason, which is usually rootless-Podman-specific: image pull permissions,
+network creation, or port binding. Read the compose output directly:
 
 ```sh
-UPSTREAM=127.0.0.1:8080 STORAGE_UPSTREAM=127.0.0.1:8090 ./plain-proxy.sh up
+sed -n '200,262p' "$WORK/chat.log"
+podman compose version
+podman info --format '{{.Host.NetworkBackend}} {{.Host.Security.Rootless}}'
 ```
 
-(With `127.0.0.1` the proxy container needs host networking — `--network host` — since
-loopback inside the container is not the host's.)
+**This is why Docker is worth asking for.** Every failure so far has been a Docker
+assumption in Signal-Server's test harness: the Java target, then a missing compose
+provider, now compose under rootless Podman. Real Docker removes the category rather
+than us fixing instances.
 
----
-
-## 9. Reachability — start this on day one
+## 6. Reachability — the one thing you cannot fix yourself
 
 The server now works locally on the VM and is still unreachable from any laptop.
 `192.168.25.15` is RFC 1918; it is not routed from the public internet or from
@@ -227,31 +217,44 @@ to `192.168.25.0/24` is opened.
 
 ---
 
-## 10. Point the clients at it
+## 7. Point the clients at it
 
-Once there is a reachable hostname, **on your laptop**:
+**Today, over the VPN** — connect to the UMD VPN first, then on your laptop:
 
 ```sh
-./scripts/personas-remote-setup.sh --probe <public-host>
-./scripts/personas-remote-setup.sh --remote <public-host>
+./scripts/personas-remote-setup.sh --remote-vpn signalserver00.umiacs.umd.edu
 pnpm run build:rolldown
 ./scripts/personas-run.sh alice --reset
 ```
 
-`serverPublicParams` and `serverTrustRoots` must match **this** deployment. From the VM:
+That sets `serverUrl` / `storageUrl` / `cdn` to `https://signalserver00.umiacs.umd.edu:8443`
+and fetches the VM's `ca.crt` over ssh into `certificateAuthority`. It backs up your
+laptop config first; `--local` restores it.
+
+`--reset` is required on first switch: accounts on the old local server do not exist on
+this one, and a stale `userData` leaves a client that looks logged in holding an account
+the server never heard of.
+
+**Later, through a public proxy** (once §6 is answered): `--remote <host>` instead. That
+one *removes* `certificateAuthority`, because a public proxy presents a publicly-trusted
+certificate and Node's `ca` option **replaces** the trust store rather than adding to it —
+so leaving a self-signed CA in place would reject the real certificate.
+
+### Server parameters must match this deployment
+
+`serverPublicParams` and `serverTrustRoots` belong to the server. Both `--remote` modes
+carry over whatever the laptop had, which is only correct if both were built from the same
+config. From the VM:
 
 ```sh
 grep -rhoE 'AAp8[A-Za-z0-9+/=]*' "$SIGNAL_SERVER_DIR" | head -1
 grep -rn serverTrustRoots "$SIGNAL_SERVER_DIR/service/src/test/resources/config/" | head
 ```
 
-`--remote` also removes `certificateAuthority`, which is required: it is passed to Node as
-`ca`, which **replaces** the trust store, so a self-signed test CA rejects UMIACS's real
-certificate.
+If they differ from the laptop's, group operations are rejected with errors that point
+nowhere near the cause.
 
----
-
-## 11. Two cautions
+## 8. Cautions
 
 **7 GB RAM is tight.** Two JVMs plus FoundationDB, the Bigtable emulator, MinIO and Caddy
 on 7 GB with 4 cores will be slower than the laptop and may hit limits under load. Watch

@@ -70,6 +70,7 @@ const getDefaultProps = () => ({
   sendPollVote: action('sendPollVote'),
   // Personas demo action.
   personaBanPoll: action('personaBanPoll'),
+  personaBanNow: action('personaBanPoll'),
   blockGroupLinkRequests: action('blockGroupLinkRequests'),
   cancelAttachmentDownload: action('cancelAttachmentDownload'),
   kickOffAttachmentDownload: action('kickOffAttachmentDownload'),

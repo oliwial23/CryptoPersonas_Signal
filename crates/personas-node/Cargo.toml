@@ -22,6 +22,7 @@ transport-mock = { path = "../transports/transport-mock" }
 napi = { version = "2", default-features = false, features = ["napi8"] }
 napi-derive = "2"
 
+
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 hex = { workspace = true }

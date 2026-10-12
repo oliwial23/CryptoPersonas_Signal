@@ -1248,6 +1248,7 @@ export const actions = {
   sendPollVote,
   // Personas demo: open a ban poll on a persona post.
   personaBanPoll,
+  personaBanNow,
   setPendingRequestedAvatarDownload,
   startAvatarDownload,
   showSpoiler,
@@ -2645,31 +2646,63 @@ function sendPollVote({
 //
 // The poll is attributable — you cannot anonymously call for someone's revocation —
 // while the ballots cast in it are not. That asymmetry is deliberate.
-function personaBanPoll(
-  messageId: string
+/**
+ * Open a ban poll on a persona post.
+ *
+ * `decisive` is the whole difference between the two menu items: a REQUEST (any member)
+ * opens the poll and leaves it 0-0 for the group to decide, while a PERMANENT BAN
+ * (admins only) also casts the opener's Ban ballot, which is what makes it carry at the
+ * close barrier and revoke the author's persona privileges.
+ */
+function banPollCommon(
+  messageId: string,
+  decisive: boolean
 ): ThunkAction<void, RootStateType, unknown, NoopActionType> {
+  const label = decisive ? 'personaBanNow' : 'personaBanPoll';
   return async dispatch => {
     try {
       const message = window.MessageCache.getById(messageId);
       const targetEh = message?.get('personaEh');
       if (!message || !targetEh) {
-        log.error('personaBanPoll: message has no persona envelope hash');
+        log.error(`${label}: message has no persona envelope hash`);
         return;
       }
       const conversation = window.ConversationController.get(
         message.get('conversationId')
       );
       if (!conversation) {
-        log.error('personaBanPoll: no conversation for message');
+        log.error(`${label}: no conversation for message`);
         return;
       }
-      await sendPersonaBanPoll(conversation, targetEh, message.get('persona'));
+      const ok = await sendPersonaBanPoll(
+        conversation,
+        targetEh,
+        message.get('persona'),
+        { decisive }
+      );
+      if (!ok) {
+        // Only reachable on the decisive path, where a missing ballot means the ban
+        // will NOT carry. Surfacing it matters: silence would read as success.
+        log.error(`${label}: did not complete`);
+      }
     } catch (error) {
-      log.error('personaBanPoll: failed', error);
+      log.error(`${label}: failed`, error);
     }
 
-    dispatch(noopAction('personaBanPoll'));
+    dispatch(noopAction(label));
   };
+}
+
+function personaBanPoll(
+  messageId: string
+): ThunkAction<void, RootStateType, unknown, NoopActionType> {
+  return banPollCommon(messageId, false);
+}
+
+function personaBanNow(
+  messageId: string
+): ThunkAction<void, RootStateType, unknown, NoopActionType> {
+  return banPollCommon(messageId, true);
 }
 
 function copyMessageText(

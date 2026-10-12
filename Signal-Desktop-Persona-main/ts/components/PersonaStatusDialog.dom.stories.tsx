@@ -34,6 +34,8 @@ const healthyStatus: PersonaStatusForUI = {
   isSignalAdmin: true,
   autoScan: true,
   stateLost: false,
+  scanStuck: false,
+  outstandingCallbacks: 0,
 };
 
 export function Healthy(): JSX.Element {

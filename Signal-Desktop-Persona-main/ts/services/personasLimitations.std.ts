@@ -31,19 +31,29 @@ export const KNOWN_LIMITATIONS: ReadonlyArray<{
       'The badge shown beside a persona is a plain label the sender chose and attached to the message. Nothing checks it, nothing grants it, and any client can claim any badge. The real design proves badge possession in zero knowledge (the circuit exists in personas-core), but the grant flow lives only in the as-a-service client, so the serverless build this app uses has no way to issue or verify one. Treat every badge you see here as decoration.',
   },
   {
-    title: 'Reputation is unavailable in this build',
+    title: 'Reputation only moves when YOU scan',
     detail:
-      'The native binding that reads your reputation (Engine::get_reputation) compiles but kills the render process at runtime, so it is not in the shipped addon. The status panel shows Unavailable rather than a wrong number. See PERSONAS_DEMO.md section 8.0.',
+      'Reputation now works (Engine::get_reputation reads it out of your zk user object). It is your OWN score — nobody can look up anyone else’s, because it lives inside your object rather than on the bulletin. It changes when a scan ABSORBS a rating callback, not when someone rates you: so the sequence is they rate, then you scan. A scan with nothing outstanding correctly changes nothing, and a brand-new member legitimately reads 0, which is indistinguishable on screen from "nobody has rated me yet".',
   },
   {
     title: 'A ban is not immediate',
     detail:
-      'A revoked member stops being able to post only at the next key rotation, which is periodic. Until then their posts render flagged but still arrive. Making it instant would require linking the pseudonym to the real identity — which would defeat the point of the system.',
+      'A permanent ban is recorded at once, but it bites in two steps: the callback is invoked at the next settlement barrier, and the banned member’s own next scan is what writes the ban into their object and makes their persona proofs unsatisfiable. Until both happen their posts render flagged but still arrive. Making it instant would require linking the pseudonym to the real identity — which would defeat the point of the system.',
+  },
+  {
+    title: 'A permanent ban can still be cancelled by a Keep vote',
+    detail:
+      'An admin’s "Ban permanently" opens a ban poll and casts the admin’s own Ban ballot, which carries 1-0 at the close barrier — and the poll bubble is hidden, so in practice nobody votes against it. But the mechanism is still a poll: if anyone did cast Keep, the tally would be 1-1, the "yes > no" test would fail, and the ban would not land. A genuinely unilateral ban needs a Record::Ban variant plus an admin key in the replica config so every replica can verify who is entitled to emit one (PERSONAS_ZK_WORKPLAN.md step 3b).',
+  },
+  {
+    title: 'An interrupted scan used to be fatal',
+    detail:
+      'The callbacks crate ASSERTS that no scan is in progress rather than returning an error, so a half-finished sweep made the next post abort the whole window (exit code 6, no catchable error). The addon now refuses those calls with a real error and the panel shows an "Unfinished scan" banner with the outstanding count. The remedy is to keep pressing Scan now until it clears; the underlying assertion is still there, so this is a guard rather than a fix.',
   },
   {
     title: 'Admin checks are advisory, not enforcement',
     detail:
-      "Opening a revocation poll is now limited to holders of Signal's GroupV2 admin role, and creating a context likewise. Both are CLIENT-SIDE gates: persona records are ordinary message bodies the storage-service never inspects, so a modified client ignores them. The gate also costs a little anonymity by inference rather than by data \u2014 the ban poll itself still rides the shared phantom, so no recipient learns who opened it, but if only admins ever open one then an observer who knows the admin set can narrow the opener to it, and with a single admin that identifies them. Real enforcement needs the moderator credential inside the proof, which is what badges are for.",},
+      "Banning permanently and creating a context are limited to holders of Signal's GroupV2 admin role; REQUESTING a ban poll is open to every member, since it only asks the group. All of these are CLIENT-SIDE gates: persona records are ordinary message bodies the storage-service never inspects, so a modified client ignores them. The gate also costs a little anonymity by inference rather than by data \u2014 a ban poll rides the shared phantom, so no recipient learns who opened it, but if only admins ever ban then an observer who knows the admin set can narrow the opener to it, and with a single admin that identifies them. Real enforcement needs the admin key inside the accept rule (step 3b) or the moderator credential inside the proof, which is what badges are for.",},
   {
     title: 'Joining is ungated at the protocol level',
     detail:

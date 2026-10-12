@@ -106,6 +106,10 @@ import {
   PersonaStatusDialog,
   type PersonaStatusForUI,
 } from './PersonaStatusDialog.dom.tsx';
+import {
+  personaValueToChoice,
+  DEFAULT_RATE_INDEX,
+} from '../services/personasComposerChoice.std.ts';
 
 export type OwnProps = Readonly<{
   acceptedMessageRequest: boolean | null;
@@ -312,32 +316,6 @@ export type Props = Pick<
 //    persona = H(sk || context || N), N < MAX_PSEUDO. It needs a selected topic to
 //    supply the context, so it returns undefined without one rather than silently
 //    posting into some default context.
-function personaValueToChoice(
-  value: string,
-  topicContext: number | undefined
-): PersonaChoice | undefined {
-  // Values: 'off' | 'anon' | 'pseudo:<nonce>' | 'rate:<index>'.
-  if (value.startsWith('pseudo:')) {
-    // The nonce IS the identity: the same nonce always derives the same petname, so
-    // selecting one here is what lets a member post twice as the same persona.
-    return { kind: 'pseudo', nonce: Number(value.slice('pseudo:'.length)) };
-  }
-  if (value === 'anon') {
-    return { kind: 'anon' };
-  }
-  if (value.startsWith('rate:')) {
-    if (topicContext == null) {
-      return undefined;
-    }
-    return {
-      kind: 'rate',
-      context: topicContext,
-      index: Number(value.slice('rate:'.length)),
-    };
-  }
-  return undefined;
-}
-
 export const CompositionArea = memo(function CompositionArea({
   // Base props
   addAttachment,
@@ -1106,7 +1084,26 @@ export const CompositionArea = memo(function CompositionArea({
           </AxoDropdownMenu.RadioGroup>
           <AxoDropdownMenu.Item
             symbol="plus"
-            onSelect={() => createPersonaPseudonym()}
+            onSelect={() => {
+              // SELECT WHAT WE JUST MADE. Minting a pseudonym and leaving the previous
+              // one selected meant the only way to use it was to close the menu, reopen
+              // it and pick it by hand — and the obvious reading of "New pseudonym" is
+              // that you are now posting as it.
+              //
+              // `createPersonaPseudonym` returns the new nonce (the nonce IS the
+              // identity). Guarded on `typeof` rather than assumed: this value comes
+              // back through redux's dispatch, so a non-number here means the action
+              // chain changed shape, and selecting `pseudo:undefined` would produce an
+              // unsatisfiable choice that silently sends a plain, attributable message.
+              const nonce = createPersonaPseudonym();
+              if (typeof nonce === 'number' && Number.isFinite(nonce)) {
+                setPersonaValue(`pseudo:${nonce}`);
+                // An unlimited pseudonym has no context, so leaving a context selected
+                // would re-coerce the next send back to a rate-limited persona and
+                // discard the pseudonym we just switched to.
+                setPersonaTopic(undefined);
+              }
+            }}
           >
             New pseudonym
           </AxoDropdownMenu.Item>
@@ -1144,10 +1141,48 @@ export const CompositionArea = memo(function CompositionArea({
 
           <AxoDropdownMenu.Separator />
 
-          <AxoDropdownMenu.Label>Context</AxoDropdownMenu.Label>
+          {/* Say out loud that choosing a context CHANGES the persona. Selecting one
+              forces a rate-limited pseudonym for that context (defaulting to #1),
+              because a context only binds in-circuit for a rate-limited persona — an
+              anonymous post carrying a context label is a claim nothing backs. Silent
+              coercion of an identity choice would be unacceptable, so it is stated
+              here rather than left to be discovered. */}
+          <AxoDropdownMenu.Label>
+            {personaTopic != null
+              ? `Context · posting as rate-limited #${
+                  personaValue.startsWith('rate:')
+                    ? Number(personaValue.slice('rate:'.length)) + 1
+                    : DEFAULT_RATE_INDEX + 1
+                } in “${personaTopic}”`
+              : 'Context — choosing one posts as a rate-limited pseudonym'}
+          </AxoDropdownMenu.Label>
           <AxoDropdownMenu.RadioGroup
             value={personaTopic ?? ''}
-            onValueChange={value => setPersonaTopic(value || undefined)}
+            onValueChange={value => {
+              const name = value || undefined;
+              setPersonaTopic(name);
+              // MOVE THE RADIO SELECTION, not just the derived choice.
+              //
+              // `personaValueToChoice` already coerces to a rate-limited pseudonym when
+              // a context is set, so sends were correct — but the menu still showed the
+              // check mark next to whatever was picked before (often "Anonymous"), so
+              // the UI claimed one identity while the message used another. For an
+              // identity control that is not a cosmetic bug, and it is why this looked
+              // like the default "not working": there was no way to see that it had.
+              //
+              // Selecting the radio makes the check mark land on #1 and keeps the menu
+              // and the wire in agreement.
+              if (name != null && !personaValue.startsWith('rate:')) {
+                setPersonaValue(`rate:${DEFAULT_RATE_INDEX}`);
+              }
+              // Clearing the context leaves a `rate:` selection unsatisfiable — there
+              // is no context for the rate limit to bind to — and an unsatisfiable
+              // choice makes the duck send a PLAIN, attributable message. Fall back to
+              // anonymous rather than silently de-anonymizing the next post.
+              if (name == null && personaValue.startsWith('rate:')) {
+                setPersonaValue('anon');
+              }
+            }}
           >
             <AxoDropdownMenu.RadioItem value="">
               No topic
@@ -1240,9 +1275,16 @@ export const CompositionArea = memo(function CompositionArea({
     if (name) {
       createPersonaTopic(conversationId, name);
       setPersonaTopic(name);
+      // Same rule as picking an existing context from the menu: a context implies a
+      // rate-limited pseudonym, so select #1 unless one is already chosen. Creating a
+      // context is the most common way to end up in one, so omitting it here would
+      // leave the main path showing the wrong check mark.
+      if (!personaValue.startsWith('rate:')) {
+        setPersonaValue(`rate:${DEFAULT_RATE_INDEX}`);
+      }
     }
     setIsTopicDialogOpen(false);
-  }, [conversationId, createPersonaTopic, newTopicName]);
+  }, [conversationId, createPersonaTopic, newTopicName, personaValue]);
 
   const personaTopicDialog = isTopicDialogOpen ? (
     <AxoDialog.Root open onOpenChange={setIsTopicDialogOpen}>

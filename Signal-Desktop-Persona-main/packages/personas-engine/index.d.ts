@@ -122,7 +122,13 @@ export class Engine {
    * serverless protocol carries reputation as proof-carrying rate records rather than
    * a queryable directory, so there is no way to read another member's from here.
    */
-  getReputation(): string | undefined;
+  getReputation(): number | undefined;
+  /** Is a callback sweep unfinished? While true, every proving flow except scan aborts. */
+  /** Am I banned? undefined for an observer with no member object. */
+  isBanned(): boolean | undefined;
+  isScanning(): boolean;
+  /** Callbacks still outstanding mid-sweep; scan until this reaches zero. */
+  outstandingCallbacks(): number;
 }
 
 declare const addon: { Engine: typeof Engine };

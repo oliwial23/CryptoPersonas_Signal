@@ -36,10 +36,12 @@ import {
   composePersonaScan,
   composePersonaVote,
   isPersonasEngineEnabled,
+  getPersonasEngine,
   type PersonaPollDescriptor,
 } from './personasEngine.preload.ts';
 import { ensurePersonaJoined } from './personasMembership.preload.ts';
 import { isOutgoing } from '../messages/helpers.std.ts';
+import { ToastType } from '../types/Toast.dom.tsx';
 
 const log = createLogger('personasActions');
 
@@ -99,19 +101,27 @@ export async function sendPersonaRate(
 export async function sendPersonaPoll(
   conversation: ConversationModel,
   descriptor: PersonaPollDescriptor,
-  targetEh?: string
-): Promise<boolean> {
+  targetEh?: string,
+  // Send the poll RECORD without putting a poll bubble in the timeline.
+  //
+  // An admin's permanent ban still needs the poll record — that is the mechanism the
+  // replica settles on — but showing the group a poll they are invited to vote in
+  // misrepresents what happened: the decision is already made, and a visible poll
+  // invites Keep votes that would cancel it. The record travels either way; only the
+  // rendering is suppressed, exactly as ballots already are.
+  { hidden = false }: { hidden?: boolean } = {}
+): Promise<string | undefined> {
   if (!isPersonasEngineEnabled()) {
-    return false;
+    return undefined;
   }
   try {
     if (!(await ensurePersonaJoined(conversation))) {
       log.warn('sendPersonaPoll: not joined; refusing to open a poll');
-      return false;
+      return undefined;
     }
     const poll = composePersonaPoll(descriptor, targetEh);
     if (!poll) {
-      return false;
+      return undefined;
     }
     await conversation.enqueueMessageForSend({
       // No plaintext of its own — the poll bubble renders from personaPoll.
@@ -129,34 +139,104 @@ export async function sendPersonaPoll(
         target: descriptor.kind === 'ban' ? targetEh : undefined,
       },
       personaCarriageBody: poll.body,
-    });
+    }, hidden ? { hideFromTimeline: true } : {});
     log.info(
       `sendPersonaPoll: opened ${descriptor.kind} poll (eh ${poll.eh.slice(0, 12)}…)`
     );
-    return true;
+    // Return the poll's own eh, not just success. A caller that opens a poll usually
+    // wants to act on it immediately — the ban flow casts the opener's ballot — and
+    // without the eh there is no way to name the poll it just created.
+    return poll.eh;
   } catch (error) {
     log.error(`sendPersonaPoll failed: ${toLogFormat(error)}`);
-    return false;
+    return undefined;
   }
 }
 
 // Open a ban poll on a specific post. The question names the persona rather than the
 // account, because the persona is the only thing anyone is entitled to know.
+/**
+ * Open a ban poll on a post.
+ *
+ * TWO CALLERS, distinguished only by `decisive`:
+ *
+ *   `decisive: false` — "Request ban poll", available to EVERY member. Opens the poll
+ *     and casts nothing. The requester is raising it for the group to decide, and
+ *     auto-voting on their behalf would misreport a request as a verdict.
+ *
+ *   `decisive: true` — "Ban permanently", admins only. Also casts the opener's Ban
+ *     ballot, so the poll stands at 1-0. `passes_ban()` is `yes > no`
+ *     (`replica/tally.rs:90`), so it carries at the close barrier
+ *     (`poll_close_barriers`, default 2) and the existing settlement machinery invokes
+ *     BAN_FLAG. The target's next scan absorbs it, `banned` is set in-circuit, and
+ *     their persona proofs stop being satisfiable — they can still send ordinary
+ *     attributable messages, which is exactly the intended outcome.
+ *
+ * So the permanent ban is REAL and ZK-enforced, using machinery that already exists:
+ * no new record kind, no protocol change.
+ *
+ * The one honest gap versus a truly unilateral ban: another member voting Keep makes it
+ * 1-1, and `yes > no` fails, so the ban does not carry. Closing that needs a
+ * `Record::Ban` whose accept rule sets `banned` directly, plus an admin key in the
+ * replica config so replicas can verify who is entitled to emit it (see
+ * PERSONAS_ZK_WORKPLAN.md step 3b). Until then this is admin-initiated and
+ * group-cancellable, which is worth saying out loud rather than calling it permanent in
+ * the code and discovering otherwise.
+ */
 export async function sendPersonaBanPoll(
   conversation: ConversationModel,
   targetEh: string,
-  persona: string | undefined
+  persona: string | undefined,
+  { decisive = false }: { decisive?: boolean } = {}
 ): Promise<boolean> {
   const subject = persona ? `~${persona}` : 'this anonymous author';
-  return sendPersonaPoll(
+  const pollEh = await sendPersonaPoll(
     conversation,
     {
       question: `Revoke ${subject}?`,
       options: [...BAN_POLL_OPTIONS],
       kind: 'ban',
+      // A decisive ban is never rendered, on ANY client. See the note on
+      // PersonaPollDescriptor.silent: the local-only suppression this replaces left the
+      // poll visible to every recipient.
+      silent: decisive,
     },
-    targetEh
+    targetEh,
+    // A decisive ban suppresses the poll bubble: the verdict is already cast, so
+    // rendering a votable poll would both misdescribe it and invite the Keep vote that
+    // cancels it. A REQUEST stays visible — the whole point is for the group to see it.
+    { hidden: decisive }
   );
+  if (pollEh == null) {
+    return false;
+  }
+
+  if (!decisive) {
+    // A request, not a verdict. Left unvoted on purpose — see the doc comment.
+    log.info('sendPersonaBanPoll: ban poll opened for the group to decide');
+    return true;
+  }
+
+  // Cast the admin's Ban ballot, which is what makes this carry rather than merely ask.
+  //
+  // No anonymity cost: the ballot rides the shared phantom like every other, so it is
+  // unlinkable even though the admin is the one casting it. (Inference is still
+  // possible — if only admins ever open ban polls, an observer who knows the admin set
+  // can narrow down who opened one. That leak is in the OPENING, not the ballot, and is
+  // already documented in the status panel.)
+  const voted = await sendPersonaVote(conversation, pollEh, BAN_OPTION_INDEX);
+  if (!voted) {
+    // The poll exists but stands 0-0, so it will NOT carry. That is a materially
+    // different outcome from what the admin asked for, so report failure rather than
+    // letting the UI claim a ban is coming.
+    log.error(
+      'sendPersonaBanPoll: poll opened but the ballot failed — the ban will NOT carry; ' +
+      'vote Ban in the poll by hand'
+    );
+    return false;
+  }
+  log.info('sendPersonaBanPoll: ban poll opened and ballot cast; carries at close');
+  return true;
 }
 
 // Cast a ballot. `pollEh` is the poll message's `personaEh`.
@@ -391,6 +471,25 @@ export async function maybeSendPersonaRateForReaction({
 // redundant anyway — dropping it loses nothing.
 let scanInFlight = false;
 
+
+/**
+ * Is this member banned in this group? `undefined` when it cannot be determined
+ * (observer, or an addon without the binding) — deliberately tri-state, so callers can
+ * avoid treating "don't know" as "not banned".
+ */
+export function isPersonaBanned(): boolean | undefined {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.isBanned !== 'function') {
+    return undefined;
+  }
+  try {
+    return engine.isBanned();
+  } catch (error) {
+    log.error(`isPersonaBanned: read failed: ${toLogFormat(error)}`);
+    return undefined;
+  }
+}
+
 export async function sendPersonaScan(
   conversation: ConversationModel,
   { quiet = false }: { quiet?: boolean } = {}
@@ -408,6 +507,8 @@ export async function sendPersonaScan(
   // error in any sense. Logging it at error level on every message would bury real
   // failures in noise.
   scanInFlight = true;
+  // Read BEFORE the scan: this is what makes the notification fire on the transition.
+  const bannedBefore = isPersonaBanned();
   try {
     // A scan is only meaningful once we are a member, but unlike the others it should
     // not CAUSE a join — a lurking instance that never posted has nothing to absorb.
@@ -420,6 +521,19 @@ export async function sendPersonaScan(
       { hideFromTimeline: true }
     );
     log.info(`sendPersonaScan: scan sent (eh ${scan.eh.slice(0, 12)}…)`);
+
+    // THE BAN NOTIFICATION. A scan is the only thing that writes `banned` into the
+    // member's object, so this is the first instant the client can know — and the ban
+    // record itself is anonymous, so the member may never see it any other way.
+    //
+    // Compared against the value from BEFORE the scan so the toast fires once, on the
+    // transition, rather than on every scan for the rest of the member's life.
+    if (bannedBefore !== true && isPersonaBanned() === true) {
+      log.warn('sendPersonaScan: this scan absorbed a BAN — notifying the member');
+      window.reduxActions?.toast?.showToast({
+        toastType: ToastType.PersonaBanned,
+      });
+    }
     return true;
   } catch (error) {
     const message = String(error);

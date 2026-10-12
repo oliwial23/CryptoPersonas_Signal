@@ -290,6 +290,7 @@ const actions = () => ({
   sendPollVote: action('sendPollVote'),
   // Personas demo action.
   personaBanPoll: action('personaBanPoll'),
+  personaBanNow: action('personaBanPoll'),
   saveAttachment: action('saveAttachment'),
   saveAttachments: action('saveAttachments'),
   pushPanelForConversation: action('pushPanelForConversation'),

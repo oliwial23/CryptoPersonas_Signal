@@ -200,6 +200,20 @@ export type PersonaPollDescriptor = {
   question: string;
   options: ReadonlyArray<string>;
   kind: 'ban' | 'standard';
+  /**
+   * Do not RENDER a poll bubble for this poll on any client, including the sender's.
+   *
+   * The record is still sent, ingested and settled exactly as normal — this flag
+   * affects display only. It exists for an admin's permanent ban, where the decision is
+   * already made: showing the group a poll they appear to be able to vote in both
+   * misdescribes what happened and invites the Keep vote that would stop the ban from
+   * carrying.
+   *
+   * Suppressing it on the SENDER alone (hideFromTimeline) was not enough and is the bug
+   * this fixes: every recipient decodes the same record and builds its own poll bubble,
+   * so the poll stayed visible to everyone except the admin who cast it.
+   */
+  silent?: boolean;
 };
 
 // NOTE on poll_id. An earlier version of this carried a client-drawn random `pollId`,
@@ -223,6 +237,9 @@ type PollEnvelope = {
   q: string;
   o: ReadonlyArray<string>;
   k: 'ban' | 'standard';
+  // `s` for silent. Absent on every poll written before this existed, which decodes to
+  // `false` — the old, visible behaviour — so no older record changes meaning.
+  s?: boolean;
 };
 
 // Wrap a POLL record together with its display descriptor.
@@ -235,6 +252,8 @@ export function encodePollBody(
     q: descriptor.question,
     o: [...descriptor.options],
     k: descriptor.kind,
+    // Only emitted when true, so an ordinary poll's bytes are unchanged.
+    ...(descriptor.silent ? { s: true } : {}),
   };
   return (
     PERSONAS_POLL_MARKER +
@@ -277,6 +296,7 @@ export function decodePollDescriptor(
     question: envelope.q,
     options: envelope.o.map(String),
     kind: envelope.k === 'ban' ? 'ban' : 'standard',
+    silent: envelope.s === true,
   };
 }
 

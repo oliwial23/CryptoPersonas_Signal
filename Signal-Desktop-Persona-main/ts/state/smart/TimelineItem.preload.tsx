@@ -31,6 +31,7 @@ import { startConversation } from '../../util/startConversation.dom.ts';
 import { useTimelineItem } from '../selectors/timeline.preload.ts';
 import {
   areMessagesInSameGroup,
+  areMessagesInSameContext,
   shouldCurrentMessageHideMetadata,
   UnreadIndicatorPlacement,
 } from '../../util/timelineUtil.std.ts';
@@ -126,6 +127,20 @@ export const SmartTimelineItem = memo(function SmartTimelineItem(
       unreadIndicatorPlacement === UnreadIndicatorPlacement.JustBelow,
       nextItem
     );
+  // Personas demo: is this message mid-run inside a context? This is the only place
+  // with a view of a message's neighbours, so the chain has to be decided here and
+  // passed down. Note these are NOT gated on `item.type === 'none'` the way collapsing
+  // is: a context chain is about the conversation, not about one speaker's run, so it
+  // should survive whatever grouping the timeline has already applied.
+  const personaContextContinuesAbove = areMessagesInSameContext(
+    previousItem,
+    itemFromSelector
+  );
+  const personaContextContinuesBelow = areMessagesInSameContext(
+    itemFromSelector,
+    nextItem
+  );
+
   const shouldHideMetadata =
     item.type === 'none' &&
     shouldCurrentMessageHideMetadata(
@@ -175,6 +190,7 @@ export const SmartTimelineItem = memo(function SmartTimelineItem(
     sendPollVote,
     // Personas demo: open a ban poll on a persona post.
     personaBanPoll,
+    personaBanNow,
     setMessageToEdit,
     showAttachmentDownloadStillInProgressToast,
     showConversation,
@@ -264,6 +280,8 @@ export const SmartTimelineItem = memo(function SmartTimelineItem(
       renderUniversalTimerNotification={renderUniversalTimerNotification}
       shouldCollapseAbove={shouldCollapseAbove}
       shouldCollapseBelow={shouldCollapseBelow}
+      personaContextContinuesAbove={personaContextContinuesAbove}
+      personaContextContinuesBelow={personaContextContinuesBelow}
       shouldHideMetadata={shouldHideMetadata}
       shouldRenderDateHeader={shouldRenderDateHeader}
       showEditHistoryModal={showEditHistoryModal}
@@ -301,6 +319,7 @@ export const SmartTimelineItem = memo(function SmartTimelineItem(
       retryMessageSend={retryMessageSend}
       sendPollVote={sendPollVote}
       personaBanPoll={personaBanPoll}
+      personaBanNow={personaBanNow}
       renderItem={renderItem}
       returnToActiveCall={returnToActiveCall}
       saveAttachment={saveAttachment}

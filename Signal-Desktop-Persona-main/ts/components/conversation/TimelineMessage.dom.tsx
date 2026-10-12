@@ -37,7 +37,8 @@ import { isNotNil } from '../../util/isNotNil.std.ts';
 import type { AxoMenuBuilder } from '../../axo/AxoMenuBuilder.dom.tsx';
 import { AxoContextMenu } from '../../axo/AxoContextMenu.dom.tsx';
 import { useDocumentKeyDown } from '../../hooks/useDocumentKeyDown.dom.ts';
-import type { Emoji } from '../../axo/emoji.std.ts';
+import { Emoji } from '../../axo/emoji.std.ts';
+import { AxoConfirmDialog } from '../../axo/AxoConfirmDialog.dom.tsx';
 
 const { useAxoContextMenuOutsideKeyboardTrigger } = AxoContextMenu;
 
@@ -69,6 +70,7 @@ export type PropsActions = {
   endPoll: (id: string) => void;
   // Personas demo: open a ban poll on this persona post.
   personaBanPoll: (id: string) => void;
+  personaBanNow: (id: string) => void;
   reactToMessage: (
     id: string,
     { emoji, remove }: { emoji: Emoji.Variant; remove: boolean }
@@ -134,6 +136,7 @@ export function TimelineMessage(props: Props): JSX.Element {
     copyMessageText,
     endPoll,
     personaBanPoll,
+    personaBanNow,
     personaEh,
     personaPoll,
     expirationLength,
@@ -290,6 +293,7 @@ export function TimelineMessage(props: Props): JSX.Element {
     setQuoteByMessageId(conversationId, id);
   }, [canReply, conversationId, id, setQuoteByMessageId]);
 
+
   const handleReact = useCallback(() => {
     if (canReact) {
       toggleReactionPicker();
@@ -376,9 +380,19 @@ export function TimelineMessage(props: Props): JSX.Element {
           // entirely and can open a ban poll regardless. Real enforcement needs the
           // moderator credential inside the proof — that is what badges are for
           // (PERSONAS_SERVERLESS_TODO.md section 2).
+          // ANY member may request a poll: it only asks the group. Previously this was
+          // admin-gated, which left ordinary members with no way to flag a post at all.
+          isPersonaPost={personaEh != null && personaPoll == null}
           onPersonaBanPoll={
-            personaEh != null && personaPoll == null && canOpenPersonaBanPoll
+            personaEh != null && personaPoll == null
               ? () => personaBanPoll(id)
+              : null
+          }
+          // Admin-only. Same target conditions, plus the Signal group-admin role —
+          // this is the one that actually carries, so it is the one that is gated.
+          onPersonaBanNow={
+            personaEh != null && personaPoll == null && canOpenPersonaBanPoll
+              ? () => setIsConfirmingBan(true)
               : null
           }
           onRetryMessageSend={canRetry ? () => retryMessageSend(id) : null}
@@ -435,6 +449,7 @@ export function TimelineMessage(props: Props): JSX.Element {
       canRetryDeleteForEveryone,
       conversationId,
       personaBanPoll,
+      personaBanNow,
       personaEh,
       personaPoll,
       copyMessageText,
@@ -459,10 +474,26 @@ export function TimelineMessage(props: Props): JSX.Element {
     ]
   );
 
+  // THE REACTION PICKER'S ANCHOR.
+  //
+  // Held in state rather than a ref so that attaching it re-renders the <Popper>; a
+  // plain ref would be populated after the popper had already positioned itself
+  // against nothing.
+  //
+  // Why not <Reference>: the picker is positioned by react-popper from whichever
+  // <Reference> is mounted inside the <Manager>, and those live inside individual
+  // hover buttons that come and go with window width and with `canReact`. Two separate
+  // attempts to cover every combination still left the picker unanchored in practice,
+  // and an unanchored popper is placed at viewport 0,0 — the top-left corner of the
+  // window, overlapping the close button. Passing `referenceElement` explicitly removes
+  // the whole question: the anchor is the buttons container, which is always mounted.
+  const [menuElement, setMenuElement] = useState<HTMLDivElement | null>(null);
+
   const renderMenu = useCallback(() => {
     return (
       <Manager>
         <MessageMenu
+          rootRef={setMenuElement}
           i18n={i18n}
           isWindowWidthNotNarrow={isWindowWidthNotNarrow}
           direction={direction}
@@ -475,6 +506,10 @@ export function TimelineMessage(props: Props): JSX.Element {
           createPortal(
             <Popper
               placement="top"
+              // Explicit anchor — see `menuElement`. `?? undefined` so that before the
+              // container has mounted we fall back to react-popper's own <Reference>
+              // lookup rather than passing null and anchoring to nothing.
+              referenceElement={menuElement ?? undefined}
               modifiers={[
                 offsetDistanceModifier(4),
                 popperPreventOverflowModifier(),
@@ -502,6 +537,7 @@ export function TimelineMessage(props: Props): JSX.Element {
       </Manager>
     );
   }, [
+    menuElement,
     i18n,
     isWindowWidthNotNarrow,
     direction,
@@ -521,9 +557,46 @@ export function TimelineMessage(props: Props): JSX.Element {
     renderMessageContextMenu,
   ]);
 
+  // CONFIRMATION FOR A PERMANENT BAN.
+  //
+  // The other destructive persona action, "Request ban poll", is reversible — the group
+  // votes and may decline. A permanent ban is not: once the poll closes the callback is
+  // invoked, and the target's next scan writes `banned` into their object. There is no
+  // unban in this protocol. A menu item one slip of the mouse away from that deserves a
+  // stop.
+  //
+  // Deliberately NOT applied to the poll request: a confirmation on a harmless, common
+  // action is the kind of friction that teaches people to click through dialogs without
+  // reading them, which would weaken this one.
+  const [isConfirmingBan, setIsConfirmingBan] = useState(false);
+  const handleConfirmBan = useCallback(() => {
+    setIsConfirmingBan(false);
+    personaBanNow(id);
+  }, [id, personaBanNow]);
+
   const handleWrapperKeyDown = useAxoContextMenuOutsideKeyboardTrigger();
 
   return (
+    <>
+      <AxoConfirmDialog.Root
+        open={isConfirmingBan}
+        onOpenChange={setIsConfirmingBan}
+        title="Ban this author permanently?"
+        description={
+          'You are about to ban this user. They will lose anonymous and pseudonymous ' +
+          'posting in this group and will only be able to send messages under their ' +
+          'real identity here. This takes effect at the next settlement barrier and ' +
+          'cannot be undone. Do you want to proceed?'
+        }
+      >
+        <AxoConfirmDialog.Cancel />
+        <AxoConfirmDialog.Action
+          variant="strong-primary"
+          onClick={handleConfirmBan}
+        >
+          Ban permanently
+        </AxoConfirmDialog.Action>
+      </AxoConfirmDialog.Root>
     <Message
       {...props}
       renderingContext="conversation/TimelineItem"
@@ -535,6 +608,7 @@ export function TimelineMessage(props: Props): JSX.Element {
       onReplyToMessage={handleReplyToMessage}
       onWrapperKeyDown={handleWrapperKeyDown}
     />
+    </>
   );
 }
 
@@ -548,6 +622,8 @@ type MessageMenuProps = {
     renderer: AxoMenuBuilder.Renderer,
     children: ReactNode
   ) => ReactNode;
+  /** Callback ref for the buttons container, used as the reaction picker's anchor. */
+  rootRef: (element: HTMLDivElement | null) => void;
 } & Pick<MessageProps, 'i18n' | 'direction'>;
 
 function MessageMenu({
@@ -558,9 +634,17 @@ function MessageMenu({
   onReplyToMessage,
   onReact,
   renderMessageContextMenu,
+  rootRef,
 }: MessageMenuProps) {
   return (
     <div
+      // The picker anchors to THIS element. See the note on `menuElement` above: the
+      // per-button <Reference> approach kept leaving the popper unanchored, and an
+      // unanchored popper lands at viewport 0,0 — the window's top-left corner, next
+      // to the traffic lights. This container is always mounted (it is only
+      // `opacity: 0` until hover, per _modules.scss) and always has a real box next to
+      // the message, so anchoring to it is correct in every state.
+      ref={rootRef}
       className={classNames(
         'module-message__buttons',
         `module-message__buttons--${direction}`
@@ -645,12 +729,26 @@ function MessageMenu({
       )}
       <Reference>
         {({ ref: popperRef }) => {
-          // Only attach the popper reference to the collapsed menu button if
-          //   the reaction button is not visible (it is hidden when the
-          //   timeline is narrow)
-          const maybePopperRef = !isWindowWidthNotNarrow
-            ? popperRef
-            : undefined;
+          // Attach the popper reference to the collapsed menu button whenever the
+          // REACT BUTTON is not the one carrying it.
+          //
+          // Upstream only checked the width: narrow => anchor here, wide => anchor on
+          // the react button. That leaves one combination with NO anchor at all —
+          // wide window, but `onReact` falsy, so the react button (and the <Reference>
+          // inside it) never renders. react-popper then falls back to the viewport
+          // origin and the picker appears in the top-left corner of the window, over
+          // the traffic lights.
+          //
+          // Upstream never hits it because `onReact` is effectively always set for a
+          // reactable message. Personas made it ordinary: `canReact` is false for your
+          // own outgoing persona posts (canReplyOrReact's outgoing branch wants a
+          // recipient in `isSent` state, which a phantom-routed send does not record
+          // the usual way), so wide + no-react is a normal state here.
+          //
+          // Testing both conditions makes the anchor unconditional across all four
+          // combinations of width and react-ability, rather than three of them.
+          const maybePopperRef =
+            !isWindowWidthNotNarrow || !onReact ? popperRef : undefined;
 
           return renderMessageContextMenu(
             'AxoDropdownMenu',

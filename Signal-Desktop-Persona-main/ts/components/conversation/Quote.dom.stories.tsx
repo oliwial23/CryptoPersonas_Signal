@@ -136,6 +136,7 @@ const defaultMessageProps: TimelineMessagesProps = {
   sendPollVote: action('default--sendPollVote'),
   // Personas demo action.
   personaBanPoll: action('default--personaBanPoll'),
+  personaBanNow: action('default--personaBanPoll'),
   copyMessageText: action('copyMessageText'),
   retryDeleteForEveryone: action('default--retryDeleteForEveryone'),
   saveAttachment: action('saveAttachment'),
