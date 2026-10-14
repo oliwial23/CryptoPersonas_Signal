@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cryptographic Personas</title>
+<style>
+  :root { --bg: #fff; --fg: #1b1b1b; --muted: #666; --card: #f4f5f7; --accent: #2c6bed; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121212; --fg: #eee; --muted: #aaa; --card: #1f2023; --accent: #6b9bff; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 16px; }
+  h1 { margin: 0 0 4px; font-size: 1.6rem; }
+  p { color: var(--muted); }
+  ul { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  a.member { display: block; padding: 18px; border-radius: 10px; background: var(--card);
+             color: var(--fg); text-decoration: none; text-align: center; font-weight: 600; text-transform: capitalize; }
+  a.member:hover { outline: 2px solid var(--accent); }
+  ol { color: var(--muted); padding-left: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Cryptographic Personas — demo</h1>
+  <p>Each link opens one group member's Signal client in your browser. Pick a member nobody
+     else is using; two people in one member see and control the same screen.</p>
+  <ul>
+    <li><a class="member" href="alice/">alice</a></li>
+    <li><a class="member" href="bob/">bob</a></li>
+    <li><a class="member" href="carol/">carol</a></li>
+    <li><a class="member" href="dave/">dave</a></li>
+    <li><a class="member" href="erin/">erin</a></li>
+  </ul>
+  <ol>
+    <li>The first launch after a reset generates proving keys and registers the account. Give it a few minutes.</li>
+    <li>One member creates a group and adds the others. Everyone else accepts the invite.</li>
+    <li>Then post anonymously, post as a persona, react, rate, and run a ban poll.</li>
+  </ol>
+</main>
+<script>
+  // websockify serves noVNC at /<member>/vnc.html; point its websocket back through
+  // the same /play/<member>/ prefix so the gateway can route it.
+  for (const a of document.querySelectorAll('a.member')) {
+    const m = a.getAttribute('href').replace(/\/$/, '');
+    a.href = `${m}/vnc.html?path=play/${m}/websockify&autoconnect=1&resize=remote&reconnect=1`;
+  }
+</script>
+</body>
+</html>

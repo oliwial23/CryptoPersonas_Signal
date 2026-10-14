@@ -37,7 +37,7 @@ index bc8fe7962..5769d1544 100644
 +  # just fail auth first, so upstream never noticed. Lowercased for the local MinIO mock.
 +  bucket: prekey-bucket # S3 Bucket name
    region: us-west-2    # AWS region
-+  endpointOverride: http://127.0.0.1:9100 # personas: local MinIO, see deploy/signal-test-server/minio.sh
++  endpointOverride: http://127.0.0.1:9110 # personas: local MinIO, see deploy/signal-test-server/minio.sh
  
  cacheCluster: # Redis server configuration for cache cluster
    type: local

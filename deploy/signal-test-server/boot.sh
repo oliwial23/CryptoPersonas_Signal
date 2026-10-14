@@ -6,13 +6,18 @@
 #
 # Env overrides:
 #   SIGNAL_SERVER_DIR   path to the Signal-Server checkout (default ~/Repos/Signal-Server)
-#   FDB_C_DYLIB         path to libfdb_c.dylib (default ./.local/libfdb_c.dylib; macOS)
+#   FDB_C_DYLIB         path to the FoundationDB client lib (default ./.local/libfdb_c.dylib
+#                       on macOS, ./.local/libfdb_c.so on Linux; see setup-fdb-client.sh)
 #   JAVA_HOME           JDK 25 home (default: /usr/libexec/java_home -v 25 on macOS)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SIGNAL_SERVER_DIR="${SIGNAL_SERVER_DIR:-$HOME/Repos/Signal-Server}"
-FDB_C_DYLIB="${FDB_C_DYLIB:-$HERE/.local/libfdb_c.dylib}"
+if [ "$(uname -s)" = "Darwin" ]; then
+  FDB_C_DYLIB="${FDB_C_DYLIB:-$HERE/.local/libfdb_c.dylib}"
+else
+  FDB_C_DYLIB="${FDB_C_DYLIB:-$HERE/.local/libfdb_c.so}"
+fi
 
 # --- JDK 25 ---
 if [ -z "${JAVA_HOME:-}" ] && [ -x /usr/libexec/java_home ]; then
@@ -28,9 +33,12 @@ if [ -S "$HOME/.colima/default/docker.sock" ] && [ -z "${DOCKER_HOST:-}" ]; then
 fi
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE="${TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE:-/var/run/docker.sock}"
 
-# --- FoundationDB host client lib (macOS): point fdb-java at our extracted arm64
-#     dylib. JAVA_TOOL_OPTIONS so the property reaches the forked exec:java JVM.
-#     On Linux, libfdb_c.so is on the loader path already, so we skip this. ---
+# --- FoundationDB host client lib: point fdb-java at our staged copy.
+#     JAVA_TOOL_OPTIONS so the property reaches the forked exec:java JVM. On Linux we
+#     fetch it on first boot (no root needed); on macOS the extraction is a manual step. ---
+if [ ! -f "$FDB_C_DYLIB" ] && [ "$(uname -s)" = "Linux" ]; then
+  "$HERE/setup-fdb-client.sh" || { echo "!! could not stage libfdb_c.so" >&2; exit 1; }
+fi
 if [ -f "$FDB_C_DYLIB" ]; then
   export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -DFDB_LIBRARY_PATH_FDB_C=$FDB_C_DYLIB"
 elif [ "$(uname -s)" = "Darwin" ]; then

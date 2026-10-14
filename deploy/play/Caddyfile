@@ -1,0 +1,48 @@
+# Gateway on :8443 — what the UMIACS load balancer forwards to (public 443, TLS terminated
+# upstream, plain HTTP to us). Supersedes plain-proxy.sh on the VM: same Signal routing,
+# plus the browser-playable members under /play/.
+{
+	auto_https off
+	admin off
+}
+
+:8443 {
+	# --- browser-playable members -------------------------------------------------------
+	# The whole /play tree is behind one shared password: anyone who reaches a member's
+	# noVNC page IS that member, so this is the only thing standing between the public
+	# internet and the demo accounts.
+	@play path /play /play/*
+	basic_auth @play {
+		{$PLAY_USER:demo} {$PLAY_PASSWORD_HASH}
+	}
+
+	# /play/<member>/... -> that member's noVNC (websockify also serves the web client).
+	@member path_regexp member ^/play/(alice|bob|carol|dave|erin)/
+	@storage path /v1/groups* /v2/groups* /v1/storage*
+
+	# `route` keeps these in written order, so an unknown /play path 404s here instead
+	# of falling through to the chat server.
+	route {
+		redir /play /play/
+		handle /play/ {
+			root * /srv/play
+			rewrite * /index.html
+			file_server
+		}
+		handle @member {
+			uri strip_prefix /play/{re.member.1}
+			reverse_proxy {re.member.1}:6080
+		}
+		handle /play/* {
+			respond "no such member" 404
+		}
+
+		# --- Signal backend (same routing as plain-proxy.sh / tls-proxy.sh) -------------
+		handle @storage {
+			reverse_proxy {$STORAGE_UPSTREAM:host.docker.internal:8090}
+		}
+		handle {
+			reverse_proxy {$CHAT_UPSTREAM:host.docker.internal:8080}
+		}
+	}
+}

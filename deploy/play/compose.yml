@@ -1,0 +1,70 @@
+# Browser-playable demo members + the :8443 gateway, run on the same host as the Signal
+# backend (chat server :8080, storage-service :8090). See README.md.
+#
+#   cd deploy/play && docker compose up -d --build            # all five members
+#   docker compose up -d gateway alice bob carol             # or a subset
+
+x-member: &member
+  image: personas-play
+  build:
+    context: ../..
+    dockerfile: deploy/play/Dockerfile
+  restart: unless-stopped
+  shm_size: 1g          # Chromium renders through /dev/shm; Docker's 64 MB default crashes tabs
+  mem_limit: 1600m
+  volumes:
+    # ONE roster dir and ONE keys dir for every member: the phantom bundle, barrier anchor
+    # and send state are coordinated through these files (see PERSONAS_SERVER_DEPLOY.md §8).
+    - roster:/shared/roster
+    - keys:/shared/keys
+  environment: &member-env
+    PERSONAS_SERVER_URL: ${PERSONAS_SERVER_URL:-https://signalserver.umiacs.umd.edu}
+    PERSONAS_RESET: ${PERSONAS_RESET:-0}
+
+services:
+  gateway:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["0.0.0.0:8443:8443"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      PLAY_USER: ${PLAY_USER:-demo}
+      PLAY_PASSWORD_HASH: ${PLAY_PASSWORD_HASH:?run ./set-password.sh first}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./index.html:/srv/play/index.html:ro
+
+  alice:
+    <<: *member
+    hostname: alice
+    volumes: [roster:/shared/roster, keys:/shared/keys, alice:/home/member]
+    environment: { <<: *member-env, PERSONAS_INSTANCE: alice, PERSONAS_NUMBER: "+12025550001" }
+  bob:
+    <<: *member
+    hostname: bob
+    volumes: [roster:/shared/roster, keys:/shared/keys, bob:/home/member]
+    environment: { <<: *member-env, PERSONAS_INSTANCE: bob, PERSONAS_NUMBER: "+12025550002" }
+  carol:
+    <<: *member
+    hostname: carol
+    volumes: [roster:/shared/roster, keys:/shared/keys, carol:/home/member]
+    environment: { <<: *member-env, PERSONAS_INSTANCE: carol, PERSONAS_NUMBER: "+12025550003" }
+  dave:
+    <<: *member
+    hostname: dave
+    volumes: [roster:/shared/roster, keys:/shared/keys, dave:/home/member]
+    environment: { <<: *member-env, PERSONAS_INSTANCE: dave, PERSONAS_NUMBER: "+12025550004" }
+  erin:
+    <<: *member
+    hostname: erin
+    volumes: [roster:/shared/roster, keys:/shared/keys, erin:/home/member]
+    environment: { <<: *member-env, PERSONAS_INSTANCE: erin, PERSONAS_NUMBER: "+12025550005" }
+
+volumes:
+  roster:
+  keys:
+  alice:
+  bob:
+  carol:
+  dave:
+  erin:

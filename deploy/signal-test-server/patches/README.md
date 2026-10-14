@@ -57,7 +57,7 @@ applied (`endpointOverride` points at it and the boot fails fast otherwise — c
 not a silent no-op).
 
 Three changes, all required together:
-- `test.yml`: adds `endpointOverride: http://127.0.0.1:9100` (MinIO). Also lowercases the bucket
+- `test.yml`: adds `endpointOverride: http://127.0.0.1:9110` (MinIO). Also lowercases the bucket
   name (`preKeyBucket` → `prekey-bucket`) — the original violates S3's bucket-naming rules (no
   uppercase); real AWS would have rejected it too with `InvalidBucketName`, but the placeholder
   credentials always failed auth first, so this was never reached upstream either.
@@ -67,11 +67,32 @@ Three changes, all required together:
   effect when `endpointOverride` is unset (real AWS accepts path-style too), so this is safe
   regardless of whether MinIO is running.
 - `minio.sh` (sibling script, same conventions as `tls-proxy.sh`): starts MinIO on
-  `127.0.0.1:9100` credentialed with the exact static `accessKey`/`secretAccess` pair
-  `test-secrets-bundle.yml` already supplies everywhere, and creates the bucket (MinIO doesn't
-  auto-create buckets; `docker run --entrypoint sh minio/mc -c 'mc alias set ... && mc mb ...'`).
+  `127.0.0.1:9110` credentialed with the exact static `accessKey`/`secretAccess` pair
+  `test-secrets-bundle.yml` already supplies everywhere, and creates the bucket. It uses
+  `bitnamilegacy/minio` with `MINIO_DEFAULT_BUCKETS`: MinIO stopped publishing `minio/minio` and
+  `minio/mc` in late 2025, so a machine without a cached copy can no longer pull them. Port 9110,
+  not 9100: 9100 is Prometheus node_exporter's port, which UMIACS VMs already occupy.
 
 Verified: 4/4 post-fix `b2_shared_identity` runs show `Uploading pre-keys` completing for both
 ACI and PNI identities with no error (previously: HTTP 500, 4/4). `a1_smoke`/
 `e2c_key_distribution` still pass — no regression. `b2_shared_identity` itself still fails, for a
 different, previously-masked reason — see `docs/FINDINGS.md` **O14**.
+
+## 0004 — Redis cluster without Compose links (Podman)
+
+`RedisClusterExtension` (which `LocalFaultTolerantRedisClusterFactory` uses for `cacheCluster`
+and friends) started the three-node cluster with Testcontainers' `ComposeContainer` and
+`withExposedService(...)`. That reaches each service through an `alpine/socat` "ambassador"
+container wired up with legacy Docker `--link`s, and Podman rejects links outright:
+
+```
+Status 400: {"cause":"link is not supported","message":"bad parameter: link is not supported"}
+```
+
+so the server dies at config parsing (`Failed to parse configuration at: cacheCluster`). The
+patch starts the same three `bitnamilegacy/redis-cluster` nodes as plain `GenericContainer`s on
+one `Network` with aliases `redis-0..2` (the image resolves `REDIS_NODES` by those names),
+started **together** with `Startables.deepStart` — each node blocks until it can resolve every
+name in `REDIS_NODES`, so a sequential start deadlocks on the first — and keeps the
+internal-IP → mapped-port `SocketAddressResolver` unchanged. Verified under Docker with
+`CardinalityEstimatorTest` (2/2), so it is safe on the laptop too.

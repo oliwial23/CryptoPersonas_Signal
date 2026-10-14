@@ -172,7 +172,7 @@ grep -nE "applied patch|BUILD|ERROR|Caused by|Started" "$WORK/chat.log" | tail -
 ```sh
 curl -sS http://127.0.0.1:8081/ping                                        # pong
 cd "$WORK/repos/CryptoPersonas_Signal/deploy/signal-test-server" && ./verify.sh
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9100/minio/health/live   # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9110/minio/health/live   # 200
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/v1/groups           # not 000
 curl -k -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:8443/v1/config       # 404 = routed
 curl -k -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:8443/v1/storage      # not 404

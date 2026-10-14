@@ -1,0 +1,16 @@
+# BuildKit reads <Dockerfile>.dockerignore in preference to the context root's, so this
+# keeps a multi-GB laptop checkout (node_modules, target/) out of the build context.
+**/.git
+**/node_modules
+**/target
+**/.DS_Store
+**/.local
+Signal-Desktop-Persona-main/bundles
+Signal-Desktop-Persona-main/release
+Signal-Desktop-Persona-main/build/compact-locales
+Signal-Desktop-Persona-main/packages/personas-engine/*.node
+# Laptop configs carry a machine-specific CA and 127.0.0.1 URLs; the entrypoint writes its own.
+Signal-Desktop-Persona-main/config/local-*
+crypto_personas
+experiments
+json_files

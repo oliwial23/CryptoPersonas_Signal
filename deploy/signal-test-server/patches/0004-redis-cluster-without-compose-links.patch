@@ -1,0 +1,190 @@
+diff --git a/service/src/test/java/org/whispersystems/textsecuregcm/redis/RedisClusterExtension.java b/service/src/test/java/org/whispersystems/textsecuregcm/redis/RedisClusterExtension.java
+index bba6e39bb..f80075a84 100644
+--- a/service/src/test/java/org/whispersystems/textsecuregcm/redis/RedisClusterExtension.java
++++ b/service/src/test/java/org/whispersystems/textsecuregcm/redis/RedisClusterExtension.java
+@@ -14,12 +14,9 @@ import io.lettuce.core.resource.ClientResources;
+ import io.lettuce.core.resource.DnsResolvers;
+ import io.lettuce.core.resource.MappingSocketAddressResolver;
+ import io.lettuce.core.resource.SocketAddressResolver;
+-import java.io.File;
+-import java.io.FileOutputStream;
+-import java.nio.charset.StandardCharsets;
+ import java.time.Duration;
+ import java.time.Instant;
+-import java.util.Arrays;
++import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.stream.Collectors;
+@@ -28,7 +25,9 @@ import org.junit.jupiter.api.extension.AfterEachCallback;
+ import org.junit.jupiter.api.extension.BeforeAllCallback;
+ import org.junit.jupiter.api.extension.BeforeEachCallback;
+ import org.junit.jupiter.api.extension.ExtensionContext;
+-import org.testcontainers.containers.ComposeContainer;
++import org.testcontainers.containers.GenericContainer;
++import org.testcontainers.containers.Network;
++import org.testcontainers.lifecycle.Startables;
+ import org.testcontainers.containers.wait.strategy.Wait;
+ import org.testcontainers.containers.wait.strategy.WaitStrategy;
+ import org.whispersystems.textsecuregcm.configuration.CircuitBreakerConfiguration;
+@@ -37,7 +36,12 @@ import org.whispersystems.textsecuregcm.util.TestcontainersImages;
+ 
+ public class RedisClusterExtension implements BeforeAllCallback, BeforeEachCallback, AfterEachCallback, ExtensionContext.Store.CloseableResource {
+ 
+-  private static ComposeContainer composeContainer;
++  // personas: plain containers on a shared network instead of ComposeContainer. Compose's
++  // withExposedService() reaches each service through a socat "ambassador" container wired
++  // up with legacy Docker links, which Podman rejects ("link is not supported"). Same three
++  // bitnami nodes, same env, same internal-IP -> mapped-port resolver; no ambassador.
++  private static Network network;
++  private static List<GenericContainer<?>> redisContainers;
+   private static Map<HostAndPort, HostAndPort> exposedAddressesByInternalAddress;
+   private static List<RedisURI> redisUris;
+ 
+@@ -55,33 +59,9 @@ public class RedisClusterExtension implements BeforeAllCallback, BeforeEachCallb
+   private static final WaitStrategy WAIT_STRATEGY = Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(1));
+   private static final Duration CLUSTER_UP_DEADLINE = Duration.ofSeconds(15);
+ 
+-  private static final String[] REDIS_SERVICE_NAMES = new String[] { "redis-0-1", "redis-1-1", "redis-2-1" };
+-
+-  private static final String CLUSTER_COMPOSE_FILE_CONTENTS = String.format("""
+-      services:
+-        redis-0:
+-          image: %1$s
+-          environment:
+-            - 'ALLOW_EMPTY_PASSWORD=yes'
+-            - 'REDIS_NODES=redis-0 redis-1 redis-2'
+-
+-        redis-1:
+-          image: %1$s
+-          environment:
+-            - 'ALLOW_EMPTY_PASSWORD=yes'
+-            - 'REDIS_NODES=redis-0 redis-1 redis-2'
+-
+-        redis-2:
+-          image: %1$s
+-          depends_on:
+-            - redis-0
+-            - redis-1
+-          environment:
+-            - 'ALLOW_EMPTY_PASSWORD=yes'
+-            - 'REDIS_CLUSTER_REPLICAS=0'
+-            - 'REDIS_NODES=redis-0 redis-1 redis-2'
+-            - 'REDIS_CLUSTER_CREATOR=yes'
+-      """, TestcontainersImages.getRedisCluster());
++  // Network aliases; the bitnami image resolves REDIS_NODES by these names. The last node
++  // is the cluster creator.
++  private static final String[] REDIS_SERVICE_NAMES = new String[] { "redis-0", "redis-1", "redis-2" };
+ 
+   public RedisClusterExtension(final Duration timeout) {
+     this.timeout = timeout;
+@@ -94,61 +74,68 @@ public class RedisClusterExtension implements BeforeAllCallback, BeforeEachCallb
+ 
+   @Override
+   public void close() throws Throwable {
+-    if (composeContainer != null) {
+-      composeContainer.stop();
+-      composeContainer = null;
++    if (redisContainers != null) {
++      redisContainers.forEach(GenericContainer::stop);
++      redisContainers = null;
++    }
++    if (network != null) {
++      network.close();
++      network = null;
+     }
+   }
+ 
+   @Override
+   public void beforeAll(final ExtensionContext context) throws Exception {
+-    if (composeContainer == null) {
++    if (redisContainers == null) {
+       final CircuitBreakerConfiguration circuitBreakerConfig = new CircuitBreakerConfiguration();
+       circuitBreakerConfig.setWaitDurationInOpenState(Duration.ofMillis(500));
+ 
+       ResilienceUtil.getCircuitBreakerRegistry().addConfiguration(CIRCUIT_BREAKER_CONFIGURATION_NAME, circuitBreakerConfig.toCircuitBreakerConfig());
+ 
+-      final File clusterComposeFile = File.createTempFile("redis-cluster", ".yml");
+-      clusterComposeFile.deleteOnExit();
+-
+-      try (final FileOutputStream fileOutputStream = new FileOutputStream(clusterComposeFile)) {
+-        fileOutputStream.write(CLUSTER_COMPOSE_FILE_CONTENTS.getBytes(StandardCharsets.UTF_8));
++      network = Network.newNetwork();
++      final List<GenericContainer<?>> containers = new ArrayList<>();
++      for (int i = 0; i < REDIS_SERVICE_NAMES.length; i++) {
++        final GenericContainer<?> container = new GenericContainer<>(TestcontainersImages.getRedisCluster())
++            .withNetwork(network)
++            .withNetworkAliases(REDIS_SERVICE_NAMES[i])
++            .withExposedPorts(REDIS_PORT)
++            .withEnv("ALLOW_EMPTY_PASSWORD", "yes")
++            .withEnv("REDIS_NODES", String.join(" ", REDIS_SERVICE_NAMES))
++            .waitingFor(WAIT_STRATEGY);
++
++        if (i == REDIS_SERVICE_NAMES.length - 1) {
++          container
++              .withEnv("REDIS_CLUSTER_REPLICAS", "0")
++              .withEnv("REDIS_CLUSTER_CREATOR", "yes");
++        }
++
++        containers.add(container);
+       }
+ 
+-      // Unless we specify an explicit list of files to copy to the container, `ComposeContainer` will copy ALL files in
+-      // the compose file's directory. Please see
+-      // https://github.com/testcontainers/testcontainers-java/blob/main/docs/modules/docker_compose.md#build-working-directory.
+-      composeContainer = new ComposeContainer(clusterComposeFile)
+-          .withCopyFilesInContainer(clusterComposeFile.getName());
++      // Together, not one by one: each bitnami node blocks until it can resolve EVERY name in
++      // REDIS_NODES, so starting them sequentially deadlocks on the first. The creator waits
++      // for the other nodes itself (compose's depends_on only ordered creation, too).
++      Startables.deepStart(containers).join();
++      redisContainers = containers;
++
++      exposedAddressesByInternalAddress = redisContainers.stream()
++          .collect(Collectors.toMap(container -> {
++                final String internalIp = container.getContainerInfo()
++                    .getNetworkSettings()
++                    .getNetworks().values().stream().findFirst().orElseThrow()
++                    .getIpAddress();
++
++                if (internalIp == null) {
++                  throw new IllegalStateException("Could not determine internal IP address of container: "
++                      + container.getContainerName());
++                }
+ 
+-      for (final String serviceName : REDIS_SERVICE_NAMES) {
+-        composeContainer = composeContainer.withExposedService(serviceName, REDIS_PORT, WAIT_STRATEGY);
+-      }
++                return HostAndPort.of(internalIp, REDIS_PORT);
++              },
++              container -> HostAndPort.of(container.getHost(), container.getMappedPort(REDIS_PORT))));
+ 
+-      composeContainer.start();
+-
+-      exposedAddressesByInternalAddress = Arrays.stream(REDIS_SERVICE_NAMES)
+-              .collect(Collectors.toMap(serviceName -> {
+-                    final String internalIp = composeContainer.getContainerByServiceName(serviceName).orElseThrow()
+-                        .getContainerInfo()
+-                        .getNetworkSettings()
+-                        .getNetworks().values().stream().findFirst().orElseThrow()
+-                        .getIpAddress();
+-
+-                    if (internalIp == null) {
+-                      throw new IllegalStateException("Could not determine internal IP address of service container: " + serviceName);
+-                    }
+-
+-                    return HostAndPort.of(internalIp, REDIS_PORT);
+-                  },
+-                  serviceName -> HostAndPort.of(
+-                      composeContainer.getServiceHost(serviceName, REDIS_PORT),
+-                      composeContainer.getServicePort(serviceName, REDIS_PORT))));
+-
+-      redisUris = Arrays.stream(REDIS_SERVICE_NAMES)
+-          .map(serviceName -> RedisURI.create(
+-              composeContainer.getServiceHost(serviceName, REDIS_PORT),
+-              composeContainer.getServicePort(serviceName, REDIS_PORT)))
++      redisUris = redisContainers.stream()
++          .map(container -> RedisURI.create(container.getHost(), container.getMappedPort(REDIS_PORT)))
+           .toList();
+ 
+       // Wait for the cluster to be fully up; just having the containers running isn't enough since they still need to do

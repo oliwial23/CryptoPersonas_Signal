@@ -453,7 +453,7 @@ certificate-embedded identity keys on real sealed-sender sends — without a loc
 end-to-end green run (still true after the fix below — see O14).
 
 **Fix, verified.** `deploy/signal-test-server/minio.sh` runs a local MinIO container on
-`127.0.0.1:9100`, credentialed with the exact static `accessKey`/`secretAccess` pair
+`127.0.0.1:9110`, credentialed with the exact static `accessKey`/`secretAccess` pair
 `test-secrets-bundle.yml` already supplies everywhere (no credential plumbing to change). Patch
 `0003-paged-kem-prekey-store-local-s3.patch` does three things: points
 `pagedSingleUseKEMPreKeyStore.endpointOverride` at it, enables path-style S3 addressing on that
