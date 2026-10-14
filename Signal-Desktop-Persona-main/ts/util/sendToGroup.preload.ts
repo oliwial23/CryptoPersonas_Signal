@@ -89,10 +89,8 @@ import { itemStorage } from '../textsecure/Storage.preload.ts';
 import { isPersonaPhantomBody } from '../services/personasCarriage.std.ts';
 import {
   ensurePhantomMaterial,
-  loadPhantomSendStore,
+  phantomGroupEncrypt,
   buildPhantomIdentityStore,
-  phantomAddress,
-  getSharedDistributionId,
 } from '../services/personasPhantom.preload.ts';
 import { isFeaturedEnabledNoRedux } from './isFeatureEnabled.dom.ts';
 import { handleMismatchedDevicesError } from './handleMismatchedDevicesError.preload.ts';
@@ -1342,28 +1340,9 @@ async function encryptForSenderKey({
     : undefined;
 
   if (phantom) {
-    const ciphertextMessage = await signalProtocolStore.enqueueSenderKeyJob(
-      new QualifiedAddress(ourAci, ourAddress),
-      async () => {
-        // Load the shared advancing send chain INSIDE the serialized job so a
-        // within-process send reads the latest state before it encrypts.
-        const sendStore = loadPhantomSendStore();
-        if (!sendStore) {
-          throw new Error(
-            'encryptForSenderKey: phantom send store unavailable'
-          );
-        }
-        const ciphertext = await groupEncrypt(
-          phantomAddress(),
-          getSharedDistributionId(),
-          sendStore.store,
-          message
-        );
-        // Persist the advanced chain (serial posting across instances is assumed).
-        sendStore.save();
-        return ciphertext;
-      }
-    );
+    // This member's own copy of the shared chain; receiving walks it forward, so
+    // no cross-instance state is read or written (personasPhantom.preload.ts).
+    const ciphertextMessage = await phantomGroupEncrypt(message);
     const content = UnidentifiedSenderMessageContent.new(
       ciphertextMessage,
       phantom.phantomCert,

@@ -21,7 +21,7 @@ import { getSelectedConversationId } from './state/selectors/nav.std.ts';
 import {
   warmPhantomMaterial,
   getPhantomTrustRootBase64,
-  installPhantomReceiveKey,
+  installPhantomChain,
 } from './services/personasPhantom.preload.ts';
 import MessageReceiver from './textsecure/MessageReceiver.preload.ts';
 import { signalProtocolStore } from './SignalProtocolStore.preload.ts';
@@ -1611,10 +1611,10 @@ async function startApp(): Promise<void> {
       // membership needs it, and the auto-register path skips the profile stage.
       drop(ensureDemoProfileUploaded());
 
-      // Personas demo (Phase 5): install the shared phantom RECEIVE chain so incoming
-      // persona posts — sealed under the shared phantom identity — decrypt via
-      // groupDecrypt. Idempotent; a no-op unless the roster dir (demo mode) is set.
-      drop(installPhantomReceiveKey());
+      // Personas demo (Phase 5): install this member's copy of the shared phantom
+      // chain. It decrypts incoming persona posts (walking forward as it does) and
+      // encrypts our own. Idempotent; a no-op unless demo mode is set.
+      drop(installPhantomChain());
 
       startPersonaRosterSync();
 
