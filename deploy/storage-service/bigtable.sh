@@ -54,7 +54,7 @@ up() {
   # 3. Run it (background); it writes host:port to HOSTFILE and blocks.
   rm -f "$HOSTFILE"
   echo "starting bigtable emulator ..."
-  nohup java -cp "$CLASSESDIR:$cp" EmulatorMain "$HOSTFILE" >"$LOGFILE" 2>&1 &
+  nohup java -Xmx"${PERSONAS_BIGTABLE_HEAP:-384m}" -cp "$CLASSESDIR:$cp" EmulatorMain "$HOSTFILE" >"$LOGFILE" 2>&1 &
   echo $! >"$PIDFILE"
 
   for _ in $(seq 1 60); do

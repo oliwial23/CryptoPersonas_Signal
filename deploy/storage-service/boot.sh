@@ -44,6 +44,8 @@ BIGTABLE_EMULATOR_HOST_VALUE="$(cat "$LOCAL/bigtable-emulator-host")"
 export BIGTABLE_EMULATOR_HOST="$BIGTABLE_EMULATOR_HOST_VALUE"
 echo "starting storage-service on :8090 (BIGTABLE_EMULATOR_HOST=$BIGTABLE_EMULATOR_HOST)"
 cd "$STORAGE_SERVICE_DIR"
+# exec:java runs the service inside the Maven JVM, so MAVEN_OPTS is its heap (resident ~170 MB).
+export MAVEN_OPTS="${MAVEN_OPTS:-} -Xmx${PERSONAS_STORAGE_HEAP:-512m}"
 exec ./mvnw -q compile exec:java \
   -Dexec.mainClass=org.signal.storageservice.StorageService \
   -Dexec.args="server $LOCAL/config.yml"

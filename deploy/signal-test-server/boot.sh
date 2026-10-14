@@ -65,6 +65,11 @@ for patch in "$HERE"/patches/*.patch; do
   fi
 done
 
+# The server runs INSIDE the Maven JVM (exec:java, not forked), so MAVEN_OPTS sets its heap.
+# Uncapped, the JVM reserves up to 1/4 of RAM; on a 7 GB VM that crowds out the demo members.
+# Measured resident size is ~630 MB, so 1280m leaves headroom for compiling too.
+export MAVEN_OPTS="${MAVEN_OPTS:-} -Xmx${PERSONAS_CHAT_HEAP:-1280m}"
+
 echo "SIGNAL_SERVER_DIR = $SIGNAL_SERVER_DIR"
 echo "JAVA_HOME         = ${JAVA_HOME:-<unset>}"
 echo "FDB_C_DYLIB       = $FDB_C_DYLIB"
