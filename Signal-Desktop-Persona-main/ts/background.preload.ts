@@ -22,6 +22,8 @@ import {
   warmPhantomMaterial,
   getPhantomTrustRootBase64,
   installPhantomChain,
+  onPhantomMaterialReady,
+  startPhantomDistribution,
 } from './services/personasPhantom.preload.ts';
 import MessageReceiver from './textsecure/MessageReceiver.preload.ts';
 import { signalProtocolStore } from './SignalProtocolStore.preload.ts';
@@ -614,6 +616,13 @@ async function startApp(): Promise<void> {
         ...window.getServerTrustRoots(),
         ...(phantomTrustRoot ? [phantomTrustRoot] : []),
       ],
+    });
+    // Personas demo: a member that joins a group after boot receives the phantom bundle
+    // later, 1:1. When it arrives (or right away, if already held), admit its trust root
+    // and build the engine on the bundle's barrier schedule.
+    onPhantomMaterialReady(mat => {
+      messageReceiver?.addServerTrustRoot(mat.trustRootPublicBase64);
+      warmPersonasEngine();
     });
     window.ConversationController.registerDelayBeforeUpdatingRedux(() => {
       if (backupsService.isImportRunning()) {
@@ -1615,6 +1624,8 @@ async function startApp(): Promise<void> {
       // chain. It decrypts incoming persona posts (walking forward as it does) and
       // encrypts our own. Idempotent; a no-op unless demo mode is set.
       drop(installPhantomChain());
+      // Hand the bundle to group members who do not have it yet (no-op until we hold one).
+      startPhantomDistribution();
 
       startPersonaRosterSync();
 

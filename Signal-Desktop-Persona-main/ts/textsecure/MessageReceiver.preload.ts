@@ -144,6 +144,10 @@ import {
   ViewOnceOpenSyncEvent,
   ViewSyncEvent,
 } from './messageReceiverEvents.std.ts';
+import {
+  PHANTOM_SENDER_ACI,
+  getExpectedPhantomCertificate,
+} from '../services/personasPhantomCert.std.ts';
 import { createLogger } from '../logging/log.std.ts';
 import { diffArraysAsSets } from '../util/diffArraysAsSets.std.ts';
 import { generateBlurHash } from '../util/generateBlurHash.std.ts';
@@ -321,6 +325,8 @@ export default class MessageReceiver
   readonly #encryptedQueue: PQueue;
   readonly #decryptedQueue: PQueue;
   #retryCachedTimeout: NodeJS.Timeout | undefined;
+  // Grows at runtime: a personas member admits its phantom trust root when the bundle
+  // arrives, which can be after boot (see addServerTrustRoot).
   readonly #serverTrustRoots: Array<PublicKey>;
   #stoppingProcessing?: boolean;
   #pniIdentityKeyCheckRequired?: boolean;
@@ -1648,6 +1654,24 @@ export default class MessageReceiver
       );
     }
 
+    // Personas demo: accept a phantom-sender message only under the EXACT certificate in
+    // our bundle. Every member must use identical certificate bytes, or the bytes would
+    // identify the poster; a mismatch is what a distributor tagging one member with a
+    // different certificate looks like, so it is refused rather than trusted.
+    if (certificate.senderUuid() === PHANTOM_SENDER_ACI) {
+      const expected = getExpectedPhantomCertificate();
+      if (!expected) {
+        throw new Error(
+          `${logId}: phantom-sender message before this member holds a phantom bundle`
+        );
+      }
+      if (!Bytes.areEqual(certificate.serialize(), expected)) {
+        throw new Error(
+          `${logId}: phantom certificate does not match our bundle; refusing it`
+        );
+      }
+    }
+
     if (
       !certificate.validateWithTrustRoots(
         this.#serverTrustRoots,
@@ -1658,6 +1682,16 @@ export default class MessageReceiver
     }
 
     return undefined;
+  }
+
+  // Personas demo: admit the phantom bundle's trust root once this member holds it.
+  addServerTrustRoot(base64: string): void {
+    const key = PublicKey.deserialize(Bytes.fromBase64(base64));
+    if (this.#serverTrustRoots.some(existing => existing.equals(key))) {
+      return;
+    }
+    this.#serverTrustRoots.push(key);
+    log.info('MessageReceiver: added a server trust root (personas phantom)');
   }
 
   async #onDeliveryReceipt(envelope: ProcessedEnvelope): Promise<void> {

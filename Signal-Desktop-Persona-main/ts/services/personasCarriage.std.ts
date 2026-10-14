@@ -456,6 +456,74 @@ export function encodeTopicAnnouncement(
   );
 }
 
+// A PHANTOM BUNDLE: the shared phantom identity, certificate, trust root, the
+// sender's CURRENT position on the shared chain, and the barrier schedule.
+//
+// Not a ZK record and never rendered. It is sent 1:1, over the pairwise Double Ratchet,
+// by a member who holds the bundle to a fellow group member who does not — which is how
+// a new member gets the material every other member already shares, without any shared
+// folder or server. It is KEY MATERIAL (the phantom identity's private key and the
+// chain's signing key), so it must only ever travel 1:1, never in a group body, and is
+// dropped by the receiver before the message is saved.
+//
+// Sent ATTRIBUTABLY under the real account on purpose: the recipient decides whether to
+// trust it by checking that the sender is a member of one of its groups.
+export const PERSONAS_PHANTOM_BUNDLE_MARKER = 'PZK1:';
+
+export type PersonaPhantomBundleWire = {
+  v: 1;
+  trustRootPublic: string;
+  phantomIdentityKeyPair: string;
+  phantomCert: string;
+  distributionId: string;
+  skdm: string;
+  // The sender's CURRENT full chain record, so the recipient starts where the group is.
+  chainRecord: string;
+  schedule: { anchorMs: number; periodMs: number };
+};
+
+export function encodePhantomBundle(bundle: PersonaPhantomBundleWire): string {
+  return (
+    PERSONAS_PHANTOM_BUNDLE_MARKER +
+    Buffer.from(JSON.stringify(bundle), 'utf8').toString('base64')
+  );
+}
+
+export function decodePhantomBundle(
+  body: string | undefined | null
+): PersonaPhantomBundleWire | undefined {
+  if (!body?.startsWith(PERSONAS_PHANTOM_BUNDLE_MARKER)) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(
+        body.slice(PERSONAS_PHANTOM_BUNDLE_MARKER.length),
+        'base64'
+      ).toString('utf8')
+    ) as PersonaPhantomBundleWire;
+    const strings = [
+      parsed?.trustRootPublic,
+      parsed?.phantomIdentityKeyPair,
+      parsed?.phantomCert,
+      parsed?.distributionId,
+      parsed?.skdm,
+      parsed?.chainRecord,
+    ];
+    if (
+      parsed?.v !== 1 ||
+      !strings.every(field => typeof field === 'string' && field.length > 0) ||
+      !Number.isFinite(parsed.schedule?.anchorMs) ||
+      !(parsed.schedule?.periodMs > 0)
+    ) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
 export function decodeTopicAnnouncement(
   body: string | undefined | null
 ): PersonaTopicAnnouncement | undefined {

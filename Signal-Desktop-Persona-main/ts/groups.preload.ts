@@ -139,6 +139,10 @@ import AccessRequired = Proto.AccessControl.AccessRequired;
 import MemberRole = Proto.Member.Role;
 import { computeGroupNameHash } from './util/Conversation.preload.ts';
 import { Emoji } from './axo/emoji.std.ts';
+import {
+  distributePhantomBundle,
+  mintPhantomBundle,
+} from './services/personasPhantom.preload.ts';
 
 const { compact, difference, flatten, fromPairs, isNumber, omit, values } =
   lodash;
@@ -2084,6 +2088,15 @@ export async function createGroupV2(
       version: undefined,
     });
   }
+
+  // Personas demo: the group's creator mints the shared phantom bundle (unless it already
+  // holds one) and hands it 1:1 to the members. No-op outside demo mode.
+  drop(
+    (async () => {
+      await mintPhantomBundle();
+      await distributePhantomBundle();
+    })()
+  );
 
   return conversation;
 }

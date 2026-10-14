@@ -35,6 +35,7 @@ import {
   encodeAuthorshipProof,
   encodeBadgeProof,
 } from './personasCarriage.std.ts';
+import { hasPhantomMaterial } from './personasPhantom.preload.ts';
 import {
   getBarrierSchedule,
   ingestTimestampFor,
@@ -79,6 +80,12 @@ let constructionFailed = false;
 export function getPersonasEngine(): Engine | undefined {
   if (engine || constructionFailed || !isPersonasEngineEnabled()) {
     return engine;
+  }
+  // Wait for the phantom bundle: it carries the barrier schedule every member must
+  // share, and the replica's schedule is fixed at construction. Background warms the
+  // engine again the moment the bundle is minted or adopted.
+  if (!hasPhantomMaterial()) {
+    return undefined;
   }
   const dataDir = getKeysDir();
   // Phase 6: put the replica on the SHARED barrier schedule when there is a roster

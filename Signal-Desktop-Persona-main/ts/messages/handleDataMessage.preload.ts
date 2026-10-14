@@ -17,7 +17,15 @@ import {
   decodeBadgeProof,
 } from '../services/personasCarriage.std.ts';
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
-import { decodeTopicAnnouncement } from '../services/personasCarriage.std.ts';
+import {
+  decodePhantomBundle,
+  decodeTopicAnnouncement,
+} from '../services/personasCarriage.std.ts';
+import {
+  adoptPhantomBundle,
+  holdPendingBundle,
+  isFellowGroupMember,
+} from '../services/personasPhantom.preload.ts';
 import { ingestTopicAnnouncement } from '../services/personasTopics.preload.ts';
 import { getPhantomAci } from '../services/personasPhantom.preload.ts';
 import * as Errors from '../types/errors.std.ts';
@@ -163,6 +171,23 @@ export async function handleDataMessage(
     // A proof that does not verify is DROPPED, not shown as unverified. An
     // unverifiable authorship message has no legitimate sender, so rendering it at all
     // would only give a forger a surface.
+    // A PHANTOM BUNDLE (1:1, key material): adopt it if it comes from a fellow member of
+    // one of our groups, then drop the message before anything saves its body. First
+    // checked, so no other path ever sees the key material.
+    const phantomBundle = decodePhantomBundle(initialMessage.body);
+    if (phantomBundle) {
+      const from = sourceServiceId ?? source ?? 'unknown';
+      if (isFellowGroupMember(conversationId)) {
+        const result = await adoptPhantomBundle(phantomBundle, from);
+        log.info(`${idLog}: phantom bundle from ${from}: ${result}`);
+      } else {
+        // Possibly just ahead of the group update that adds us; re-checked each sweep.
+        holdPendingBundle(conversationId, phantomBundle, from);
+      }
+      confirm();
+      return;
+    }
+
     const authorshipProof = decodeAuthorshipProof(initialMessage.body);
     if (authorshipProof) {
       const verified = verifyPersonaAuthorship(authorshipProof);

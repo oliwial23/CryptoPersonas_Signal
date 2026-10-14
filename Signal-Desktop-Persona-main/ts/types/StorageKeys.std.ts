@@ -60,6 +60,10 @@ export type IdentityKeyMap = Record<
 export type StorageAccessType = {
   // Personas demo: which phantom bundle/format this member's chain was installed from.
   personasPhantomChain: string;
+  // Personas demo: the shared phantom bundle this member minted or adopted (key material).
+  personasPhantomBundle: string;
+  // Personas demo: `${bundleFingerprint}:${serviceId}` for each member already sent it.
+  personasPhantomSentTo: Array<string>;
   'always-relay-calls': boolean;
   'audio-notification': boolean;
   'auto-download-update': boolean;
@@ -445,6 +449,8 @@ export const STORAGE_KEYS_TO_PRESERVE_WHEN_PRIMARY = [
 const STORAGE_KEYS_TO_REMOVE_AFTER_UNLINK = [
   // Describes a chain in the account's sender-key store, which unlinking wipes.
   'personasPhantomChain',
+  'personasPhantomBundle',
+  'personasPhantomSentTo',
   'lastCallQualitySurveyTime',
   'lastCallQualityFailureSurveyTime',
   'cqsTestMode',

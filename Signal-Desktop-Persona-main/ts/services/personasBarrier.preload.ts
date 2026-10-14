@@ -41,6 +41,7 @@ import { join } from 'node:path';
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
 import { getRosterDir } from '../textsecure/personaRoster.preload.ts';
+import { getPhantomSchedule } from './personasPhantom.preload.ts';
 
 const log = createLogger('personasBarrier');
 
@@ -117,6 +118,18 @@ function periodFromEnv(): number {
 // needs the schedule at construction time.
 export function getBarrierSchedule(): BarrierSchedule | undefined {
   if (schedule || loadFailed) {
+    return schedule;
+  }
+  // The phantom bundle carries the schedule its creator picked, so every member that
+  // holds the bundle agrees on it with no shared folder. The roster-dir file below is
+  // the older single-machine mechanism, kept as a fallback.
+  const fromBundle = getPhantomSchedule();
+  if (fromBundle) {
+    schedule = { anchorMs: fromBundle.anchorMs, periodMs: fromBundle.periodMs };
+    log.info(
+      `getBarrierSchedule: using the phantom bundle's schedule (anchor ${schedule.anchorMs}, ` +
+        `period ${schedule.periodMs}ms)`
+    );
     return schedule;
   }
   const dir = getRosterDir();

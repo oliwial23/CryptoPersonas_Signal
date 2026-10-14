@@ -46,6 +46,10 @@ import {
   decodePostBadge,
   decodePostContextName,
   type PersonaPollDescriptor,
+  PERSONAS_PHANTOM_BUNDLE_MARKER,
+  encodePhantomBundle,
+  decodePhantomBundle,
+  type PersonaPhantomBundleWire,
 } from '../../services/personasCarriage.std.ts';
 
 const RECORD = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x7f]);
@@ -394,5 +398,48 @@ describe('badge possession proof carriage', () => {
     assert.isUndefined(decodeBadgeProof('just a message'));
     assert.isUndefined(decodeBadgeProof(undefined));
     assert.isUndefined(decodeBadgeProof(null));
+  });
+});
+
+describe('personasCarriage phantom bundle', () => {
+  const bundle: PersonaPhantomBundleWire = {
+    v: 1,
+    trustRootPublic: 'dHJ1c3Q=',
+    phantomIdentityKeyPair: 'aWQ=',
+    phantomCert: 'Y2VydA==',
+    distributionId: '9f9f9f9f-0000-4000-8000-0000000d15c0',
+    skdm: 'c2tkbQ==',
+    chainRecord: 'Y2hhaW4=',
+    schedule: { anchorMs: 1_790_000_000_000, periodMs: 10_000 },
+  };
+
+  it('round-trips through its own marker', () => {
+    const body = encodePhantomBundle(bundle);
+    assert.isTrue(body.startsWith(PERSONAS_PHANTOM_BUNDLE_MARKER));
+    assert.deepEqual(decodePhantomBundle(body), bundle);
+  });
+
+  it('is never routed through the phantom (it is sent 1:1, attributably)', () => {
+    assert.isFalse(isPersonaPhantomBody(encodePhantomBundle(bundle)));
+  });
+
+  it('is not mistaken for a ZK record or a topic announcement', () => {
+    const body = encodePhantomBundle(bundle);
+    assert.isUndefined(decodeRecordBody(body));
+    assert.isUndefined(decodeTopicAnnouncement(body));
+  });
+
+  it('rejects a bundle with a missing field, a bad schedule, or another version', () => {
+    const encode = (value: unknown) =>
+      PERSONAS_PHANTOM_BUNDLE_MARKER +
+      Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+    assert.isUndefined(decodePhantomBundle(encode({ ...bundle, chainRecord: '' })));
+    assert.isUndefined(
+      decodePhantomBundle(encode({ ...bundle, schedule: { anchorMs: 1, periodMs: 0 } }))
+    );
+    assert.isUndefined(decodePhantomBundle(encode({ ...bundle, v: 2 })));
+    assert.isUndefined(decodePhantomBundle(`${PERSONAS_PHANTOM_BUNDLE_MARKER}not base64 json`));
+    assert.isUndefined(decodePhantomBundle('just a message'));
+    assert.isUndefined(decodePhantomBundle(undefined));
   });
 });
