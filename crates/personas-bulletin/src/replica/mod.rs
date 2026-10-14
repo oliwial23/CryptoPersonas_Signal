@@ -72,7 +72,8 @@ use zk_callbacks::generic::object::Time;
 use zk_callbacks::impls::centralized::crypto::FakeSigPrivkey;
 
 use personas_core::circuits::{
-    BAN_FLAG, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsRate, arg_rep,
+    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, MsgUser, NUM_SCANS_PER_FOLD,
+    BadgesArgs, PseudonymArgs, PseudonymArgsRate, arg_rep,
 };
 use personas_core::params::ServerKeys;
 use personas_core::{Cr, F, Snark, VK};
@@ -103,6 +104,8 @@ pub struct ReplicaKeys {
     pub scan: VK,
     /// The `pseudonym_pred` statement — a vote or a proof-carrying rating (§10).
     pub pseudonym_pred: VK,
+    /// A badge request interaction. Already in every `ServerKeys` bundle.
+    pub badge_request: VK,
 }
 
 impl ReplicaKeys {
@@ -115,6 +118,7 @@ impl ReplicaKeys {
             pseudo_rate: keys.standard_pseudor_verifying_key.clone(),
             scan: keys.scan_verifying_key.clone(),
             pseudonym_pred: keys.pseudonym_pred_verifying_key.clone(),
+            badge_request: keys.badge_request_verifying_key.clone(),
         }
     }
 }
@@ -658,6 +662,106 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 Status::Applied
             }
 
+            Record::BadgeRequest {
+                exec,
+                slot,
+                obj_root,
+            } => {
+                // Reject an out-of-range slot BEFORE anything else: the slot indexes
+                // the badge selector in-circuit, and an unknown value could otherwise
+                // be approved into a flag that means nothing.
+                if *slot < 1 || *slot > 3 {
+                    return Status::Rejected("badge slot out of range");
+                }
+                let exec = &exec.0;
+                let root = obj_root.0;
+                // Same interaction shape as an anonymous post — one callback, no public
+                // arguments — verified against the badge-request key.
+                // PUBLIC ARGS MUST MATCH THE PROVER EXACTLY.
+                //
+                // `Member::badge_request` executes the interaction with
+                // `BadgesArgs { i: slot, claimed: 0 }`, so the verifier has to rebuild
+                // the same value from the record's own `slot`. Passing `F::from(0)`
+                // here (as an anonymous post does) would verify a different statement
+                // and fail every time — the same class of mistake as omitting the
+                // membership root from an authorship proof.
+                //
+                // `claimed` is zero on a REQUEST because the badge's value is supplied
+                // by the circuit when the approval flag is absorbed; the request only
+                // names the slot.
+                let pub_args = BadgesArgs {
+                    i: F::from(*slot as u64),
+                    claimed: F::from(0),
+                };
+                let ok = memo_interaction::<OH, _, 1>(
+                    &mut self.verify_cache,
+                    eh,
+                    &self.keys.badge_request,
+                    exec.new_object,
+                    exec.old_nullifier,
+                    pub_args,
+                    exec.cb_com_list,
+                    &exec.proof,
+                    root,
+                );
+                if !ok {
+                    return Status::Rejected("badge request proof failed");
+                }
+                if obj.has_seen_nul(&exec.old_nullifier) {
+                    return Status::Rejected("nullifier already spent");
+                }
+                obj.push(
+                    exec.new_object,
+                    exec.old_nullifier,
+                    exec.cb_com_list.to_vec(),
+                );
+                record_root(produced, produced_order, obj.root(), window);
+
+                // The ticket an approval will invoke.
+                let callback = exec.cb_tik_list[0].0.clone();
+                derived
+                    .outstanding
+                    .insert(eh, Outstanding::new(callback, Time::from(0), barrier + w));
+
+                derived.log.push(LogEntry {
+                    eh,
+                    kind: "BadgeRequest",
+                    author: None,
+                    body: format!("requested badge slot {slot}"),
+                    flagged: false,
+                });
+                Status::Applied
+            }
+
+            Record::BadgeApprove { target, slot } => {
+                if *slot < 1 || *slot > 3 {
+                    return Status::Rejected("badge slot out of range");
+                }
+                // Mark the REQUESTER's ticket. Everything after this is the existing
+                // settlement path: at the close barrier it is invoked with the matching
+                // BADGE flag, and the requester's next scan writes the badge in-circuit.
+                match derived.outstanding.get_mut(target) {
+                    Some(out) => {
+                        if out.settled {
+                            return Status::Rejected("badge request already settled");
+                        }
+                        out.badge_slot = Some(*slot);
+                    }
+                    None => return Status::Rejected("no such badge request"),
+                }
+                derived.log.push(LogEntry {
+                    eh,
+                    kind: "BadgeApprove",
+                    author: None,
+                    // Name the TARGET: without it the log cannot be paired with the
+                    // request it approves, and an admin UI has no way to tell which
+                    // requests are still pending.
+                    body: format!("approved badge slot {slot} for {}", hex::encode(target.0)),
+                    flagged: false,
+                });
+                Status::Applied
+            }
+
             Record::Scan {
                 exec,
                 obj_root,
@@ -787,6 +891,10 @@ fn is_applicable(record: &Record, produced: &HashSet<[u8; 32]>, derived: &Derive
         // No object root: applicable the moment its barrier arrives.
         Record::Join { .. } | Record::PollOpen { .. } => true,
         Record::Post { obj_root, .. } => holds(obj_root.0),
+        Record::BadgeRequest { obj_root, .. } => holds(obj_root.0),
+        // An approval pins no root: it carries no proof, only a reference to a ticket
+        // the replica already holds.
+        Record::BadgeApprove { target, .. } => derived.outstanding.contains_key(target),
         Record::Rate { obj_root, .. } => holds(obj_root.0),
         Record::Scan { obj_root, .. } => holds(obj_root.0),
         Record::Vote { poll, obj_root, .. } => {
@@ -850,7 +958,28 @@ fn settle_barrier<const MH: usize, const NH: usize>(
     let mut due: Vec<Eh> = derived
         .outstanding
         .iter()
-        .filter(|(_, o)| !o.settled && (o.banned || barrier >= o.settle_barrier))
+        // A ban and a BADGE APPROVAL both fall due immediately; everything else waits
+        // for its settlement window.
+        //
+        // The window exists so a reputation tally can ACCUMULATE: ratings arrive after
+        // the post, so settling early would invoke the callback with a half-counted
+        // score. Neither of these two has anything to accumulate. A ban is a decision
+        // already taken, and so is a badge approval — the admin's record IS the
+        // outcome, and waiting three barriers only delays handing it over.
+        //
+        // Deterministic across replicas, which is the requirement here: every replica
+        // sees the same `BadgeApprove` record and sets the same `badge_slot`, so they
+        // all compute the same due-set in the same barrier. (Being wrong about that
+        // would fork the called-ticket tree, which is why it is worth stating.)
+        //
+        // Without this a badge took `settlement_barriers` × the barrier period to
+        // arrive — 30s at the demo's 10s barrier — during which the requester could
+        // scan repeatedly, correctly absorb nothing, and reasonably conclude approval
+        // had silently failed.
+        .filter(|(_, o)| {
+            !o.settled
+                && (o.banned || o.badge_slot.is_some() || barrier >= o.settle_barrier)
+        })
         .map(|(eh, _)| *eh)
         .collect();
     // The called-ticket tree is append-order-sensitive, and `outstanding` is a
@@ -866,8 +995,17 @@ fn settle_barrier<const MH: usize, const NH: usize>(
             .get(&eh)
             .expect("just collected")
             .clone();
+        // ORDER MATTERS: a ticket is invoked once with one argument, so these are
+        // mutually exclusive. Ban wins over a badge — a member being revoked should not
+        // simultaneously be granted a credential.
         let arg = if out.banned {
             F::from(BAN_FLAG)
+        } else if let Some(slot) = out.badge_slot {
+            match slot {
+                1 => F::from(BADGE1_FLAG),
+                2 => F::from(BADGE2_FLAG),
+                _ => F::from(BADGE3_FLAG),
+            }
         } else {
             // Reputation is clamped so `r` cannot reach `BAN_FLAG` (§7 property, R8).
             arg_rep(out.clamped_rep())

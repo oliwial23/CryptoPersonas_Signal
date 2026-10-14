@@ -24,6 +24,7 @@ import {
   isUnsupportedMessage,
   isVerifiedChange,
 } from '../state/selectors/message.preload.ts';
+import { personaRendersWithoutBody } from './personaRendersWithoutBody.std.ts';
 
 export function isMessageEmpty(attributes: MessageAttributesType): boolean {
   // Core message types - we check for all four because they can each stand alone
@@ -32,13 +33,11 @@ export function isMessageEmpty(attributes: MessageAttributesType): boolean {
   const hasEmbeddedContact = (attributes.contact || []).length > 0;
   const isSticker = Boolean(attributes.sticker);
   const isPoll = Boolean(attributes.poll);
-  // Personas demo: a ZK poll has no body, no attachment and no Signal `poll` — it
-  // renders entirely from `personaPoll` — so without this it would be dropped here as
-  // an empty message and never reach the timeline.
-  const isPersonaPoll = Boolean(attributes.personaPoll);
-  // Same for an authorship claim: no body, no attachment, renders from
-  // `personaAuthorship` alone.
-  const isPersonaAuthorship = Boolean(attributes.personaAuthorship);
+  // Personas demo: several persona records have no body, no attachment and no Signal
+  // `poll` — they render from their own field — so without this they are dropped here
+  // and never reach the timeline. The list lives in one tested place because this bug
+  // has been introduced once per record type; see personaRendersWithoutBody.std.ts.
+  const isPersonaBodiless = personaRendersWithoutBody(attributes);
 
   // Rendered sync messages
   const isCallHistoryValue = isCallHistory(attributes);
@@ -81,8 +80,7 @@ export function isMessageEmpty(attributes: MessageAttributesType): boolean {
     hasEmbeddedContact ||
     isSticker ||
     isPoll ||
-    isPersonaPoll ||
-    isPersonaAuthorship ||
+    isPersonaBodiless ||
     isPayment ||
     // Rendered sync messages
     isCallHistoryValue ||

@@ -1,34 +1,32 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Personas demo — BADGE CLAIMS. Read this before using them for anything.
+// Personas demo — BADGE LABELS, and precisely how much they are worth.
+//
+// A badge now has a real grant path. `Record::BadgeRequest` files a callback, an admin's
+// `Record::BadgeApprove` marks the ticket, the replica invokes BADGE{1,2,3}_FLAG at the
+// settlement barrier, and the requester's next scan writes the badge into their own
+// `MsgUser` object. `badge_pred` then proves possession in zero knowledge without
+// revealing who holds it. None of that was true when this module was written, and the
+// comment that used to be here — "nothing anywhere checks it" — is no longer accurate.
 //
 // ============================================================================
-// THESE BADGES ARE NOT CRYPTOGRAPHICALLY ENFORCED. THEY ARE UNVERIFIED CLAIMS.
+// BUT THE LABEL IN THIS MODULE IS STILL NOT THE PROOF.
 // ============================================================================
 //
-// In the real CryptoPersonas design a badge is a credential proved in zero knowledge:
-// `MsgUser` carries three badge slots, `standard_badge_request_predicate` proves you
-// hold one without revealing who you are, and a moderator grants them through
-// `personas-server`. That machinery exists — in `personas-core` (the circuit) and
-// `personas-client` (the flow) — but it lives on the AS-A-SERVICE side. The serverless
-// `Messenger` that this Desktop build talks to has none of it:
-// `grep -ri badge crates/personas-messenger/src/` finds essentially nothing.
+// What rides beside a post today is a STRING, chosen by the sender. The sending client
+// now refuses to attach a label the member's own object does not contain
+// (`getSelectedBadgeIfHeld`), so an honest client cannot over-claim by accident — which
+// is what the bug this comment was expanded for actually was. That is a client-side
+// check, and a client-side check is a UX guarantee, not a security one: a modified
+// client can still put any label on the wire, because the RECIPIENT verifies nothing.
 //
-// What this module provides instead is a DISPLAY-LAYER claim. You pick a label; it
-// rides next to your persona post; recipients render it with an explicit "unverified"
-// treatment. Anyone can claim anything. A modified client can send any label it likes,
-// and nothing anywhere checks it.
-//
-// This is here to demonstrate the intended UX, not the security property. Every surface
-// that shows a badge is required to say so — see PersonaBadgeChip and the status panel.
-// Presenting one of these as evidence of a real credential would misrepresent the
-// protocol, which for a system whose entire value proposition is "you can verify this
-// without trusting anyone" would be a bad trade.
-//
-// The genuine implementation is specced in PERSONAS_SERVERLESS_TODO.md §2. The blocking
-// question is not the circuit (it exists) but the approval authority: with no server,
-// who grants a badge, and how does every replica agree that they did?
+// Closing that gap means attaching the `badge_pred` proof to the post and checking it on
+// receipt — `emitBadgeProof` / `verifyBadgeProof` exist in the addon for exactly this and
+// are not yet wired into the send/receive path. Until they are, every surface that shows
+// a badge must keep saying the claim is unverified, because for a system whose entire
+// value proposition is "you can verify this without trusting anyone", quietly letting a
+// label pass for a credential would be the worst possible trade.
 //
 // `.std` so both the renderer and the preload can import it: this is plain data with no
 // engine dependency, and the chip that renders it is a `.dom` component.

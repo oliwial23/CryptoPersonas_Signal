@@ -67,6 +67,25 @@ pub struct EngineOptions {
 
 /// A record produced by an `emit*` call: the CBOR bytes to carry, its envelope
 /// hash (the handle for polls/ratings), and the petname to show in the sender slot.
+/// A badge request the admin has not approved yet.
+#[napi(object)]
+pub struct JsBadgeRequest {
+    /// Envelope hash of the request record — what `emitBadgeApprove` takes.
+    pub eh: String,
+    /// 1 = Faculty, 2 = Student, 3 = Industry.
+    pub slot: u32,
+}
+
+/// The two petnames an authorship proof actually proves about.
+///
+/// Derived from the proof's own public inputs by `Engine::verify_authorship`. A caller
+/// that renders these is sound; one that renders names taken from the wire is not.
+#[napi(object)]
+pub struct JsAuthorship {
+    pub first: String,
+    pub second: String,
+}
+
 #[napi(object)]
 pub struct JsEmitted {
     pub bytes: Buffer,
@@ -104,6 +123,12 @@ pub struct JsLogEntry {
 pub struct Engine {
     inner: Engine32,
     rng: StdRng,
+    /// Verifying key for `authorship_pred`, kept so a RECIPIENT can check an authorship
+    /// proof. It ships in the same `ServerKeys` bundle every instance already generates,
+    /// so holding it costs nothing extra.
+    authorship_vk: personas_core::VK,
+    /// Verifying key for `badge_pred`, so a recipient can check a badge proof.
+    badge_vk: personas_core::VK,
 }
 
 fn eh_to_hex(eh: &Eh) -> String {
@@ -167,6 +192,9 @@ impl Engine {
         let conversation =
             ConversationId(options.conversation.unwrap_or_else(|| "personas".into()));
 
+        let authorship_vk = keys.authorship_pred_verifying_key.clone();
+        let badge_vk = keys.badge_pred_verifying_key.clone();
+
         let mut inner: Engine32 =
             Messenger::new(transport, conversation, replica_keys, config, member);
 
@@ -176,7 +204,12 @@ impl Engine {
             inner = inner.with_heartbeat(Heartbeat::new(anchor as u64, period as u64));
         }
 
-        Ok(Self { inner, rng })
+        Ok(Self {
+            inner,
+            rng,
+            authorship_vk,
+            badge_vk,
+        })
     }
 
     fn emit<T>(
@@ -187,6 +220,178 @@ impl Engine {
     {
         r.map(to_emitted)
             .map_err(|e| napi::Error::from_reason(format!("emit failed: {e}")))
+    }
+
+    /// Prove that two of MY pseudonyms share an author. Returns the encoded proof plus
+    /// its public inputs, for the caller to ship as display payload.
+    ///
+    /// Both pseudonyms are named by their CONTEXT — for Desktop's unlimited pseudonyms
+    /// that is the nonce the UI already stores per persona. The claimed values are
+    /// derived from our secret key INSIDE the circuit, so this cannot be used to assert
+    /// anything about a persona we do not own.
+    ///
+    /// Produces no record and folds nothing: an authorship proof is a read-only
+    /// statement, which is why it needed no protocol change (see
+    /// PERSONAS_ZK_WORKPLAN.md step 3).
+    #[napi]
+    pub fn emit_authorship(
+        &mut self,
+        context_a: f64,
+        context_b: f64,
+    ) -> napi::Result<Buffer> {
+        self.guard_not_scanning("emit_authorship")?;
+        if context_a == context_b {
+            // A pseudonym is trivially itself; the proof would verify and say nothing.
+            return napi::Result::Err(napi::Error::from_reason(
+                "emit_authorship: the two contexts are identical, which claims nothing",
+            ));
+        }
+        let a = F::from(context_a as u64);
+        let b = F::from(context_b as u64);
+        self.inner
+            .prove_authorship(&mut self.rng, a, b)
+            .map(Buffer::from)
+            .map_err(|e| napi::Error::from_reason(format!("emit_authorship failed: {e}")))
+    }
+
+    /// VERIFY an authorship proof, returning the two petnames it actually proves about
+    /// — or `None` if it does not verify.
+    ///
+    /// The returned names are derived from the proof's OWN public inputs, never from
+    /// anything the sender wrote beside it. That is the difference between a checkmark
+    /// that means something and one that can be attached to someone else's persona
+    /// names: a sender can hold a valid proof about two pseudonyms they really own and
+    /// still display any names they like next to it. Callers must render THESE.
+    #[napi]
+    pub fn verify_authorship(&self, proof: Buffer) -> Option<JsAuthorship> {
+        let inputs = personas_core::verify_authorship_proof(&self.authorship_vk, proof.as_ref())?;
+        Some(JsAuthorship {
+            first: personas_core::persona::petname(inputs[1]),
+            second: personas_core::persona::petname(inputs[3]),
+        })
+    }
+
+    /// Badge requests that have NOT been approved yet, for an admin to act on.
+    ///
+    /// Derived from the replica's own log rather than from any client-side list, so
+    /// every admin sees the same set and an approval that has already landed disappears
+    /// for everyone. Pairing works because the approval entry names its target.
+    #[napi]
+    pub fn pending_badge_requests(&self) -> Vec<JsBadgeRequest> {
+        let log = self.inner.replica().log();
+
+        // Targets already approved.
+        let approved: std::collections::HashSet<&str> = log
+            .iter()
+            .filter(|e| e.kind == "BadgeApprove")
+            .filter_map(|e| e.body.rsplit(" for ").next())
+            .collect();
+
+        log.iter()
+            .filter(|e| e.kind == "BadgeRequest")
+            .filter_map(|e| {
+                let eh = eh_to_hex(&e.eh);
+                if approved.contains(eh.as_str()) {
+                    return None;
+                }
+                // Body format is ours: "requested badge slot N".
+                let slot: u32 = e.body.rsplit(' ').next()?.parse().ok()?;
+                Some(JsBadgeRequest { eh, slot })
+            })
+            .collect()
+    }
+
+    /// Request a badge: 1=Faculty, 2=Student, 3=Industry.
+    ///
+    /// Files a callback for an admin to approve. The badge is NOT granted here — it
+    /// lands in your object only after an approval is invoked at a settlement barrier
+    /// and you then scan.
+    #[napi]
+    pub fn emit_badge_request(&mut self, slot: u32) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_badge_request")?;
+        if slot < 1 || slot > 3 {
+            return napi::Result::Err(napi::Error::from_reason(
+                "emit_badge_request: slot must be 1 (Faculty), 2 (Student) or 3 (Industry)",
+            ));
+        }
+        Self::emit(self.inner.emit_badge_request(&mut self.rng, slot as u8))
+    }
+
+    /// Approve a badge request, naming the request record's envelope hash.
+    #[napi]
+    pub fn emit_badge_approve(
+        &mut self,
+        request: String,
+        slot: u32,
+    ) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_badge_approve")?;
+        if slot < 1 || slot > 3 {
+            return napi::Result::Err(napi::Error::from_reason(
+                "emit_badge_approve: slot must be 1, 2 or 3",
+            ));
+        }
+        let target = eh_from_hex(&request)?;
+        Self::emit(self.inner.emit_badge_approve(target, slot as u8))
+    }
+
+    /// Prove we hold `badge` (by NAME) in its slot. Returns the encoded proof.
+    #[napi]
+    pub fn emit_badge_proof(&mut self, badge: String) -> napi::Result<Buffer> {
+        self.guard_not_scanning("emit_badge_proof")?;
+        let (slot, value) = personas_core::badge_value(&badge).ok_or_else(|| {
+            napi::Error::from_reason(format!(
+                "emit_badge_proof: {badge:?} is not one of Faculty, Student, Industry. \
+                 Badge values are circuit constants, so no other name can be proved."
+            ))
+        })?;
+        self.inner
+            .prove_badge(&mut self.rng, F::from(slot as u64), value)
+            .map(Buffer::from)
+            .map_err(|e| napi::Error::from_reason(format!("emit_badge_proof failed: {e}")))
+    }
+
+    /// VERIFY a badge proof, returning the badge NAME it actually proves — or `None`.
+    ///
+    /// As with authorship, render what comes back from here, never a label carried in
+    /// the message: otherwise a valid Student proof could be displayed as Faculty.
+    #[napi]
+    pub fn verify_badge_proof(&self, proof: Buffer) -> Option<String> {
+        let (_slot, value) =
+            personas_core::verify_badge_proof(&self.badge_vk, proof.as_ref())?;
+        // Map back through the same table the prover used, so an unrecognised value is
+        // reported as unverified rather than rendered as something plausible.
+        ["Faculty", "Student", "Industry"]
+            .iter()
+            .find(|name| {
+                personas_core::badge_value(name).map(|(_, v)| v) == Some(value)
+            })
+            .map(|name| (*name).to_string())
+    }
+
+    /// Which badges does MY object actually hold? Empty for an observer, or for a
+    /// member whose badge slots are all unset.
+    ///
+    /// Read from the member's own zk object, which is the only place a badge really
+    /// exists. A badge arrives there exactly one way: an approver invokes this member's
+    /// callback with `BADGE1/2/3_FLAG`, and the member's next SCAN writes it in-circuit
+    /// (`standard_callback_method`). So this flips at the requester's next scan after
+    /// approval, not at approval time — the same timing as a ban.
+    ///
+    /// This is what distinguishes a REAL badge from the decorative label the composer
+    /// has been attaching: a label is a string on the wire, this is state in the object
+    /// that `badge_pred` can prove.
+    #[napi]
+    pub fn get_badges(&self) -> Vec<String> {
+        self.inner
+            .member()
+            .map(|m| {
+                personas_core::badge_labels(
+                    &m.user.data.badge1,
+                    &m.user.data.badge2,
+                    &m.user.data.badge3,
+                )
+            })
+            .unwrap_or_default()
     }
 
     /// Am I banned? `None` for an observer with no member object.

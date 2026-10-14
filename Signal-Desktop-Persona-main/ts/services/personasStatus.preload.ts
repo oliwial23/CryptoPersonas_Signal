@@ -18,6 +18,7 @@
 // display that only ever shows green is worth nothing.
 
 import type { ConversationModel } from '../models/conversations.preload.ts';
+import { pendingBadgeRequests } from './personasBadgeFlow.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
@@ -85,6 +86,21 @@ export type PersonaStatus = {
    * unknown as "No" would be the reassuring-but-wrong answer this panel exists to avoid.
    */
   banned?: boolean;
+  /**
+   * Can this build PROVE and VERIFY authorship in zero knowledge? Derived from the
+   * addon's bindings rather than hardcoded, so an older `.node` reports false instead
+   * of the panel claiming a capability the running engine does not have.
+   */
+  authorshipZk: boolean;
+  /**
+   * Badges genuinely held in this member's zk object, as opposed to the unverified
+   * label the composer attaches to a post. The gap between these two is the whole
+   * point of the badge work: today the composer can claim any label, and this list is
+   * what a real credential would look like.
+   */
+  heldBadges: ReadonlyArray<string>;
+  /** Badge requests awaiting approval. Only actionable by a Signal group admin. */
+  pendingBadgeRequests: ReadonlyArray<{ eh: string; slot: number; name: string }>;
   scanStuck: boolean;
   /** Callbacks outstanding mid-sweep; scanning until zero is the way out. */
   outstandingCallbacks: number;
@@ -119,6 +135,9 @@ export function getPersonaStatus(
     recordCount: 0,
     isSignalAdmin: conversation?.areWeAdmin() ?? false,
     autoScan: isAutoScanEnabled(),
+    authorshipZk: false,
+    heldBadges: [],
+    pendingBadgeRequests: [],
     scanStuck: false,
     outstandingCallbacks: 0,
     stateLost: false,
@@ -150,6 +169,16 @@ export function getPersonaStatus(
       // asserts rather than erroring, so the next post aborted the renderer with
       // nothing in the JS logs. The addon now refuses those calls, so this has to be
       // SHOWN — a refusal nobody can see is almost as bad as a crash.
+      if (typeof engine.getBadges === 'function') {
+        status.heldBadges = engine.getBadges();
+      }
+
+      status.pendingBadgeRequests = pendingBadgeRequests();
+
+      status.authorshipZk =
+        typeof engine.emitAuthorship === 'function' &&
+        typeof engine.verifyAuthorship === 'function';
+
       if (typeof engine.isBanned === 'function') {
         status.banned = engine.isBanned();
       }

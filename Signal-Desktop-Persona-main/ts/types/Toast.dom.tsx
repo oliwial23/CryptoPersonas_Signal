@@ -88,6 +88,26 @@ export enum ToastType {
   // flag flips, because that is the only moment the client can be sure the member knows
   // — the ban record itself is anonymous and they may never see it.
   PersonaBanned = 'PersonaBanned',
+  PersonaBadgeRequested = 'PersonaBadgeRequested',
+  PersonaBadgeApproved = 'PersonaBadgeApproved',
+  // Personas demo: a badge request hidden from THIS admin's queue. Worded as "hidden",
+  // never "denied" — no deny record exists, so nothing was broadcast.
+  PersonaBadgeDismissed = 'PersonaBadgeDismissed',
+  // Personas demo: a persona action was refused, and the REASON is carried through to
+  // the screen. The generic Error toast ("Something went wrong") used to be the only
+  // thing a refusal produced, which meant the one fact needed to fix it — scan
+  // unfinished, not joined, badge already held, engine unavailable — existed solely in
+  // app.log. A demo where diagnosing a button press requires reading a log file is a
+  // demo that fails in front of an audience.
+  PersonaActionFailed = 'PersonaActionFailed',
+  // Personas demo: a badge POSSESSION PROOF was published. Distinct from
+  // PersonaBadgeApproved (an admin granted it) and from selecting the decorative label.
+  PersonaBadgeProved = 'PersonaBadgeProved',
+  // Personas demo: a scan absorbed something. Named so the two outcomes of pressing
+  // "Scan now" are distinguishable — absorbing nothing is normal, and looked identical
+  // to absorbing a badge, which made an approved-but-unscanned badge inexplicable.
+  PersonaScanAbsorbed = 'PersonaScanAbsorbed',
+  PersonaScanEmpty = 'PersonaScanEmpty',
   ReactionFailed = 'ReactionFailed',
   ReceiptSaved = 'ReceiptSaved',
   ReceiptSaveFailed = 'ReceiptSaveFailed',
@@ -242,6 +262,16 @@ export type AnyToast =
   | { toastType: ToastType.PersonaReactionBlocked }
   | { toastType: ToastType.PersonaSelfRateBlocked }
   | { toastType: ToastType.PersonaBanned }
+  | { toastType: ToastType.PersonaBadgeRequested }
+  | { toastType: ToastType.PersonaBadgeApproved }
+  | { toastType: ToastType.PersonaBadgeDismissed }
+  | { toastType: ToastType.PersonaActionFailed; parameters: { reason: string } }
+  | { toastType: ToastType.PersonaBadgeProved; parameters: { badge: string } }
+  | {
+      toastType: ToastType.PersonaScanAbsorbed;
+      parameters: { gained: string };
+    }
+  | { toastType: ToastType.PersonaScanEmpty }
   | { toastType: ToastType.ReactionFailed }
   | {
       toastType: ToastType.RemoteConfigChanged;

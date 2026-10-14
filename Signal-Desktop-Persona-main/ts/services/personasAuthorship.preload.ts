@@ -1,75 +1,113 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Personas demo — AUTHORSHIP CLAIMS, as a UI mockup.
+// Personas demo — AUTHORSHIP PROOFS: "these two pseudonyms are the same author."
 //
-// ============================================================================
-// THIS IS NOT A PROOF. IT IS AN UNVERIFIED ASSERTION, LIKE A BADGE.
-// ============================================================================
+// A REAL PROOF, and every sentence of this header used to say otherwise. It was a
+// mockup — two petname strings in a message body, checkable by nobody — and the
+// comment that stood here described that honestly. `Member::authorship()` and the napi
+// binding now exist, so the claim is a Groth16 proof over `authorship_pred` binding both
+// pseudonyms to one secret key, verified on receipt and DROPPED if it fails.
 //
-// The real feature: prove that one member owns two pseudonyms, without revealing which
-// member. `authorship_pred` exists in `personas-core/src/circuits.rs` and — unusually
-// for these gaps — its Merkle proving key is ALREADY GENERATED and already ships in the
-// ~51 MB bundle. What is missing is small: `MemberKeys` does not extract the key, there
-// is no `Member::authorship()` to build the statement, and there is no napi binding.
-// PERSONAS_SERVERLESS_TODO.md section 1 estimates ~60 lines of Rust.
+// Kept as history rather than deleted, because the shape of the old version explains two
+// things about the current one:
 //
-// Why it is a mockup and not the real thing: that Rust cannot be compiled or tested from
-// here, and the last fifteen lines of Rust added to this project (`get_reputation`)
-// compiled cleanly and then SIGKILLed the render process — see PERSONAS_DEMO.md section
-// 8.0. Shipping unverifiable Rust into a working demo is a bad trade, so this
-// demonstrates the interaction and states plainly that it proves nothing.
+//   * WHY THE NAMES COME FROM THE VERIFIER. The mockup took them from the sender's
+//     input, which is what made it forgeable. `verifyPersonaAuthorship` returns them
+//     from the proof's public inputs, and that is the only place any surface reads them.
+//   * WHY IT NOW RIDES THE PHANTOM. The mockup was sent attributably, on the reasoning
+//     that "the claimant is voluntarily linking two of their own personas, so there is
+//     nothing left to conceal". True of an assertion; false of a proof. The proof shows
+//     the two pseudonyms share an author WITHOUT revealing who, so an attributable
+//     envelope answers precisely the question the proof is built to leave open.
 //
-// What it actually does: sends "~alpha and ~beta are the same person" as a claim message.
-// Anyone can claim any two petnames, including two that are not theirs. A recipient has
-// no way to check it.
-//
-// Sent ATTRIBUTABLY rather than over the phantom. That is deliberate: the claimant is
-// voluntarily linking two of their own personas, so there is nothing left to conceal
-// about who is speaking — and routing it anonymously would imply the link is protected
-// when it is not.
+// Compare personasBadgeProof.preload.ts, which is the same construction for badges.
 
 import type { ConversationModel } from '../models/conversations.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
-import { encodeAuthorshipClaim } from './personasCarriage.std.ts';
-import { isPersonasEngineEnabled } from './personasEngine.preload.ts';
+import {
+  isPersonasEngineEnabled,
+  composePersonaAuthorship,
+  verifyPersonaAuthorship,
+} from './personasEngine.preload.ts';
 
 const log = createLogger('personasAuthorship');
 
 // Re-exported so preload-side callers have one import, while the wording itself lives
 // in the `.std` module the renderer can reach.
-export { AUTHORSHIP_DISCLAIMER } from './personasAuthorship.std.ts';
+// Re-exported so preload-side callers have one import, while the wording lives in the
+// `.std` module the renderer can reach. AUTHORSHIP_DISCLAIMER is gone: the claim is a
+// verified proof now, and the disclaimer was deleted in the change that made it false.
+export {
+  AUTHORSHIP_EXPLANATION,
+  AUTHORSHIP_VERIFIED_LABEL,
+} from './personasAuthorship.std.ts';
 
 export async function sendAuthorshipClaim(
   conversation: ConversationModel,
-  first: string,
-  second: string
+  contextA: number,
+  contextB: number
 ): Promise<boolean> {
   if (!isPersonasEngineEnabled()) {
     return false;
   }
-  if (!first || !second || first === second) {
-    // Claiming a persona is the same as itself is vacuous; refuse rather than send
-    // something that looks like a statement but says nothing.
-    log.warn('sendAuthorshipClaim: refusing an empty or self-referential claim');
+  if (!Number.isFinite(contextA) || !Number.isFinite(contextB)) {
+    log.warn('sendAuthorshipClaim: refusing a non-numeric context');
+    return false;
+  }
+  if (contextA === contextB) {
+    // A pseudonym is trivially itself: the proof would verify and assert nothing.
+    log.warn('sendAuthorshipClaim: refusing a self-referential claim');
     return false;
   }
   try {
-    // Same split the poll path uses: `personaCarriageBody` is what goes on the wire,
-    // while `personaAuthorship` is what the bubble renders from. Sending it hidden
-    // would mean the claimant is the only person who cannot see their own claim.
+    // NOW A REAL PROOF. Previously this shipped two petname strings and the bubble
+    // simply repeated them, which is why the claim carried a permanent disclaimer.
+    // `composePersonaAuthorship` produces a Groth16 proof over `authorship_pred`
+    // binding both pseudonyms to one secret key.
+    const claim = composePersonaAuthorship(contextA, contextB);
+    if (!claim) {
+      log.error('sendAuthorshipClaim: could not produce the proof');
+      return false;
+    }
+
+    // Verify OUR OWN proof before sending, and render from the verifier's output.
+    //
+    // Two reasons. It catches a malformed or mis-ordered proof here rather than at
+    // every recipient. And it means the sender's own bubble is built from the same
+    // source of truth as everyone else's — the proof's public inputs — so there is no
+    // path anywhere that renders a name the proof does not vouch for.
+    const verified = verifyPersonaAuthorship(claim.proof);
+    if (!verified) {
+      log.error(
+        'sendAuthorshipClaim: our own proof failed to verify; refusing to send it'
+      );
+      return false;
+    }
+
     await conversation.enqueueMessageForSend(
       {
         body: undefined,
         attachments: [],
-        personaCarriageBody: encodeAuthorshipClaim({ first, second }),
-        personaAuthorship: { first, second },
+        personaCarriageBody: claim.body,
+        // Anonymous on our own copy too, so the sender sees the same bubble everyone
+        // else does. Showing "carol proved authorship" locally while every recipient
+        // sees "Anonymous" would leave the one person who most needs to understand the
+        // privacy property with the one view that contradicts it.
+        personaAnonymous: true,
+        personaAuthorship: {
+          first: verified.first,
+          second: verified.second,
+          verified: true,
+        },
       },
       {}
     );
-    log.info(`sendAuthorshipClaim: claimed ${first} = ${second}`);
+    log.info(
+      `sendAuthorshipClaim: proved ${verified.first} = ${verified.second}`
+    );
     return true;
   } catch (error) {
     log.error(`sendAuthorshipClaim failed: ${toLogFormat(error)}`);

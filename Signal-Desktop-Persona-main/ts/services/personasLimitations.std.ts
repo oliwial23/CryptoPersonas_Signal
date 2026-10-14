@@ -21,9 +21,9 @@ export const KNOWN_LIMITATIONS: ReadonlyArray<{
       'A member can rate their own persona post and inflate their own reputation, and no replica can tell. The tally dedupes one rating per pseudonym per target, but the author\u2019s pseudonym is H(sk, post context) while the rater\u2019s is H(sk, target context), so the two look unrelated \u2014 which is exactly the unlinkability the scheme is built on. This client refuses to offer self-rating, but that is a UI choice, not enforcement: a modified client can still do it. Closing it properly needs the circuit to prove rater \u2260 author without revealing either.',
   },
   {
-    title: 'Authorship claims are unverified assertions',
+    title: 'Authorship is proved, but it is permanent and public',
     detail:
-      'Claim authorship sends "these two personas are both me" as a plain statement. Nothing proves it, and anyone can claim any pair of petnames including ones that are not theirs. The real feature is a zero-knowledge proof and is unusually close — authorship_pred exists in personas-core and its proving key already ships — but the serverless Member has no method to build the statement, so there is nothing to verify against. See PERSONAS_SERVERLESS_TODO.md section 1.',
+      'Claiming authorship is now a real zero-knowledge proof: authorship_pred binds both pseudonyms to one secret key, recipients verify the Groth16 proof before rendering, and a proof that fails verification is dropped rather than shown. The two names you see are derived from the proof\u2019s own public inputs, not from the message, so a valid proof cannot be displayed next to someone else\u2019s persona names. What remains is not a soundness gap but a consequence: a claim cannot be retracted, and it permanently links those two personas for everyone who saw it \u2014 including anyone who later learns something about either one.',
   },
   {
     title: 'Badges are unverified claims, not credentials',

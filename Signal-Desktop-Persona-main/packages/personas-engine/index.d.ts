@@ -124,6 +124,32 @@ export class Engine {
    */
   getReputation(): number | undefined;
   /** Is a callback sweep unfinished? While true, every proving flow except scan aborts. */
+  /**
+   * Prove two of MY pseudonyms share an author. Args are the two CONTEXTS (for an
+   * unlimited pseudonym, its nonce). Returns the encoded proof + public inputs.
+   */
+  emitAuthorship(contextA: number, contextB: number): Buffer;
+  /**
+   * Verify an authorship proof. Returns the two petnames the proof ACTUALLY proves
+   * about, derived from its own public inputs — render these, never names from the
+   * wire — or null if it does not verify.
+   */
+  verifyAuthorship(proof: Buffer): { first: string; second: string } | null;
+  /** Request a badge: 1=Faculty, 2=Student, 3=Industry. Files a ticket to approve. */
+  emitBadgeRequest(slot: number): JsEmitted;
+  /** Approve a badge request by its envelope hash. */
+  emitBadgeApprove(request: string, slot: number): JsEmitted;
+  /** Prove possession of a badge by NAME. Returns the encoded proof. */
+  emitBadgeProof(badge: string): Buffer;
+  /** Verify a badge proof; returns the badge NAME it proves, or null. */
+  verifyBadgeProof(proof: Buffer): string | null;
+  /** Badge requests not yet approved, for an admin to act on. */
+  pendingBadgeRequests(): Array<{ eh: string; slot: number }>;
+  /**
+   * Badges actually HELD in my zk object (not the decorative label a post carries).
+   * Arrives via approval -> my next scan. Empty for an observer.
+   */
+  getBadges(): Array<string>;
   /** Am I banned? undefined for an observer with no member object. */
   isBanned(): boolean | undefined;
   isScanning(): boolean;

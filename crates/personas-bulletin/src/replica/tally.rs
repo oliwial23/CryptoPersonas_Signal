@@ -126,6 +126,13 @@ pub struct Outstanding {
     pub accrued: i64,
     /// A ban trigger (poll close or admin invoke) has landed for this post.
     pub banned: bool,
+    /// An approved badge slot (1=Faculty, 2=Student, 3=Industry) for a BADGE REQUEST
+    /// ticket. `None` for an ordinary post ticket, or a request not yet approved.
+    ///
+    /// A ticket is invoked ONCE with ONE argument, so this is mutually exclusive with
+    /// `banned` and with a reputation settlement — which is why the settlement code
+    /// checks them in a fixed order rather than combining them.
+    pub badge_slot: Option<u8>,
     /// Whether the ticket has already been invoked.
     pub settled: bool,
 }
@@ -138,6 +145,7 @@ impl Outstanding {
             settle_barrier,
             accrued: 0,
             banned: false,
+            badge_slot: None,
             settled: false,
         }
     }

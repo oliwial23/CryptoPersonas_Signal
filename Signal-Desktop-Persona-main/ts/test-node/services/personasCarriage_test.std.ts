@@ -25,7 +25,10 @@ import {
   PERSONAS_VOTE_MARKER,
   PERSONAS_RATE_MARKER,
   PERSONAS_TOPIC_MARKER,
+  PERSONAS_BADGE_MARKER,
+  PERSONAS_BADGE_PROOF_MARKER,
   encodeRecordBody,
+  encodeBadgeBody,
   encodePostBody,
   encodePollBody,
   decodeRecordBody,
@@ -35,6 +38,11 @@ import {
   encodeTopicAnnouncement,
   decodeTopicAnnouncement,
   isPersonaPhantomBody,
+  encodeAuthorshipProof,
+  decodeAuthorshipProof,
+  encodeBadgeProof,
+  decodeBadgeProof,
+  PERSONAS_AUTHORSHIP_MARKER,
   decodePostBadge,
   decodePostContextName,
   type PersonaPollDescriptor,
@@ -121,6 +129,17 @@ describe('personasCarriage', () => {
       // A rating is pseudonymous in-circuit too (context = target.context()), so an
       // attributable envelope would name the rater outright.
       assert.isTrue(isPersonaPhantomBody(encodeRateBody(RECORD)));
+      // A badge request/approval: the grant travels by callback, so the sender's
+      // identity is unused by the protocol and must not be published by the envelope.
+      assert.isTrue(isPersonaPhantomBody(encodeBadgeBody(RECORD)));
+      // An AUTHORSHIP PROOF. This one is the easiest to get wrong and the most
+      // damaging: the proof's entire purpose is to link two pseudonyms WITHOUT naming
+      // their author, so an attributable envelope does not merely leak a little — it
+      // answers the exact question the proof refuses to answer, making it pointless.
+      assert.isTrue(isPersonaPhantomBody(encodeAuthorshipProof(RECORD)));
+      // A BADGE POSSESSION PROOF. The claim is "someone here holds Faculty", and the
+      // envelope naming that someone would collapse it to "this person holds Faculty".
+      assert.isTrue(isPersonaPhantomBody(encodeBadgeProof(RECORD)));
     });
 
     it('is false for attributable records and plain chatter', () => {
@@ -130,6 +149,34 @@ describe('personasCarriage', () => {
       assert.isFalse(isPersonaPhantomBody('just a message'));
       assert.isFalse(isPersonaPhantomBody(undefined));
       assert.isFalse(isPersonaPhantomBody(null));
+    });
+  });
+
+  describe('badge records', () => {
+    it('round trips under its own marker', () => {
+      const body = encodeBadgeBody(RECORD);
+      assert.isTrue(body.startsWith(PERSONAS_BADGE_MARKER));
+      assert.deepEqual(decodeRecordBody(body), RECORD);
+    });
+
+    it('is a ZK record, unlike an authorship proof or a topic announcement', () => {
+      // A badge request/approval DOES go to `ingest` — it is a bulletin record that
+      // files or settles a callback. An authorship proof does not. Conflating the two
+      // would either hand the engine something it rejects or skip ingesting a record
+      // the replica needs, and both failures are quiet.
+      assert.isDefined(decodeRecordBody(encodeBadgeBody(RECORD)));
+      assert.isUndefined(decodeRecordBody(encodeAuthorshipProof(RECORD)));
+    });
+
+    it('is not confused with an attributable join', () => {
+      // The ONLY difference between these two bodies is the marker, and the marker is
+      // what decides whether the sender is named. Same payload, opposite routing.
+      const join = encodeRecordBody(RECORD);
+      const badge = encodeBadgeBody(RECORD);
+      assert.notEqual(join, badge);
+      assert.deepEqual(decodeRecordBody(join), decodeRecordBody(badge));
+      assert.isFalse(isPersonaPhantomBody(join));
+      assert.isTrue(isPersonaPhantomBody(badge));
     });
   });
 
@@ -157,7 +204,7 @@ describe('personasCarriage', () => {
   });
 
   describe('marker distinctness', () => {
-    it('uses six distinct, equal-length markers', () => {
+    it('uses nine distinct, equal-length markers', () => {
       const markers = [
         PERSONAS_MARKER,
         PERSONAS_POST_MARKER,
@@ -165,8 +212,11 @@ describe('personasCarriage', () => {
         PERSONAS_VOTE_MARKER,
         PERSONAS_RATE_MARKER,
         PERSONAS_TOPIC_MARKER,
+        PERSONAS_BADGE_MARKER,
+        PERSONAS_AUTHORSHIP_MARKER,
+        PERSONAS_BADGE_PROOF_MARKER,
       ];
-      assert.equal(new Set(markers).size, 6);
+      assert.equal(new Set(markers).size, 9);
       // Equal length keeps the `body.slice(marker.length)` decode uniform, and means
       // no marker can be a prefix of another.
       assert.equal(new Set(markers.map(m => m.length)).size, 1);
@@ -250,5 +300,99 @@ describe('post context names', () => {
 
   it('still routes a context-labelled post over the phantom', () => {
     assert.ok(isPersonaPhantomBody(encodePostBody(record, undefined, 'Union')));
+  });
+});
+
+describe('authorship proof carriage', () => {
+  const PROOF = Buffer.from([0, 1, 2, 250, 251, 252, 253, 254, 255]);
+
+  it('round-trips the proof bytes exactly', () => {
+    const body = encodeAuthorshipProof(PROOF);
+    const back = decodeAuthorshipProof(body);
+    assert.isDefined(back);
+    // Byte-exact: a Groth16 proof that loses or gains a byte does not verify, and the
+    // failure would surface as "proof invalid" rather than "carriage is wrong".
+    assert.deepEqual(Array.from(back as Buffer), Array.from(PROOF));
+  });
+
+  it('uses the authorship marker', () => {
+    assert.isTrue(
+      encodeAuthorshipProof(PROOF).startsWith(PERSONAS_AUTHORSHIP_MARKER)
+    );
+  });
+
+  it('carries NO names', () => {
+    // The security property: names are derived from the proof's public inputs, so a
+    // name must never travel on the wire where a recipient could render it instead.
+    const body = encodeAuthorshipProof(PROOF);
+    assert.notInclude(body.toLowerCase(), 'first');
+    assert.notInclude(body.toLowerCase(), 'second');
+  });
+
+  it('DOES ride the shared phantom', () => {
+    // Reversed deliberately, and this test's history is the argument for the change.
+    //
+    // It used to assert the opposite, on the reasoning that "the claimant is saying
+    // something about their OWN personas". That held while authorship was an
+    // unverified typed claim. It stopped holding the moment it became a proof: the
+    // proof establishes that two pseudonyms share an author while revealing nothing
+    // about WHO, so an attributable envelope answers — for free, to everyone — the one
+    // question the proof is constructed to leave open.
+    //
+    // A green test asserting the old behaviour is worse than no test, because it
+    // presents a leak as an invariant.
+    assert.isTrue(isPersonaPhantomBody(encodeAuthorshipProof(PROOF)));
+  });
+
+  it('returns undefined for a non-authorship body', () => {
+    assert.isUndefined(decodeAuthorshipProof('just a message'));
+    assert.isUndefined(decodeAuthorshipProof(undefined));
+    assert.isUndefined(decodeAuthorshipProof(null));
+  });
+});
+
+describe('badge possession proof carriage', () => {
+  const PROOF = Buffer.from([9, 8, 7, 0, 255, 128, 1]);
+
+  it('round-trips the proof bytes exactly', () => {
+    // Byte-exact, for the same reason authorship is: a Groth16 proof that loses or
+    // gains a byte does not verify, and the symptom would read as "proof invalid"
+    // rather than "carriage is wrong".
+    const back = decodeBadgeProof(encodeBadgeProof(PROOF));
+    assert.isDefined(back);
+    assert.deepEqual(Array.from(back as Buffer), Array.from(PROOF));
+  });
+
+  it('uses its own marker, distinct from the badge RECORD marker', () => {
+    // PZG2 (proof) vs PZB2 (request/approval record). Confusing them would either hand
+    // the engine a proof to `ingest` — which it would reject — or skip ingesting a
+    // record the replica needs. Both failures are quiet.
+    assert.isTrue(
+      encodeBadgeProof(PROOF).startsWith(PERSONAS_BADGE_PROOF_MARKER)
+    );
+    assert.notEqual(PERSONAS_BADGE_PROOF_MARKER, PERSONAS_BADGE_MARKER);
+    assert.isUndefined(decodeBadgeProof(encodeBadgeBody(PROOF)));
+    assert.isUndefined(decodeRecordBody(encodeBadgeProof(PROOF)));
+  });
+
+  it('carries NO badge name', () => {
+    // The security property. The name is an OUTPUT of verification; if it travelled
+    // alongside the proof, a valid Industry proof could be rendered as Faculty and the
+    // verified checkmark would be true while the statement was false.
+    const body = encodeBadgeProof(PROOF);
+    for (const name of ['faculty', 'student', 'industry', 'badge']) {
+      assert.notInclude(body.toLowerCase().slice(5), name);
+    }
+  });
+
+  it('is not confused with an authorship proof', () => {
+    assert.isUndefined(decodeBadgeProof(encodeAuthorshipProof(PROOF)));
+    assert.isUndefined(decodeAuthorshipProof(encodeBadgeProof(PROOF)));
+  });
+
+  it('returns undefined for a non-proof body', () => {
+    assert.isUndefined(decodeBadgeProof('just a message'));
+    assert.isUndefined(decodeBadgeProof(undefined));
+    assert.isUndefined(decodeBadgeProof(null));
   });
 });

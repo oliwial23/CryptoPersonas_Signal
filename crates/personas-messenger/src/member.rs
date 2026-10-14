@@ -40,7 +40,9 @@ use personas_bulletin::merkle::{MerkleCallbackStore, MerkleObjStore};
 use personas_bulletin::replica::record::{Ark, Eh, Flavour, PollKind, Record};
 use personas_core::circuits::{
     MsgUser, NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate,
-    PseudonymArgsVar, PubScan, PubScanVar, get_callbacks, get_scan_interaction,
+    BadgesArgs, BadgesArgsVar, PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsVar,
+    PubScan, PubScanVar, authorship_pred, badge_pred, get_badge_request_interaction, get_callbacks,
+    get_scan_interaction,
     get_standard_interaction, get_standard_pseudo_interaction,
     get_standard_pseudo_rate_interaction, pseudonym_pred,
 };
@@ -79,6 +81,16 @@ pub struct MemberKeys {
     pub pseudo_rate: PK,
     pub scan: PK,
     pub pseudonym_pred: PK,
+    /// Proving two of this member's pseudonyms share an author (`authorship_pred`).
+    ///
+    /// Already present in every `ServerKeys` bundle, so adding this costs no keygen and
+    /// no regeneration for existing users — the ~51 MB cache on disk already contains it.
+    pub authorship_pred: PK,
+    /// Proving possession of a badge in slot `i` (`badge_pred`). Also already in every
+    /// `ServerKeys` bundle — no keygen, no regeneration.
+    pub badge_pred: PK,
+    /// The badge REQUEST interaction's proving key.
+    pub badge_request: PK,
 }
 
 impl MemberKeys {
@@ -91,6 +103,9 @@ impl MemberKeys {
             pseudo_rate: keys.standard_pseudor_proving_key.clone(),
             scan: keys.scan_proving_key.clone(),
             pseudonym_pred: keys.pseudonym_pred_proving_key.clone(),
+            authorship_pred: keys.authorship_pred_proving_key.clone(),
+            badge_pred: keys.badge_pred_proving_key.clone(),
+            badge_request: keys.badge_request_proving_key.clone(),
         }
     }
 }
@@ -172,6 +187,51 @@ impl Member {
             exec: Ark(exec),
             extra: Ark(vec![]),
             body: body.into(),
+            obj_root: Ark(root),
+        })
+    }
+
+    /// A BADGE REQUEST: an interaction that files a callback for an approver to invoke.
+    ///
+    /// Modelled on `post_anon` — same one-callback shape and no public arguments — but
+    /// executed through `get_badge_request_interaction` and its own proving key. The
+    /// badge itself is NOT granted here: this only creates the ticket. Approval invokes
+    /// it with a BADGE flag, and this member's next scan is what writes the badge into
+    /// their object in-circuit.
+    ///
+    /// `slot` travels as plain data (1=Faculty, 2=Student, 3=Industry): it states what
+    /// is being asked for. Nothing about it is proved, and nothing needs to be — the
+    /// approver decides, and the circuit decides what the resulting flag means.
+    pub fn badge_request<const OH: usize>(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        slot: u8,
+    ) -> Result<Record, MemberError> {
+        self.require_member(obj)?;
+        let root = obj.root();
+        let exec = self
+            .user
+            .exec_method_create_cb::<H, BadgesArgs<F>, BadgesArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 1>(
+                rng,
+                get_badge_request_interaction(),
+                [FakeSigPubkey::pk()],
+                Time::from(0),
+                obj,
+                false,
+                &self.keys.badge_request,
+                BadgesArgs {
+                    i: F::from(slot as u64),
+                    // The request names the slot; the VALUE is supplied by the circuit
+                    // when the approval's flag is absorbed, so there is nothing
+                    // meaningful to claim here.
+                    claimed: F::from(0),
+                },
+                (),
+            )?;
+        Ok(Record::BadgeRequest {
+            exec: Ark(exec),
+            slot,
             obj_root: Ark(root),
         })
     }
@@ -348,6 +408,130 @@ impl Member {
 
     /// The shared `pseudonym_pred` proof for a vote or a rating: prove membership and
     /// `claimed = H(sk, context)`, returning `(root, claimed, proof)`.
+    /// Prove that TWO of this member's pseudonyms share an author, without revealing
+    /// which member or the secret key behind them.
+    ///
+    /// Returns the object root, both claimed pseudonyms, and the proof. The claimed
+    /// values are public inputs of the proof, which is what lets a recipient derive the
+    /// petnames to display from the proof itself rather than trusting names sent
+    /// alongside it — see `personas_core::verify_authorship_proof`.
+    ///
+    /// Read-only, like a vote or a rating: it is a statement ABOUT the object, so it
+    /// produces no interaction, advances nothing, and files no callback. That is why
+    /// this needs no new `Record` variant and no change to the replica's accept rules —
+    /// it is a claim shown, not state folded in.
+    ///
+    /// Shape is identical to `pseudonym_statement` with `PseudonymArgsPair` in place of
+    /// `PseudonymArgs`; `authorship_pred` is the two-pseudonym predicate and its proving
+    /// key already ships in `ServerKeys`.
+    pub fn authorship<const OH: usize>(
+        &self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        context_a: F,
+        context_b: F,
+    ) -> Result<(F, F, F, <Snark as ark_snark::SNARK<F>>::Proof), MemberError> {
+        let (root, path) =
+            <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
+                obj,
+                self.commitment(),
+            )
+            .ok_or(MemberError::NotJoined)?;
+
+        // Both derived from OUR OWN sk, which is the entire content of the claim: only
+        // the holder of that key can produce a satisfying witness for the pair.
+        let claimed_a = persona::pseudonym(&self.user.data.sk, &context_a);
+        let claimed_b = persona::pseudonym(&self.user.data.sk, &context_b);
+
+        let pair = PseudonymArgsPair {
+            a: PseudonymArgs {
+                context: context_a,
+                claimed: claimed_a,
+            },
+            b: PseudonymArgs {
+                context: context_b,
+                claimed: claimed_b,
+            },
+        };
+
+        let proof = self
+            .user
+            .prove_statement_and_in::<H, PseudonymArgsPair<F>, PseudonymArgsPairVar<F>, (), (), Snark, MerkleObjStore<F, OH>>(
+                rng,
+                authorship_pred,
+                &self.keys.authorship_pred,
+                (path, root),
+                false,
+                pair,
+                (),
+            )?;
+        Ok((root, claimed_a, claimed_b, proof))
+    }
+
+    /// Prove this member holds `badge` in slot `i`, without revealing who they are.
+    ///
+    /// Returns the object root and the proof; the caller pairs them with `(i, badge)` to
+    /// form the public inputs `[i, claimed, obj_root]` — pub_args first, then the
+    /// membership root, the same Merkle convention the replica documents for
+    /// `pseudonym_pred` and that authorship needed.
+    ///
+    /// NOTE the `true` below. `pseudonym_statement` passes `false` in this position and
+    /// the as-a-service `make_badge_proof` passes `true`; this follows the working badge
+    /// reference rather than the neighbouring pseudonym code, because the two statements
+    /// differ in whether membership is revealed to the verifier.
+    ///
+    /// Read-only, like authorship: no interaction, no callback, nothing folded in.
+    pub fn badge<const OH: usize>(
+        &self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        i: F,
+        badge: F,
+    ) -> Result<(F, <Snark as ark_snark::SNARK<F>>::Proof), MemberError> {
+        let (root, path) =
+            <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
+                obj,
+                self.commitment(),
+            )
+            .ok_or(MemberError::NotJoined)?;
+
+        let args = BadgesArgs { i, claimed: badge };
+        let proof = self
+            .user
+            .prove_statement_and_in::<H, BadgesArgs<F>, BadgesArgsVar<F>, (), (), Snark, MerkleObjStore<F, OH>>(
+                rng,
+                badge_pred,
+                &self.keys.badge_pred,
+                (path, root),
+                // `false`, and THE FLAG MUST MATCH THE MEMBERSHIP DATA ABOVE.
+                //
+                // This argument selects how membership is established, and therefore
+                // what the circuit exposes as public inputs:
+                //
+                //   false + (path, root)   -> Merkle membership. The ROOT is a public
+                //                             input, so the layout is pub_args ++ [root].
+                //   true  + (sig, pubkey) -> server-signed membership. There is no root,
+                //                             so the layout is pub_args alone.
+                //
+                // This call had `true` while passing `(path, root)`, which is why the
+                // proof never verified: `encode_badge_proof` supplied `[i, badge, root]`
+                // and the circuit, told to use signed membership, expected `[i, badge]`.
+                // The symptom was "the proof did not verify locally" with nothing wrong
+                // in either the prover or the verifier taken on its own.
+                //
+                // The `true` was copied from `personas-client::flows`, which is correct
+                // THERE — the as-a-service client has a server signature and encodes
+                // `vec![i_f, badge]` with no root. The serverless messenger has a Merkle
+                // store instead, which is why its two working proofs,
+                // `pseudonym_statement` and `authorship`, both pass `false`, and why the
+                // replica's own `memo_predicate` verifies `[context, claimed, obj_root]`.
+                false,
+                args,
+                (),
+            )?;
+        Ok((root, proof))
+    }
+
     fn pseudonym_statement<const OH: usize>(
         &self,
         rng: &mut (impl CryptoRng + RngCore),

@@ -17,7 +17,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL="$HERE/.local"
-STORAGE_SERVICE_DIR="${STORAGE_SERVICE_DIR:-$HOME/Repos/personas2/storage-service}"
+STORAGE_SERVICE_DIR="${STORAGE_SERVICE_DIR:-$HOME/Repos/storage-service}"
 
 HOSTFILE="$LOCAL/bigtable-emulator-host"
 PIDFILE="$LOCAL/bigtable-emulator.pid"

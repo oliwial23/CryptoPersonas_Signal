@@ -2128,6 +2128,37 @@ async function startApp(): Promise<void> {
       return;
     }
 
+    // PERSONAS_SKIP_EMPTY_QUEUE_WAIT=1: return immediately instead of waiting.
+    //
+    // This wait resolves only when MessageReceiver emits `empty`, and that happens only
+    // when the SERVER sends an ApiEmptyQueue websocket request
+    // (MessageReceiver.preload.ts, `ServerRequestType.ApiEmptyQueue`). The local test
+    // server never sends one, so `hasEmptied()` is false for the entire session and
+    // EVERY caller of this blocks for 60 seconds and then fails. There are seven
+    // callers — group fetch/update, endorsement refresh, storage sync, backups — so the
+    // breakage is broad, and group send endorsements can never be refreshed, which
+    // stops all sender-key sends and therefore every persona post.
+    //
+    // Why short-circuit rather than route around each caller: patching call sites is
+    // seven changes and was already wrong twice (the flag that chooses endorsements vs
+    // access keys is read AFTER the blocking refresh, and access keys turn out to be
+    // unusable on this deployment anyway). One switch fixes the class.
+    //
+    // WHAT THIS GIVES UP, honestly: the wait exists so that incoming messages are
+    // processed before group state is refreshed, which avoids applying a group change
+    // on top of stale state. Skipping it is safe here only because the test server has
+    // no real backlog to process. Do NOT set this against a live Signal server.
+    if (process.env.PERSONAS_SKIP_EMPTY_QUEUE_WAIT === '1') {
+      if (!messageReceiver.hasEmptied()) {
+        log.warn(
+          'waitForEmptyEventQueue: PERSONAS_SKIP_EMPTY_QUEUE_WAIT=1 and the queue has ' +
+            'never emptied (the test server does not send ApiEmptyQueue) — returning ' +
+            'immediately rather than blocking 60s'
+        );
+      }
+      return;
+    }
+
     const waitStart = Date.now();
 
     if (!messageReceiver.hasEmptied()) {

@@ -212,6 +212,49 @@ pub enum Record {
         obj_root: Ark<F>,
     },
 
+    /// A BADGE REQUEST. An interaction, like a post, so it files a callback — and that
+    /// callback is the thing an approver later invokes with a BADGE flag. Without a
+    /// ticket there would be nothing to approve.
+    ///
+    /// CARRIES NO IDENTITY, and does not need to. The grant travels by callback: the
+    /// approval names this record's envelope hash, the replica marks the ticket, and the
+    /// requester absorbs it at their next scan because only they can. So who sent this
+    /// record is irrelevant to whether the badge lands, and the Desktop client
+    /// accordingly carries it under the anonymous phantom identity (`PZB2:` in
+    /// personasCarriage.std.ts) rather than the real account.
+    ///
+    /// An earlier version of this comment claimed the request was "attributable by
+    /// design" because a human admin must vouch for a person. That describes a different
+    /// protocol than the one implemented here — nothing below reads a requester identity.
+    /// The consequence is that an admin approves a REQUEST, not a PERSON.
+    ///
+    /// `slot` is which badge is being asked for (1=Faculty, 2=Student, 3=Industry). It
+    /// is DATA, not proof: the request says what you want, the approval decides whether
+    /// you get it, and the circuit decides what the flag means.
+    BadgeRequest {
+        exec: Ark<PostExec>,
+        slot: u8,
+        obj_root: Ark<F>,
+    },
+
+    /// An approval of a badge request, naming the request's envelope hash.
+    ///
+    /// Carries no proof: it is an admin's say-so, gated client-side on Signal's
+    /// group-admin role. Like the request, it is carried anonymously by the Desktop
+    /// client — an approval that named its sender while the request did not would narrow
+    /// the request's anonymity set to "whoever that admin replied to", so the pair has to
+    /// agree. The accept rule only marks the requester's ticket, and
+    /// the existing barrier machinery does the rest — invoke with the BADGE flag, then
+    /// the requester's own scan writes the badge in-circuit.
+    ///
+    /// NOT ENFORCED at the protocol level: nothing here checks that the sender is an
+    /// admin, so a modified client could approve itself. Closing that needs an admin key
+    /// in this accept rule (PERSONAS_ZK_WORKPLAN.md step 3b).
+    BadgeApprove {
+        target: Eh,
+        slot: u8,
+    },
+
     /// A rating of another record. Serverless erases the reacting account, so a
     /// rating must now carry a proof (§10): `pseudonym_pred` under
     /// `context = target.context()`, revealing `claimed`. One rating per
@@ -268,6 +311,8 @@ impl Record {
             Record::PollOpen { .. } => "PollOpen",
             Record::Vote { .. } => "Vote",
             Record::Scan { .. } => "Scan",
+            Record::BadgeRequest { .. } => "BadgeRequest",
+            Record::BadgeApprove { .. } => "BadgeApprove",
         }
     }
 }

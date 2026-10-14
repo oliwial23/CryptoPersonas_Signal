@@ -304,8 +304,30 @@ pub fn badge_pred<'a, 'b>(
     let is_one = pub_args.i.is_eq(&FpVar::Constant(F::from(1)))?;
     let is_two = pub_args.i.is_eq(&FpVar::Constant(F::from(2)))?;
 
-    let badge12 = FpVar::conditionally_select(&is_one, &tu.data.badge1, &tu.data.badge2)?;
-    let badge = FpVar::conditionally_select(&is_two, &badge12, &tu.data.badge3)?;
+    // SLOT SELECTION. The nesting matters, and it was previously inverted:
+    //
+    //   let badge12 = select(is_one, badge1, badge2);   // i==1 -> badge1, else badge2
+    //   let badge   = select(is_two, badge12, badge3);  // i==2 -> badge12, else badge3
+    //
+    // which resolves as:
+    //
+    //   i=1 -> is_one picks badge1 into badge12, then is_two is FALSE, so the second
+    //          select discards badge12 entirely and yields badge3.   <-- WRONG
+    //   i=2 -> badge12 = badge2, is_two true  -> badge2.             ok
+    //   i=3 -> badge12 = badge2, is_two false -> badge3.             ok
+    //
+    // So slot 1 compared the claim against the INDUSTRY slot. For anyone holding
+    // Faculty and nothing else, badge3 is zero, `badge.is_eq(&claimed)` is false, and
+    // the predicate is unsatisfiable — "the proof did not verify". Slots 2 and 3 were
+    // correct, which is why this hid: it only ever broke Faculty, and only when
+    // PROVING. Holding a Faculty badge was unaffected, because the assignment side
+    // (`standard_callback_method` below) selects each slot independently, and so was
+    // `badge_labels`, which reads the three slots directly. The status panel therefore
+    // showed "Badges held: Faculty" while a Faculty proof could not be produced.
+    //
+    // Chaining the fallbacks instead of the selected value makes each slot reachable:
+    let badge23 = FpVar::conditionally_select(&is_two, &tu.data.badge2, &tu.data.badge3)?;
+    let badge = FpVar::conditionally_select(&is_one, &tu.data.badge1, &badge23)?;
 
     let x1 = badge.is_eq(&claimed)?;
 

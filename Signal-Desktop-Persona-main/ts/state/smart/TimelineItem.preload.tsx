@@ -204,6 +204,17 @@ export const SmartTimelineItem = memo(function SmartTimelineItem(
 
   const { pushPanelForConversation } = useNavActions();
 
+  // Personas demo: approving a badge from the request itself. The action is the SAME one
+  // the status panel calls — bound to this conversation here so the Approve button can
+  // sit on the notification, which is where an admin actually encounters the request.
+  const { approvePersonaBadge, dismissPersonaBadgeRequest } =
+    useComposerActions();
+  const approveBadgeHere = useCallback(
+    (requestEh: string, slot: number) =>
+      approvePersonaBadge(conversationId, requestEh, slot),
+    [approvePersonaBadge, conversationId]
+  );
+
   const {
     endPoll,
     reactToMessage,
@@ -320,6 +331,8 @@ export const SmartTimelineItem = memo(function SmartTimelineItem(
       sendPollVote={sendPollVote}
       personaBanPoll={personaBanPoll}
       personaBanNow={personaBanNow}
+      approvePersonaBadge={approveBadgeHere}
+      dismissPersonaBadgeRequest={dismissPersonaBadgeRequest}
       renderItem={renderItem}
       returnToActiveCall={returnToActiveCall}
       saveAttachment={saveAttachment}

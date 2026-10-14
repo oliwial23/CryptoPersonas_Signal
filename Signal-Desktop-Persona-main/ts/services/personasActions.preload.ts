@@ -490,6 +490,82 @@ export function isPersonaBanned(): boolean | undefined {
   }
 }
 
+/**
+ * Scan until the callback sweep is actually FINISHED, not just started.
+ *
+ * `sendPersonaScan` emits exactly one scan, and one scan does not necessarily complete a
+ * sweep: the engine absorbs NUM_SCANS_PER_FOLD callbacks per scan and leaves
+ * `scan_index` set while more remain. Every emit_* except `emit_scan` is refused while
+ * that is true (`guard_not_scanning`).
+ *
+ * THIS IS THE BUG THIS FUNCTION EXISTS FOR. Approving a badge files a callback. The
+ * requester's next message ran the one-shot send-time scan, which started the sweep and
+ * left it unfinished, and the post that followed was refused — so the message failed to
+ * send, with a generic error, specifically and only after an approval. Pressing "Scan
+ * now" a few times fixed it by finishing the sweep by hand, which is exactly the clue:
+ * one scan was not enough.
+ *
+ * Bounded, and the bound matters. An unbounded loop here would be a hang in the send
+ * path if the engine ever reported scanning without making progress; a bound turns that
+ * into a refused send with a reason, which is recoverable. Progress is also checked
+ * directly — if a round does not reduce the outstanding count, stop rather than spin.
+ */
+export async function drainPersonaScans(
+  conversation: ConversationModel,
+  { maxRounds = 8 }: { maxRounds?: number } = {}
+): Promise<boolean> {
+  if (!isPersonasEngineEnabled()) {
+    return true;
+  }
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.isScanning !== 'function') {
+    // An older addon cannot tell us; fall back to the single speculative scan, which is
+    // what the behaviour was before this existed.
+    await sendPersonaScan(conversation, { quiet: true });
+    return true;
+  }
+
+  const outstanding = () =>
+    typeof engine.outstandingCallbacks === 'function'
+      ? engine.outstandingCallbacks()
+      : 0;
+
+  for (let round = 0; round < maxRounds; round += 1) {
+    const before = outstanding();
+    // eslint-disable-next-line no-await-in-loop
+    await sendPersonaScan(conversation, { quiet: true });
+
+    if (!engine.isScanning()) {
+      if (round > 0) {
+        log.info(
+          `drainPersonaScans: sweep completed after ${round + 1} scan(s)`
+        );
+      }
+      return true;
+    }
+
+    const after = outstanding();
+    if (after >= before) {
+      // Scanning, but not getting anywhere. Stop: another round would not help, and
+      // reporting this is far better than looping in the send path.
+      log.error(
+        `drainPersonaScans: still scanning with no progress (${before} -> ${after} ` +
+        'outstanding); giving up so the caller can refuse the send with a reason'
+      );
+      return false;
+    }
+    log.info(
+      `drainPersonaScans: sweep in progress (${before} -> ${after} outstanding)`
+    );
+  }
+
+  log.error(
+    `drainPersonaScans: sweep still unfinished after ${maxRounds} scans ` +
+    `(${outstanding()} outstanding)`
+  );
+  return false;
+}
+
 export async function sendPersonaScan(
   conversation: ConversationModel,
   { quiet = false }: { quiet?: boolean } = {}

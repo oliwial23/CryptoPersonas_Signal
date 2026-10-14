@@ -21,7 +21,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL="$HERE/.local"
 mkdir -p "$LOCAL"
 
-STORAGE_SERVICE_DIR="${STORAGE_SERVICE_DIR:-$HOME/Repos/personas2/storage-service}"
+STORAGE_SERVICE_DIR="${STORAGE_SERVICE_DIR:-$HOME/Repos/storage-service}"
 SIGNAL_SERVER_SECRETS="${SIGNAL_SERVER_SECRETS:-$HOME/Repos/Signal-Server/service/src/test/resources/config/test-secrets-bundle.yml}"
 
 [ -d "$STORAGE_SERVICE_DIR" ] || { echo "storage-service repo not found at $STORAGE_SERVICE_DIR (set STORAGE_SERVICE_DIR)"; exit 1; }

@@ -50,6 +50,7 @@ import { SafetyNumberChangeSource } from '../../types/SafetyNumberChangeSource.s
 import { assignWithNoUnnecessaryAllocation } from '../../util/assignWithNoUnnecessaryAllocation.std.ts';
 import {
   composePersonaPost,
+  heldBadges,
   isPersonasEngineEnabled,
   type PersonaChoice,
 } from '../../services/personasEngine.preload.ts';
@@ -58,7 +59,7 @@ import {
   createTopic,
   nameForContext,
 } from '../../services/personasTopics.preload.ts';
-import { getSelectedBadge } from '../../services/personasBadgeState.preload.ts';
+import { getSelectedBadgeIfHeld } from '../../services/personasBadgeState.preload.ts';
 import { sendAuthorshipClaim as doSendAuthorshipClaim } from '../../services/personasAuthorship.preload.ts';
 import {
   createPseudonym,
@@ -72,7 +73,7 @@ import {
 import {
   maybeSendPersonaRateForReaction,
   sendPersonaPoll,
-  sendPersonaScan,
+  drainPersonaScans,
   isPersonaBanned,
 } from '../../services/personasActions.preload.ts';
 import { blockSendUntilConversationsAreVerified } from '../../util/blockSendUntilConversationsAreVerified.dom.ts';
@@ -138,6 +139,12 @@ import {
 import { isPoll } from '../../messages/helpers.std.ts';
 import type { Emoji } from '../../axo/emoji.std.ts';
 import { isFeaturedEnabledNoRedux } from '../../util/isFeatureEnabled.dom.ts';
+import {
+  requestBadge as doRequestBadge,
+  approveBadge as doApproveBadge,
+  dismissBadgeRequest as doDismissBadgeRequest,
+} from '../../services/personasBadgeFlow.preload.ts';
+import { sendBadgeProof as doSendBadgeProof } from '../../services/personasBadgeProof.preload.ts';
 
 const { debounce, isEqual } = lodash;
 
@@ -395,19 +402,169 @@ function createPersonaPseudonym(): ThunkAction<
   };
 }
 
-// Send an UNVERIFIED authorship claim linking two personas. Not a proof — see
-// personasAuthorship.preload.ts.
+// Send a ZK-PROVED authorship claim linking two of our own pseudonyms.
+//
+// Takes the two CONTEXTS (for an unlimited pseudonym, its nonce) rather than petnames:
+// the names are an OUTPUT of verification, not an input to proving. Passing names in
+// would reintroduce exactly the gap this replaced — a claim about whatever the sender
+// chose to type. See personasAuthorship.preload.ts.
 function sendPersonaAuthorshipClaim(
   conversationId: string,
-  first: string,
-  second: string
+  contextA: number,
+  contextB: number
 ): ThunkAction<void, RootStateType, unknown, NoopActionType> {
   return async dispatch => {
     const conversation = window.ConversationController.get(conversationId);
     if (conversation) {
-      await doSendAuthorshipClaim(conversation, first, second);
+      await doSendAuthorshipClaim(conversation, contextA, contextB);
     }
     dispatch(noopAction('sendPersonaAuthorshipClaim'));
+  };
+}
+
+// Ask for a badge (1=Faculty, 2=Student, 3=Industry). Files a ticket for an admin.
+function requestPersonaBadge(
+  conversationId: string,
+  slot: number
+): ThunkAction<
+  void,
+  RootStateType,
+  unknown,
+  NoopActionType | ShowToastActionType
+> {
+  return async dispatch => {
+    const conversation = window.ConversationController.get(conversationId);
+    if (conversation) {
+      const result = await doRequestBadge(conversation, slot);
+      dispatch(
+        showToast(
+          result.ok
+            ? { toastType: ToastType.PersonaBadgeRequested }
+            : {
+                toastType: ToastType.PersonaActionFailed,
+                parameters: { reason: result.reason },
+              }
+        )
+      );
+    }
+    dispatch(noopAction('requestPersonaBadge'));
+  };
+}
+
+// Approve a pending badge request (admin). The badge lands at the requester's next scan,
+// not now — the toast says so, because "approved" and "usable" are not the same moment.
+function approvePersonaBadge(
+  conversationId: string,
+  requestEh: string,
+  slot: number
+): ThunkAction<
+  void,
+  RootStateType,
+  unknown,
+  NoopActionType | ShowToastActionType
+> {
+  return async dispatch => {
+    const conversation = window.ConversationController.get(conversationId);
+    if (conversation) {
+      const result = await doApproveBadge(conversation, requestEh, slot);
+      dispatch(
+        showToast(
+          result.ok
+            ? { toastType: ToastType.PersonaBadgeApproved }
+            : {
+                toastType: ToastType.PersonaActionFailed,
+                parameters: { reason: result.reason },
+              }
+        )
+      );
+    }
+    dispatch(noopAction('approvePersonaBadge'));
+  };
+}
+
+// Join the bulletin, so the persona menu's options are actually usable by the time
+// someone picks one.
+//
+// Fire-and-forget by design: the caller is a menu opening, not a user committing to an
+// action, so this must never block the menu from rendering or pop a dialog. A failure is
+// logged and surfaced by the status panel's "joined" row — and by the specific, named
+// refusal each individual action already returns if it is taken before this lands.
+function joinPersonaBulletin(
+  conversationId: string
+): ThunkAction<void, RootStateType, unknown, NoopActionType> {
+  return async dispatch => {
+    const conversation = window.ConversationController.get(conversationId);
+    if (conversation) {
+      const joined = await ensurePersonaJoined(conversation);
+      if (!joined) {
+        log.warn(
+          'joinPersonaBulletin: join did not complete; persona actions will refuse ' +
+          'until it does'
+        );
+      }
+    }
+    dispatch(noopAction('joinPersonaBulletin'));
+  };
+}
+
+// PROVE badge possession in zero knowledge. Distinct from the composer's badge
+// selector, which attaches an unverified label to a post: this publishes a Groth16
+// proof over `badge_pred` that is checked by every recipient before it renders.
+function provePersonaBadge(
+  conversationId: string,
+  badge: string
+): ThunkAction<
+  void,
+  RootStateType,
+  unknown,
+  NoopActionType | ShowToastActionType
+> {
+  return async dispatch => {
+    const conversation = window.ConversationController.get(conversationId);
+    if (conversation) {
+      const result = await doSendBadgeProof(conversation, badge);
+      dispatch(
+        showToast(
+          result.ok
+            ? {
+                toastType: ToastType.PersonaBadgeProved,
+                parameters: { badge: result.badge },
+              }
+            : {
+                toastType: ToastType.PersonaActionFailed,
+                parameters: { reason: result.reason },
+              }
+        )
+      );
+    }
+    dispatch(noopAction('provePersonaBadge'));
+  };
+}
+
+// Take a badge request off this admin's queue. LOCAL ONLY — nothing is broadcast and
+// the requester is not told; see `dismissBadgeRequest`. No record is emitted, so this
+// needs no conversation and cannot fail on the wire.
+function dismissPersonaBadgeRequest(
+  requestEh: string
+): ThunkAction<
+  void,
+  RootStateType,
+  unknown,
+  NoopActionType | ShowToastActionType
+> {
+  return async dispatch => {
+    const ok = doDismissBadgeRequest(requestEh);
+    dispatch(
+      showToast(
+        ok
+          ? { toastType: ToastType.PersonaBadgeDismissed }
+          : {
+              toastType: ToastType.PersonaActionFailed,
+              parameters: { reason: 'that request has already been handled' },
+            }
+      )
+    );
+    dispatch(noopAction('dismissPersonaBadgeRequest'));
   };
 }
 
@@ -416,11 +573,51 @@ function sendPersonaAuthorshipClaim(
 // able to say "absorb now" rather than waiting out the interval.
 function scanPersonaCallbacksNow(
   conversationId: string
-): ThunkAction<void, RootStateType, unknown, NoopActionType> {
+): ThunkAction<
+  void,
+  RootStateType,
+  unknown,
+  NoopActionType | ShowToastActionType
+> {
   return async dispatch => {
     const conversation = window.ConversationController.get(conversationId);
-    if (conversation) {
-      await sendPersonaScan(conversation);
+    if (!conversation) {
+      dispatch(noopAction('scanPersonaCallbacksNow'));
+      return;
+    }
+
+    // SAY WHAT THE SCAN DID. A scan that absorbs nothing used to be
+    // indistinguishable from a scan that absorbed a badge: both left the button
+    // looking the same, so "approve, then Scan now, and no badge appears" was
+    // unexplainable from the UI — the correct behaviour and a broken one looked
+    // identical. Reporting the badge set before and after turns it into a fact.
+    const before = heldBadges();
+
+    // Drain, so one press finishes the sweep instead of advancing it by one round.
+    // Pressing a button repeatedly until an error stops appearing is not a UI.
+    const drained = await drainPersonaScans(conversation);
+
+    const after = heldBadges();
+    const gained = after.filter(b => !before.includes(b));
+
+    if (gained.length > 0) {
+      dispatch(
+        showToast({
+          toastType: ToastType.PersonaScanAbsorbed,
+          parameters: { gained: gained.join(', ') },
+        })
+      );
+    } else if (!drained) {
+      dispatch(
+        showToast({
+          toastType: ToastType.PersonaActionFailed,
+          parameters: {
+            reason: 'the callback sweep did not finish — try Scan now again',
+          },
+        })
+      );
+    } else {
+      dispatch(showToast({ toastType: ToastType.PersonaScanEmpty }));
     }
     dispatch(noopAction('scanPersonaCallbacksNow'));
   };
@@ -429,6 +626,11 @@ function scanPersonaCallbacksNow(
 export const actions = {
   sendPersonaAuthorshipClaim,
   scanPersonaCallbacksNow,
+  requestPersonaBadge,
+  approvePersonaBadge,
+  dismissPersonaBadgeRequest,
+  provePersonaBadge,
+  joinPersonaBulletin,
   createPersonaPseudonym,
   personaPseudonymsChanged,
   refreshPersonaStatus,
@@ -947,12 +1149,34 @@ function sendMultiMediaMessage(
         // becomes unsatisfiable. Scanning on send keeps that counter from ever reaching
         // the wall, and absorbs a revocation promptly instead of on a timer.
         //
-        // `quiet` because the engine refuses a scan with no outstanding callbacks
-        // (NothingToScan), which is the normal case for most messages and is not a
-        // failure. When it DOES have something to absorb this adds a Groth16 proof's
-        // worth of delay before the message goes out — that is the cost of doing it here
-        // rather than in the background.
-        await sendPersonaScan(conversation, { quiet: true });
+        // `drainPersonaScans`, not a single `sendPersonaScan`. One scan starts a sweep;
+        // it does not necessarily finish one, and while a sweep is unfinished the engine
+        // refuses every other emit — so a single scan here could leave the very next
+        // line refused. That was the "cannot send after my badge was approved" failure:
+        // an approval files a callback, the one-shot scan started the sweep, and the
+        // post was then rejected by `guard_not_scanning`.
+        //
+        // Quiet inside: the engine refuses a scan with no outstanding callbacks
+        // (NothingToScan), which is the normal case for most messages and not a failure.
+        // When there IS something to absorb this costs a Groth16 proof per round before
+        // the message goes out — the price of doing it here rather than in the
+        // background.
+        if (!(await drainPersonaScans(conversation))) {
+          log.error(
+            'sendMultiMediaMessage: callback sweep would not finish; refusing to send ' +
+            'rather than letting the post be rejected mid-flight'
+          );
+          dispatch(
+            showToast({
+              toastType: ToastType.PersonaActionFailed,
+              parameters: {
+                reason:
+                  'a callback sweep is unfinished — open Persona status and press Scan now',
+              },
+            })
+          );
+          return;
+        }
 
         const post = composePersonaPost(message, options.personaChoice);
         if (!post) {
@@ -978,10 +1202,16 @@ function sendMultiMediaMessage(
           // "Anonymous" instead of falling through to the phantom contact.
           personaAnonymous: post.persona == null,
           personaRecordBase64: post.personaRecordBase64,
-          // The UNVERIFIED badge claim to ride alongside this post, if one is selected.
-          // Read at send time rather than baked into the choice so toggling it takes
-          // effect on the next message without re-picking a persona.
-          personaBadge: getSelectedBadge(),
+          // The badge to ride alongside this post — only if the member's own zk object
+          // actually CONTAINS it. Read at send time rather than baked into the choice so
+          // toggling it takes effect on the next message without re-picking a persona.
+          //
+          // `getSelectedBadgeIfHeld`, never `getSelectedBadge`: the selection is a
+          // preference file that survives a reset and was writable by earlier builds, so
+          // reading it directly let a merely-REQUESTED badge ride out on every post.
+          // Narrowing the composer menu did not fix that, because the menu is not on
+          // this path. The gate has to be here, where the claim reaches the wire.
+          personaBadge: getSelectedBadgeIfHeld(),
           // Only a RATE-LIMITED persona has a context; an unlimited pseudonym and an
           // anonymous post deliberately have none, and the absence of the chip is what
           // distinguishes them in the timeline.

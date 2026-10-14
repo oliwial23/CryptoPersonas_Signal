@@ -130,6 +130,9 @@ import { tw } from '../../axo/tw.dom.tsx';
 import { PersonaBadgeChip } from './PersonaBadgeChip.dom.tsx';
 import { PersonaContextChip } from './PersonaContextChip.dom.tsx';
 import { PersonaAuthorshipMessage } from './PersonaAuthorshipMessage.dom.tsx';
+import { PersonaBadgeNotice } from './PersonaBadgeNotice.dom.tsx';
+import { PersonaBadgeProofMessage } from './PersonaBadgeProofMessage.dom.tsx';
+import type { PersonaBadgeNoticeForUI } from './PersonaBadgeNotice.dom.tsx';
 import { Emoji } from '../../axo/emoji.std.ts';
 import { AxoButton } from '../../axo/AxoButton.dom.tsx';
 
@@ -289,9 +292,14 @@ export type PropsData = {
   personaContextContinuesBelow?: boolean;
   // Personas demo: an UNVERIFIED authorship claim linking two personas. Rendered as a
   // labelled claim, never as a verified fact — see personasAuthorship.preload.ts.
-  personaAuthorship?: { first: string; second: string };
+  personaAuthorship?: { first: string; second: string; verified?: boolean };
   // Present when this message IS a ZK poll — rendered by PersonaPollMessage.
   personaPoll?: PersonaPollForUI;
+  // Present when this message IS a badge request or approval — rendered by
+  // PersonaBadgeNotice, which also carries the admin's Approve button.
+  personaBadgeNotice?: PersonaBadgeNoticeForUI;
+  // Present when this message IS a verified badge possession proof.
+  personaBadgeProof?: { badge: string; verified: boolean };
   attachments?: ReadonlyArray<AttachmentForUIType>;
   giftBadge?: GiftBadgeType;
   payment?: AnyPaymentEvent;
@@ -401,6 +409,12 @@ export type PropsActions = {
     optionIndexes: ReadonlyArray<number>;
   }) => void;
   endPoll: (messageId: string) => void;
+  // Personas demo: approve the badge request this message IS. Already bound to the
+  // conversation by SmartTimelineItem, so the notification needs only the request's
+  // envelope hash and slot — the two things the record itself carries.
+  approvePersonaBadge?: (requestEh: string, slot: number) => unknown;
+  // Hide a badge request from this admin's queue. Local only, no record emitted.
+  dismissPersonaBadgeRequest?: (requestEh: string) => unknown;
   showContactModal: (payload: ContactModalStateType) => void;
   showSpoiler: (messageId: string, data: Record<number, boolean>) => void;
 
@@ -2183,7 +2197,32 @@ export class Message extends PureComponent<Props, State> {
       canEndPoll,
       canSendPollVote,
       personaAuthorship,
+      personaBadgeNotice,
+      personaBadgeProof,
+      approvePersonaBadge,
+      dismissPersonaBadgeRequest,
     } = this.props;
+
+    // A proved badge. Its own bubble, like authorship: it is evidence, not chat text,
+    // and rendering it as an ordinary message would strip the treatment that
+    // distinguishes a proof from the decorative chip.
+    if (personaBadgeProof) {
+      return <PersonaBadgeProofMessage badge={personaBadgeProof.badge} />;
+    }
+
+    // A badge request/approval. Handled first: it is a notification with its own
+    // control surface, not chat text, and rendering it as an ordinary message is what
+    // produced the bubble reading "requested badge slot 1".
+    if (personaBadgeNotice) {
+      return (
+        <PersonaBadgeNotice
+          notice={personaBadgeNotice}
+          isIncoming={direction === 'incoming'}
+          onApprove={approvePersonaBadge}
+          onDismiss={dismissPersonaBadgeRequest}
+        />
+      );
+    }
 
     // Personas demo: a ZK poll gets its own bubble — same shape as Signal's, but with
     // no voter list, because a ZK ballot is anonymous. `sendPollVote` is the SAME
@@ -2197,6 +2236,7 @@ export class Message extends PureComponent<Props, State> {
         <PersonaAuthorshipMessage
           first={personaAuthorship.first}
           second={personaAuthorship.second}
+          verified={personaAuthorship.verified}
         />
       );
     }

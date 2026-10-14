@@ -248,6 +248,27 @@ else
   export PERSONAS_ROSTER_DIR="${PERSONAS_ROSTER_DIR:-$HOME/.personas-roster}"
   export PERSONAS_KEYS_DIR="${PERSONAS_KEYS_DIR:-$HOME/.personas-demo-keys}"
 
+  # Don't block on an "empty" receive queue the test server never announces.
+  #
+  # `waitForEmptyEventQueue()` resolves only when MessageReceiver emits `empty`, which
+  # requires the SERVER to send an ApiEmptyQueue websocket request. This test server
+  # never does, so all seven callers — group fetch/update, endorsement refresh, storage
+  # sync, backups — block 60s and fail. The visible symptom is that group send
+  # endorsements expire at midnight UTC and can never be refreshed, which stops every
+  # sender-key send and therefore every persona post.
+  #
+  # Do NOT set this against a real Signal server: the wait is there so incoming messages
+  # are processed before group state changes.
+  export PERSONAS_SKIP_EMPTY_QUEUE_WAIT="${PERSONAS_SKIP_EMPTY_QUEUE_WAIT:-1}"
+
+  # Forcing the legacy access-key group send is OFF by default: this deployment's
+  # members have no usable access keys (isValidSenderKeyRecipient rejects all of them,
+  # and profile fetches get 401 using them), so bypassing endorsements leaves zero
+  # eligible recipients and "Not enough recipients for Sender Key message". Endorsements
+  # are the working path here — they just need to be refreshable, which is what the
+  # variable above restores. Kept for experiments.
+  export PERSONAS_FORCE_ACCESS_KEYS="${PERSONAS_FORCE_ACCESS_KEYS:-0}"
+
   mkdir -p "$PERSONAS_ROSTER_DIR" "$PERSONAS_KEYS_DIR"
 
   LEGACY_ROSTER=/tmp/personas-roster
@@ -278,6 +299,7 @@ Starting personas demo instance: $INSTANCE
   keys dir    $PERSONAS_KEYS_DIR
   barrier     ${PERSONAS_BARRIER_PERIOD_MS:-10000}ms per settlement barrier
   auto-scan   ${PERSONAS_AUTO_SCAN:-off - use the Scan now menu item}
+  group send  endorsements (queue-wait skipped: ${PERSONAS_SKIP_EMPTY_QUEUE_WAIT})
 
 First launch on a fresh keys dir generates ~51MB of proving keys and takes minutes.
 EOF

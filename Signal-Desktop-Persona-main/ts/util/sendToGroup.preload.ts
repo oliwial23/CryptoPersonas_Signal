@@ -242,7 +242,7 @@ export async function sendContentMessageToGroup(
       // sender-key path. The normal fallback is a per-recipient send under our REAL
       // identity — that would silently de-anonymize the sender while still delivering.
       // Fail closed instead: never fall back to an attributable send for a persona post.
-      if (isPersonaContent(Proto.Content.encode(contentMessage))) {
+      if (isPersonaContent(Proto.Content.encode(contentMessage), logId)) {
         log.error(
           `${logId}: Sender Key send failed for a persona post; failing closed ` +
             '(refusing the attributable fallback that would de-anonymize the sender)',
@@ -319,10 +319,38 @@ async function sendToGroupViaSenderKey(
     urgent,
   } = options;
 
-  const isAccessKeySendRetired = isFeaturedEnabledNoRedux({
-    betaKey: 'desktop.retireAccessKeyGroupSend.beta',
-    prodKey: 'desktop.retireAccessKeyGroupSend.prod',
-  });
+  // PERSONAS_FORCE_ACCESS_KEYS=1 forces the older access-key group send, bypassing
+  // group send endorsements entirely.
+  //
+  // WHY THIS EXISTS. Endorsements expire on a day boundary, and the client refreshes
+  // them by re-fetching the group — but that refresh first calls
+  // `waitForEmptyEventQueue()` (groupSendEndorsements.preload.ts:419). That resolves
+  // only when MessageReceiver emits `empty`, which happens only when the SERVER sends
+  // an `ApiEmptyQueue` websocket request (MessageReceiver.preload.ts:386). The local
+  // test server never sends one, so:
+  //
+  //   endorsements expire -> refresh needs an empty queue -> queue never empties ->
+  //   60s timeout -> sender-key send fails -> refresh never happens -> repeat forever
+  //
+  // Every sender-key send then fails, which for a persona post means nothing is
+  // delivered at all. It presents as "it worked yesterday and not today", because
+  // before the expiry the refresh path was never taken and the missing ApiEmptyQueue
+  // never mattered.
+  //
+  // The flag cannot be turned off through config: `isFeaturedEnabledNoRedux` returns
+  // true unconditionally for an alpha version (isFeatureEnabled.dom.ts), and this app
+  // is 8.23.0-alpha.1. Changing the version would also silently flip every other
+  // alpha-gated feature, so the override is scoped to this one decision instead.
+  //
+  // Set it for the demo; leave it unset against a real Signal server, where
+  // endorsements work and are the supported path.
+  const forceAccessKeys = process.env.PERSONAS_FORCE_ACCESS_KEYS === '1';
+  const isAccessKeySendRetired = forceAccessKeys
+    ? false
+    : isFeaturedEnabledNoRedux({
+        betaKey: 'desktop.retireAccessKeyGroupSend.beta',
+        prodKey: 'desktop.retireAccessKeyGroupSend.prod',
+      });
 
   const logId = `sendToGroupViaSenderKey/${sendTarget.idForLogging()}`;
   log.info(
@@ -380,7 +408,22 @@ async function sendToGroupViaSenderKey(
     await signalProtocolStore.getOpenDevices(ourAci, recipients);
 
   let groupSendEndorsementState: GroupSendEndorsementState | null = null;
-  if (groupId != null && !story) {
+  // `forceAccessKeys` has to be checked HERE, not only where the token is used.
+  //
+  // This block is the thing that blocks: `maybeCreateGroupSendEndorsementState` sees
+  // expired endorsements, tries to refresh the group, and that refresh awaits
+  // `waitForEmptyEventQueue()` — which never resolves against the local test server,
+  // because the server never sends the ApiEmptyQueue request that makes MessageReceiver
+  // emit `empty`. 60s later the whole sender-key send fails.
+  //
+  // Overriding only `isAccessKeySendRetired` (below) was not enough and is the mistake
+  // this fixes: that flag decides what to do with endorsements ONCE OBTAINED, so the
+  // blocking refresh still ran before it was ever consulted.
+  //
+  // Gated on the explicit override rather than on `isAccessKeySendRetired` so that an
+  // ordinary build still attempts endorsements and merely falls back to access keys —
+  // upstream behaviour is unchanged when the variable is unset.
+  if (groupId != null && !story && !forceAccessKeys) {
     const alreadyInQueue = true;
     const { state, didRefreshGroupState } =
       await maybeCreateGroupSendEndorsementState(
@@ -1290,7 +1333,11 @@ async function encryptForSenderKey({
   // unchanged (recipient info still comes from Desktop's real session/identity
   // stores). Ordinary group chatter keeps the real per-member sender key + cert.
   // Detected by the PZR2 carriage marker; proven in scratchpad/phantom-gate-multi.mjs.
-  const phantom = isPersonaContent(contentMessage)
+  // THE DECISIVE CALL. If this returns false for a persona post, the post is encrypted
+  // with our REAL sender key and certificate and goes out attributably — not refused,
+  // DELIVERED and de-anonymised. That makes a silent false here worse than the fallback
+  // case, so it is logged the same way.
+  const phantom = isPersonaContent(contentMessage, 'encryptForSenderKey')
     ? await ensurePhantomMaterial()
     : undefined;
 
@@ -1383,12 +1430,42 @@ async function encryptForSenderKey({
 // keep the real per-member sender key + cert — joins in particular MUST stay
 // attributable so a banned member cannot silently re-join under the phantom.
 function isPersonaContent(
-  encodedContent: Uint8Array<ArrayBuffer>
+  encodedContent: Uint8Array<ArrayBuffer>,
+  logId: string
 ): boolean {
+  // INSTRUMENTED, because this guard failed silently and the failure mode is a
+  // de-anonymised send.
+  //
+  // It returns false on ANY problem — a decode error, a missing DataMessage, a body
+  // that is not a persona marker — and `false` means "fall back to the attributable
+  // send". So every possible malfunction of this function resolves to the unsafe
+  // answer, and does so without a word in the log. That is backwards for a guard whose
+  // whole job is to prevent one specific harm, and it is why a pseudonymous post could
+  // take the normal path with nothing to show why.
+  //
+  // Logging what it actually saw is what distinguishes "this genuinely is not a persona
+  // message" from "the guard could not tell".
   try {
     const decoded = Proto.Content.decode(encodedContent);
-    return isPersonaPhantomBody(decoded.content?.dataMessage?.body);
-  } catch {
+    const body = decoded.content?.dataMessage?.body;
+    const isPersona = isPersonaPhantomBody(body);
+    if (!isPersona) {
+      log.info(
+        `${logId}: isPersonaContent=false; body prefix=${
+          body == null ? '(no body)' : JSON.stringify(body.slice(0, 5))
+        }`
+      );
+    }
+    return isPersona;
+  } catch (error) {
+    // Previously swallowed. A decode failure here is indistinguishable from "not a
+    // persona message" to the caller, so it MUST be loud: it means the guard is blind,
+    // not that the message is safe to send attributably.
+    log.error(
+      `${logId}: isPersonaContent could not decode the content proto — treating as ` +
+        'NOT a persona message, which permits the attributable fallback. This is a ' +
+        `guard failure, not a safe answer: ${Errors.toLogFormat(error)}`
+    );
     return false;
   }
 }
@@ -1419,6 +1496,13 @@ function isValidSenderKeyRecipient(
       return false;
     }
   } else if (!getAccessKey(memberConversation.attributes, { story })) {
+    // Previously silent, which made a total sender-key failure untraceable: the
+    // unregistered and non-member branches both log, this one did not, so "0 accounts
+    // for sender key" came with no reason anywhere in the log.
+    log.warn(
+      `isValidSenderKeyRecipient: Member ${serviceId} has no usable access key and ` +
+        'there are no group send endorsements — not eligible for a sender-key send'
+    );
     return false;
   }
 

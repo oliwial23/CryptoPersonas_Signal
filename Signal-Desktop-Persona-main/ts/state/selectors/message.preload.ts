@@ -22,6 +22,10 @@ import type {
 } from '../smart/MessageDetail.preload.tsx';
 import type { TimelineItemType } from '../../components/conversation/TimelineItem.dom.tsx';
 import { getPollStatusLine } from '../../services/personasEngine.preload.ts';
+import {
+  badgeNameForSlot,
+  isBadgeRequestPending,
+} from '../../services/personasBadgeFlow.preload.ts';
 import type { PropsData } from '../../components/conversation/Message.dom.tsx';
 import type { PropsData as TimelineMessagePropsData } from '../../components/conversation/TimelineMessage.dom.tsx';
 import { TextDirection } from '../../components/conversation/Message.dom.tsx';
@@ -1027,6 +1031,9 @@ const getPropsForMessage = (
     personaBadge: message.personaBadge,
     personaContextName: message.personaContextName,
     personaAuthorship: message.personaAuthorship,
+    // A VERIFIED badge proof. Passed through as stored: verification happened on
+    // receipt, and the stored badge name is already the verifier's own output.
+    personaBadgeProof: message.personaBadgeProof,
     // A ZK poll renders from its descriptor plus the engine's own status line. The
     // status line is read live rather than cached on the message so a tally that moves
     // (or a poll that closes) shows up without rewriting message state.
@@ -1039,6 +1046,23 @@ const getPropsForMessage = (
           statusLine: message.personaEh
             ? getPollStatusLine(message.personaEh)
             : undefined,
+        }
+      : undefined,
+    // A badge request/approval notification. `pending` and `canApprove` are read LIVE
+    // rather than cached on the message, for the same reason a poll's status line is:
+    // the Approve button has to disappear on every admin's screen once anyone approves,
+    // and an approval does not rewrite the original request's message state.
+    personaBadgeNotice: message.personaBadgeNotice
+      ? {
+          kind: message.personaBadgeNotice.kind,
+          eh: message.personaBadgeNotice.eh,
+          slot: message.personaBadgeNotice.slot,
+          name: badgeNameForSlot(message.personaBadgeNotice.slot),
+          pending: isBadgeRequestPending(message.personaBadgeNotice.eh),
+          // Signal's own group-admin role. A client-side gate: nothing in the replica's
+          // accept rule checks it, so this hides the button rather than preventing the
+          // record — the same honest limitation as the ban button.
+          canApprove: Boolean(conversation.areWeAdmin),
         }
       : undefined,
     deletedForEveryone: message.deletedForEveryone || false,

@@ -215,7 +215,7 @@ export type MessageAttributesType = {
   personaContextName?: string;
   // Personas demo: an UNVERIFIED authorship claim ("these two personas are both me").
   // Not a proof — see personasAuthorship.preload.ts.
-  personaAuthorship?: { first: string; second: string };
+  personaAuthorship?: { first: string; second: string; verified?: boolean };
   // On a poll record, the display descriptor (question / option labels / ban-vs-
   // standard) needed to draw the bubble. The engine remains authoritative for the
   // tally and for settlement; see PersonaPollDescriptor.
@@ -225,6 +225,23 @@ export type MessageAttributesType = {
     kind: 'ban' | 'standard';
     // For a ban poll, the eh of the post under review.
     target?: string;
+  };
+  // Personas demo: a verified ZK PROOF of badge possession. `badge` is the name the
+  // proof vouches for, read out of its public inputs — never a name carried in the
+  // message. A proof that fails verification is dropped, so this is only ever set for a
+  // proof that checked out.
+  personaBadgeProof?: { badge: string; verified: boolean };
+  // Personas demo: a badge REQUEST or APPROVAL, rendered as a notification rather than
+  // a message. Both records are deliberately attributable (a request asks a human to
+  // vouch for you, an approval is an admin's accountable act), so unlike a poll these
+  // are shown with their real sender — that is the point of them.
+  //
+  // `eh` on a request is the handle an approval names, which is what lets the Approve
+  // button sit on the notification itself instead of in a separate dialog.
+  personaBadgeNotice?: {
+    kind: 'request' | 'approve';
+    eh: string;
+    slot: number;
   };
   // The option index we cast in this poll, if any. Local only — a ballot is
   // anonymous, so the engine will not tell us which one was ours; this is purely so

@@ -234,6 +234,11 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
     sendPoll,
     createPersonaTopic,
     refreshPersonaStatus,
+    requestPersonaBadge,
+    dismissPersonaBadgeRequest,
+    provePersonaBadge,
+    joinPersonaBulletin,
+    approvePersonaBadge,
     createPersonaPseudonym,
     scanPersonaCallbacksNow,
     sendPersonaAuthorshipClaim,
@@ -430,6 +435,17 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
       personaTopics={personaTopics}
       createPersonaTopic={createPersonaTopic}
       personaStatus={personaStatus}
+      heldBadges={personaStatus?.heldBadges ?? []}
+      // A badge request is a RECORD, so it needs this member to be on the bulletin.
+      // Defaults to false while the status is still unknown: offering a control that
+      // throws "this member is not on the bulletin yet" is worse than one that says
+      // why it is not ready.
+      personaJoined={personaStatus?.joined ?? false}
+      requestPersonaBadge={requestPersonaBadge}
+      dismissPersonaBadgeRequest={dismissPersonaBadgeRequest}
+      provePersonaBadge={provePersonaBadge}
+      joinPersonaBulletin={joinPersonaBulletin}
+      approvePersonaBadge={approvePersonaBadge}
       refreshPersonaStatus={refreshPersonaStatus}
       personaPseudonyms={personaPseudonyms}
       createPersonaPseudonym={createPersonaPseudonym}

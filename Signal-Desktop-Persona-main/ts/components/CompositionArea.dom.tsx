@@ -87,11 +87,10 @@ import {
   type PersonaChoice,
 } from '../services/personasCarriage.std.ts';
 import {
-  BADGE_LABELS,
   isPersonaBadge,
   type PersonaBadge,
 } from '../services/personasBadges.std.ts';
-import { AUTHORSHIP_DISCLAIMER } from '../services/personasAuthorship.std.ts';
+import { AUTHORSHIP_EXPLANATION } from '../services/personasAuthorship.std.ts';
 import { AxoIconButton } from '../axo/AxoIconButton.dom.tsx';
 import { tw } from '../axo/tw.dom.tsx';
 import type { PollCreateType } from '../types/Polls.dom.ts';
@@ -110,6 +109,7 @@ import {
   personaValueToChoice,
   DEFAULT_RATE_INDEX,
 } from '../services/personasComposerChoice.std.ts';
+import { requestableBadges } from '../services/personasBadgeRules.std.ts';
 
 export type OwnProps = Readonly<{
   acceptedMessageRequest: boolean | null;
@@ -214,6 +214,20 @@ export type OwnProps = Readonly<{
   createPersonaTopic: (conversationId: string, name: string) => unknown;
   // Personas demo: the status snapshot and how to refresh it.
   personaStatus: PersonaStatusForUI | undefined;
+  /** Badges this member actually holds, from their zk object. */
+  heldBadges: ReadonlyArray<string>;
+  /** Is this member on the bulletin? A badge request is a record, so it needs this. */
+  personaJoined: boolean;
+  requestPersonaBadge: (conversationId: string, slot: number) => unknown;
+  dismissPersonaBadgeRequest: (requestEh: string) => unknown;
+  provePersonaBadge: (conversationId: string, badge: string) => unknown;
+  /** Join the bulletin if we have not already. Idempotent. */
+  joinPersonaBulletin: (conversationId: string) => unknown;
+  approvePersonaBadge: (
+    conversationId: string,
+    requestEh: string,
+    slot: number
+  ) => unknown;
   refreshPersonaStatus: (conversationId: string) => unknown;
   // Personas demo: the unlimited pseudonyms this member has minted, and how to mint
   // another. `petname` is undefined until that pseudonym's first post reveals it.
@@ -231,8 +245,10 @@ export type OwnProps = Readonly<{
   // Personas demo: send an UNVERIFIED authorship claim linking two personas.
   sendPersonaAuthorshipClaim: (
     conversationId: string,
-    first: string,
-    second: string
+    // CONTEXTS (nonces), not names: the proof is built over the context, and the
+    // petnames are an output of verification.
+    contextA: number,
+    contextB: number
   ) => unknown;
   quotedMessageId: string | null;
   quotedMessageProps: null | ReadonlyDeep<
@@ -342,6 +358,13 @@ export const CompositionArea = memo(function CompositionArea({
   personaTopics,
   createPersonaTopic,
   personaStatus,
+  heldBadges,
+  personaJoined,
+  requestPersonaBadge,
+  approvePersonaBadge,
+  dismissPersonaBadgeRequest,
+  provePersonaBadge,
+  joinPersonaBulletin,
   refreshPersonaStatus,
   personaPseudonyms,
   createPersonaPseudonym,
@@ -474,11 +497,15 @@ export const CompositionArea = memo(function CompositionArea({
   // Only pseudonyms whose petname is known can be named in a claim: the engine reveals
   // a petname when it first emits under that nonce, so an unused pseudonym has no name
   // for anyone else to recognise.
+  // {nonce, petname} pairs, not bare names. The NONCE is the context the proof is
+  // built over; the petname is only a label for the picker. Proving from a name would
+  // be impossible anyway — the circuit derives the pseudonym from our key and the
+  // context, so the name is an OUTPUT of verification rather than an input.
   const namedPseudonyms = useMemo(
     () =>
       personaPseudonyms
-        .map(p => p.petname)
-        .filter((name): name is string => Boolean(name)),
+        .filter((p): p is typeof p & { petname: string } => Boolean(p.petname))
+        .map(p => ({ nonce: p.nonce, petname: p.petname })),
     [personaPseudonyms]
   );
 
@@ -1030,7 +1057,27 @@ export const CompositionArea = memo(function CompositionArea({
   // persona is active.
   const personaMenuButton = (
     <div className="CompositionArea__button-cell">
-      <AxoDropdownMenu.Root>
+      {/* JOIN ON OPEN. Membership is a prerequisite for almost everything in this menu
+          — a pseudonymous post, a badge request, a rating, a badge proof are all member
+          records — and until now the only thing that joined was sending a message. That
+          made the menu actively misleading: every option was visible and most of them
+          failed with "this member is not on the bulletin yet", which reads as a broken
+          build rather than as a sequencing requirement.
+
+          Opening the menu is the natural moment. The person has signalled intent to do
+          something with personas, and joining takes one attributable record plus a
+          sealed-sender warm-up — both of which the first post would have sent anyway,
+          so nothing is sent here that was not already implied.
+
+          `ensurePersonaJoined` is idempotent and de-duplicates concurrent callers, so
+          re-opening the menu costs nothing after the first time. */}
+      <AxoDropdownMenu.Root
+        onOpenChange={open => {
+          if (open) {
+            joinPersonaBulletin(conversationId);
+          }
+        }}
+      >
         <div className={actionSlotClassName}>
           <AxoDropdownMenu.Trigger>
             <AxoIconButton.Root
@@ -1045,6 +1092,15 @@ export const CompositionArea = memo(function CompositionArea({
           </AxoDropdownMenu.Trigger>
         </div>
         <AxoDropdownMenu.Content>
+          {/* Membership, stated at the top rather than discovered through a failure.
+              Shown only while NOT joined: a permanent "joined" banner would be noise,
+              but its absence while joining explains why an option may refuse for a
+              second or two. The join is kicked off by opening this menu. */}
+          {!personaJoined && (
+            <AxoDropdownMenu.Label>
+              Joining the bulletin… anonymous and pseudonymous options need this.
+            </AxoDropdownMenu.Label>
+          )}
           <AxoDropdownMenu.RadioGroup
             value={personaValue}
             onValueChange={setPersonaValue}
@@ -1210,52 +1266,143 @@ export const CompositionArea = memo(function CompositionArea({
 
           <AxoDropdownMenu.Separator />
 
-          {/* UNVERIFIED badge claim. Labelled at every level — the submenu trigger says
-              "unverified", each option carries the full disclaimer as a tooltip, and the
-              chip on the message says it again. Over-labelled on purpose: a fake
-              credential in a system whose whole claim is verifiability is exactly the
-              thing a viewer must not mistake for real. See personasBadges.std.ts. */}
+          {/* BADGES, now credentials rather than labels.
+              The selector offers ONLY badges this member actually holds in their zk
+              object — a badge you hold can be proved, and one you do not cannot be
+              attached at all. That is the whole difference from the old behaviour,
+              where any label could be typed on any message. */}
           <AxoDropdownMenu.Sub>
             <AxoDropdownMenu.SubTrigger symbol="person-circle">
-              {selectedBadge
-                ? `Badge: ${selectedBadge} (unverified)`
-                : 'Badge: none (unverified)'}
+              {/* The label reflects what will actually be SENT, not what is stored.
+                  A selection the member no longer holds (or never held — the
+                  preference file outlives a reset) is dropped by the send path, so
+                  showing it here would promise a badge the post will not carry. */}
+              {heldBadges.length === 0
+                ? 'Badge: none held'
+                : `Badge: ${
+                    selectedBadge != null && heldBadges.includes(selectedBadge)
+                      ? selectedBadge
+                      : 'none'
+                  }`}
             </AxoDropdownMenu.SubTrigger>
             <AxoDropdownMenu.SubContent>
-              <AxoDropdownMenu.RadioGroup
-                value={selectedBadge ?? ''}
-                onValueChange={value =>
-                  setPersonaBadge(
-                    isPersonaBadge(value) ? value : undefined
-                  )
-                }
-              >
-                <AxoDropdownMenu.RadioItem value="">
-                  None
-                </AxoDropdownMenu.RadioItem>
-                {BADGE_LABELS.map(label => (
-                  <AxoDropdownMenu.RadioItem key={label} value={label}>
-                    {label}
+              {heldBadges.length === 0 ? (
+                <AxoDropdownMenu.Label>
+                  You hold no approved badges yet — request one below.
+                </AxoDropdownMenu.Label>
+              ) : (
+                <AxoDropdownMenu.RadioGroup
+                  value={selectedBadge ?? ''}
+                  onValueChange={value =>
+                    setPersonaBadge(
+                      isPersonaBadge(value) ? value : undefined
+                    )
+                  }
+                >
+                  <AxoDropdownMenu.RadioItem value="">
+                    None
                   </AxoDropdownMenu.RadioItem>
-                ))}
-              </AxoDropdownMenu.RadioGroup>
+                  {heldBadges.map(label => (
+                    <AxoDropdownMenu.RadioItem key={label} value={label}>
+                      {label}
+                    </AxoDropdownMenu.RadioItem>
+                  ))}
+                </AxoDropdownMenu.RadioGroup>
+              )}
+            </AxoDropdownMenu.SubContent>
+          </AxoDropdownMenu.Sub>
+
+          {/* REQUEST a badge. The first thing a member without one sees, since the
+              selector above is empty until an admin approves something.
+              Blocked options stay VISIBLE but disabled with the reason: the circuit
+              silently declines a conflicting assignment, so "why can I not ask for
+              Faculty?" has to be answerable here rather than discovered after an
+              approval that quietly did nothing. */}
+          <AxoDropdownMenu.Sub>
+            <AxoDropdownMenu.SubTrigger symbol="plus">
+              Request badge…
+            </AxoDropdownMenu.SubTrigger>
+            <AxoDropdownMenu.SubContent>
+              {/* NOT gated on membership. `requestBadge` joins first if it has to, the
+                  same way posting and rating always have, so there is nothing for the
+                  member to do in the right order. An earlier version of this menu
+                  disabled itself with "send one ordinary message first" — which was an
+                  accurate description of a bug being presented as a requirement. */}
+              <AxoDropdownMenu.Label>
+                {personaJoined
+                  ? "Needs a group admin's approval"
+                  : "Needs a group admin's approval. Joins the bulletin first, so the request may take a moment."}
+              </AxoDropdownMenu.Label>
+              {requestableBadges(heldBadges).map(
+                ({ slot, name, blockedReason }) => (
+                  <AxoDropdownMenu.Item
+                    key={slot}
+                    disabled={blockedReason != null}
+                    onSelect={() => requestPersonaBadge(conversationId, slot)}
+                  >
+                    {blockedReason != null ? `${name} — ${blockedReason}` : name}
+                  </AxoDropdownMenu.Item>
+                )
+              )}
             </AxoDropdownMenu.SubContent>
           </AxoDropdownMenu.Sub>
 
           <AxoDropdownMenu.Separator />
 
-          {/* UNVERIFIED authorship claim. Needs two named personas to link, so it is
-              disabled until at least two of this instance's pseudonyms have revealed
-              their petnames (a pseudonym has no petname until it has posted once). */}
+          {/* ZK-PROVED authorship claim. Needs two NAMED personas: the proof is built
+              over each pseudonym's nonce, but the picker has to show something a human
+              recognises, and a pseudonym has no petname until it has posted once (the
+              engine reveals the name when it first emits under that nonce). So this
+              stays disabled until two of this instance's pseudonyms have posted. */}
           <AxoDropdownMenu.Item
             symbol="link"
             disabled={namedPseudonyms.length < 2}
             onSelect={() => setIsAuthorshipDialogOpen(true)}
           >
+            {/* No longer "(unverified)": the claim carries a Groth16 proof over
+                authorship_pred and recipients verify it before rendering. The label was
+                the last place in the UI still describing the old behaviour. */}
             {namedPseudonyms.length < 2
-              ? 'Claim authorship… (needs 2 posted personas)'
-              : 'Claim authorship… (unverified)'}
+              ? 'Prove authorship… (needs 2 posted personas)'
+              : 'Prove authorship…'}
           </AxoDropdownMenu.Item>
+
+          {/* ZK-PROVED badge possession — the counterpart to "Prove authorship".
+              Offers only badges actually HELD, because the proof is unsatisfiable
+              otherwise: there is no witness for a badge that is not in the object. So
+              an empty list here is not a UI limitation, it is the security property,
+              and the disabled label says what to do about it.
+              Note this is a DIFFERENT action from the badge selector above. That
+              attaches a decorative label to a post; this publishes a proof. Both exist
+              because the gap between them is the thing worth demonstrating. */}
+          <AxoDropdownMenu.Sub>
+            <AxoDropdownMenu.SubTrigger symbol="check-circle">
+              {heldBadges.length === 0
+                ? 'Prove badge… (none held)'
+                : 'Prove badge…'}
+            </AxoDropdownMenu.SubTrigger>
+            <AxoDropdownMenu.SubContent>
+              {heldBadges.length === 0 ? (
+                <AxoDropdownMenu.Label>
+                  No approved badges yet — request one above, then Scan now.
+                </AxoDropdownMenu.Label>
+              ) : (
+                <>
+                  <AxoDropdownMenu.Label>
+                    Proves you hold it, without revealing who you are
+                  </AxoDropdownMenu.Label>
+                  {heldBadges.map(label => (
+                    <AxoDropdownMenu.Item
+                      key={label}
+                      onSelect={() => provePersonaBadge(conversationId, label)}
+                    >
+                      {label}
+                    </AxoDropdownMenu.Item>
+                  ))}
+                </>
+              )}
+            </AxoDropdownMenu.SubContent>
+          </AxoDropdownMenu.Sub>
 
           <AxoDropdownMenu.Item
             symbol="info"
@@ -1338,7 +1485,7 @@ export const CompositionArea = memo(function CompositionArea({
         <AxoDialog.Body>
           <div className={tw('flex flex-col gap-3')}>
             <div className={tw('type-body-small text-label-secondary')}>
-              {AUTHORSHIP_DISCLAIMER}
+              {AUTHORSHIP_EXPLANATION}
             </div>
             <select
               value={authorshipFirst}
@@ -1348,9 +1495,9 @@ export const CompositionArea = memo(function CompositionArea({
               )}
             >
               <option value="">First persona…</option>
-              {namedPseudonyms.map(name => (
-                <option key={name} value={name}>
-                  {name}
+              {namedPseudonyms.map(p => (
+                <option key={p.nonce} value={String(p.nonce)}>
+                  {p.petname}
                 </option>
               ))}
             </select>
@@ -1363,10 +1510,10 @@ export const CompositionArea = memo(function CompositionArea({
             >
               <option value="">Second persona…</option>
               {namedPseudonyms
-                .filter(name => name !== authorshipFirst)
-                .map(name => (
-                  <option key={name} value={name}>
-                    {name}
+                .filter(p => String(p.nonce) !== authorshipFirst)
+                .map(p => (
+                  <option key={p.nonce} value={String(p.nonce)}>
+                    {p.petname}
                   </option>
                 ))}
             </select>
@@ -1390,8 +1537,8 @@ export const CompositionArea = memo(function CompositionArea({
               onClick={() => {
                 sendPersonaAuthorshipClaim(
                   conversationId,
-                  authorshipFirst,
-                  authorshipSecond
+                  Number(authorshipFirst),
+                  Number(authorshipSecond)
                 );
                 setAuthorshipFirst('');
                 setAuthorshipSecond('');
@@ -1892,6 +2039,10 @@ export const CompositionArea = memo(function CompositionArea({
       {isStatusDialogOpen && (
         <PersonaStatusDialog
           onScanNow={() => scanPersonaCallbacksNow(conversationId)}
+          onApproveBadge={(requestEh, slot) =>
+            approvePersonaBadge(conversationId, requestEh, slot)
+          }
+          onDismissBadge={dismissPersonaBadgeRequest}
           status={personaStatus}
           i18n={i18n}
           onClose={() => setIsStatusDialogOpen(false)}

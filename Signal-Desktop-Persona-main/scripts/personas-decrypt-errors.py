@@ -216,15 +216,97 @@ def report(instance: str) -> None:
             e for e in sent if "context=(none)" in str(e.get("msg", ""))
         ]
         if no_context:
-            print(f"    >> {len(no_context)} of {len(sent)} sends had NO context attached.")
-            print("       The chip cannot render what was never sent. Either no context")
-            print("       was selected in the composer, or the selection was lost.")
+            rate_no_context = [e for e in no_context if '"kind":"rate"' in str(e.get("msg", ""))]
+            if rate_no_context:
+                print(f"    >> {len(rate_no_context)} RATE-LIMITED send(s) had no context attached,")
+                print("       which should be impossible: selecting a context forces a")
+                print("       rate-limited persona. The selection was lost.")
+            else:
+                print(f"    note: {len(no_context)} of {len(sent)} sends carried no context, which is")
+                print("       expected for unlimited pseudonyms and anonymous posts.")
+        # Only a RATE-LIMITED persona has a context. An unlimited pseudonym and an
+        # anonymous post legitimately have none, so `context=(none)` is normal for
+        # them — this used to be reported as a carriage bug on every ordinary
+        # pseudonymous post, which was simply wrong and cried wolf every run.
+        rate_sends = [e for e in sent if '"kind":"rate"' in str(e.get("msg", ""))]
         recv_no_context = [
             e for e in recv if "context=(none)" in str(e.get("msg", ""))
         ]
-        if recv_no_context and not no_context:
+        if rate_sends and recv_no_context and not no_context:
             print(f"    >> {len(recv_no_context)} received posts lost their context in transit —")
-            print("       sent WITH a context but decoded without one. That is a carriage bug.")
+            print("       a rate-limited post was sent WITH a context and decoded without")
+            print("       one. That is a carriage bug.")
+
+    # ---- AUTHORSHIP -------------------------------------------------------------
+    # The authorship path FAILS CLOSED at four separate points, and three of them are
+    # invisible in the UI: the proof can fail to generate, the sender's own verification
+    # can fail (we refuse to send), and a recipient drops a proof that does not verify.
+    # So "no message appeared" has four possible causes and the log is the only place
+    # they differ.
+    print("\n  authorship this boot:")
+    pats = (
+        "sendAuthorshipClaim",
+        "composePersonaAuthorship",
+        "verifyPersonaAuthorship",
+        "authorship proof",
+        "authorship claim",
+    )
+    auth = [
+        e for e in current
+        if any(p in str(e.get("msg", "")) for p in pats)
+    ]
+    if not auth:
+        print("    NOTHING LOGGED — the claim was never attempted.")
+        print("    Most likely the menu item is disabled: it needs TWO pseudonyms that")
+        print("    already have petnames, and a pseudonym only gets one after it has")
+        print("    posted once. Check 'Claim authorship' in the persona menu.")
+    else:
+        for e in auth[-10:]:
+            msg = " ".join(str(e.get("msg", "")).split())
+            print(f"    {str(e.get('time',''))[11:19]}  {msg[:200]}")
+        blob = " ".join(str(e.get("msg", "")) for e in auth)
+        if "addon has no emitAuthorship binding" in blob:
+            print("    >> the running .node predates emitAuthorship: rebuild the addon")
+        elif "could not produce the proof" in blob or "composePersonaAuthorship failed" in blob:
+            print("    >> proof GENERATION failed — the Rust error is in the line above")
+        elif "our own proof failed to verify" in blob:
+            print("    >> proof generated but does NOT verify: public-input order or the")
+            print("       verifying key is wrong. This is a prove/verify mismatch.")
+        elif "FAILED verification" in blob:
+            print("    >> a RECIPIENT rejected the proof and dropped the message, so the")
+            print("       sender sees it and nobody else does.")
+        elif "proved" in blob or "verified" in blob:
+            print("    >> the proof was produced and verified; if no bubble appears the")
+            print("       fault is in rendering, not in the proof.")
+
+    # ---- EMPTY-QUEUE STALLS ----------------------------------------------------
+    # `waitForEmptyEventQueue()` resolves only when MessageReceiver emits `empty`, which
+    # happens only when the SERVER sends an ApiEmptyQueue websocket request. The local
+    # test server never does, so every caller of it blocks 60s and fails.
+    #
+    # Counting across the whole log file is misleading — it persists across restarts, so
+    # fixes look ineffective. Scoped to this boot, and showing the line BEFORE each wait
+    # so the CALLER is identified: the endorsement path is only one of several.
+    waits = [
+        (i, e) for i, e in enumerate(current)
+        if "Waiting for MessageReceiver empty event" in str(e.get("msg", ""))
+    ]
+    fired = [e for e in current if "emitting 'empty' event" in str(e.get("msg", ""))]
+    stalls = [e for e in current if "Empty queue never fired" in str(e.get("msg", ""))]
+    print("\n  empty-queue waits THIS boot:")
+    print(f"    waits started : {len(waits)}")
+    print(f"    'empty' fired : {len(fired)}   <- 0 means the server never sent ApiEmptyQueue")
+    print(f"    60s timeouts  : {len(stalls)}")
+    if waits:
+        print("    callers (the line immediately before each wait):")
+        seen: dict[str, int] = {}
+        for idx, _ in waits:
+            prev = current[idx - 1] if idx > 0 else None
+            msg = " ".join(str(prev.get("msg", "")).split()) if prev else "(start of boot)"
+            key = msg[:110]
+            seen[key] = seen.get(key, 0) + 1
+        for key, n in sorted(seen.items(), key=lambda kv: -kv[1])[:6]:
+            print(f"      x{n:<3} {key}")
 
     # ---- SEND SIDE -------------------------------------------------------------
     print("\n  SEND side this boot (did the post even leave?):")
@@ -400,7 +482,51 @@ def bundle_freshness() -> None:
         print("\n  *** THE BUNDLE IS OLDER THAN YOUR SOURCE. The app is NOT running your")
         print("      latest changes. Run:  pnpm run build:rolldown   then restart.")
     else:
-        print("  bundle is newer than source — the app has your changes.")
+        print("  bundle is newer than source — the app has your TypeScript changes.")
+
+    # THE RUST ADDON, checked separately — it has its own build and its own staleness.
+    #
+    # This section used to cover only the TypeScript bundle, and then announced "the app
+    # has your changes", which is a claim it could not support: a Rust change needs
+    # `pnpm --filter @signalapp/personas-engine build`, which `build:rolldown` does not
+    # do. A stale .node with a fresh bundle therefore reported all-clear while the
+    # engine was running old circuit code — and that is not a cosmetic difference, it is
+    # the difference between a proof verifying and not.
+    engine_dir = root / "packages" / "personas-engine"
+    addons = sorted(engine_dir.glob("*.node")) if engine_dir.is_dir() else []
+    rust_dirs = [
+        root.parent / "crates",
+        root.parent.parent / "CryptoPersonas_Signal" / "crates",
+    ]
+    rust_src = next((d for d in rust_dirs if d.is_dir()), None)
+
+    if addons and rust_src is not None:
+        addon = addons[0]
+        addon_time = addon.stat().st_mtime
+        rs_time, rs_file = 0.0, "(none)"
+        for q in rust_src.rglob("*.rs"):
+            if "/target/" in str(q):
+                continue
+            try:
+                m = q.stat().st_mtime
+            except OSError:
+                continue
+            if m > rs_time:
+                rs_time, rs_file = m, q.name
+        print(f"  newest rust   : {fmt(rs_time)}  {rs_file}")
+        print(f"  addon built   : {fmt(addon_time)}  {addon.name}")
+        if rs_time > addon_time:
+            print("\n  *** THE ADDON IS OLDER THAN YOUR RUST. The engine is NOT running your")
+            print("      latest circuit/replica code. Run:")
+            print("          pnpm --filter @signalapp/personas-engine build")
+            print("      and if a CIRCUIT changed (personas-core/src/circuits.rs), the")
+            print("      Groth16 keys no longer match it:")
+            print("          rm -rf ~/.personas-demo-keys")
+            print("      which costs a few minutes of key generation on next launch.")
+        else:
+            print("  addon is newer than the Rust — the engine has your changes.")
+    elif addons:
+        print("  (Rust workspace not found next to this checkout; skipped addon check)")
 
     # Markers must be STRING LITERALS, never identifiers. The bundler renames
     # identifiers, so searching for `DEFAULT_RATE_INDEX` reported a feature as missing

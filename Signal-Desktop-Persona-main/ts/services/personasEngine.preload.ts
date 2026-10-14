@@ -21,8 +21,10 @@ import type { IngestStatus, Emitted } from '@signalapp/personas-engine';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
+import { badgeSlotFromLogBody } from './personasBadgeRules.std.ts';
 import {
   encodeRecordBody,
+  encodeBadgeBody,
   encodePollBody,
   encodeVoteBody,
   encodeRateBody,
@@ -30,6 +32,8 @@ import {
   decodePollDescriptor,
   type PersonaChoice,
   type PersonaPollDescriptor,
+  encodeAuthorshipProof,
+  encodeBadgeProof,
 } from './personasCarriage.std.ts';
 import {
   getBarrierSchedule,
@@ -137,7 +141,18 @@ export type RecordIngestResult =
       flagged: boolean;
     }
   // A poll to render as its own bubble. `eh` is the handle a ballot references.
-  | { kind: 'poll'; eh: string; descriptor: PersonaPollDescriptor };
+  | { kind: 'poll'; eh: string; descriptor: PersonaPollDescriptor }
+  // A badge REQUEST, to render as a notification an admin can approve in place. `eh`
+  // is the handle the approval names, so the Approve button needs nothing else.
+  //
+  // This needs its own kind because the replica logs a request like any other entry,
+  // with `kind: "BadgeRequest"` and a body of `"requested badge slot 1"`. Without the
+  // branch it fell through to `kind: 'post'` below and every member saw a persona
+  // bubble containing that internal string — the "weird automated message" that made
+  // the whole flow unexplainable from the UI.
+  | { kind: 'badge-request'; eh: string; slot: number }
+  // A badge APPROVAL, rendered so the requester learns they have one to collect.
+  | { kind: 'badge-approve'; eh: string; slot: number };
 
 // Receive seam for the timeline: ingest a record body and describe what to render.
 // `serverTimestampMs` is the SERVICE receive timestamp; on the shared barrier
@@ -178,6 +193,28 @@ export function ingestRecordForTimeline(
     if (!entry) {
       return { kind: 'ingested' };
     }
+
+    // Badge records are NOT posts, even though the replica logs them as entries with a
+    // body. Branch before the post fallthrough below, or their internal body text gets
+    // rendered as somebody's message.
+    if (entry.kind === 'BadgeRequest' || entry.kind === 'BadgeApprove') {
+      const slot = badgeSlotFromLogBody(entry.body);
+      if (slot == null) {
+        // The body format is ours, so this should not happen — but guessing a slot
+        // would put a wrong badge name in front of an admin about to grant it.
+        log.error(
+          `ingestRecordForTimeline: could not read a slot out of a ${entry.kind} ` +
+          `body (${JSON.stringify(entry.body)}); not rendering it`
+        );
+        return { kind: 'ingested' };
+      }
+      return {
+        kind: entry.kind === 'BadgeRequest' ? 'badge-request' : 'badge-approve',
+        eh: status.eh,
+        slot,
+      };
+    }
+
     return {
       kind: 'post',
       eh: status.eh,
@@ -373,6 +410,234 @@ export function composePersonaScan():
   | undefined {
   const result = emitAndSelfIngest(currentEngine => currentEngine.emitScan());
   return result ? { eh: result.emitted.eh, body: result.body } : undefined;
+}
+
+export const BADGE_SLOTS: ReadonlyArray<{ slot: number; name: string }> = [
+  { slot: 1, name: 'Faculty' },
+  { slot: 2, name: 'Student' },
+  { slot: 3, name: 'Industry' },
+];
+
+/**
+ * Request a badge. Files a ticket an admin can approve; grants nothing by itself.
+ *
+ * Attributable on purpose — the requester is asking a human to vouch for them, which
+ * is not a claim that can be made anonymously.
+ */
+export function composeBadgeRequest(
+  slot: number
+): { eh: string; body: string } | undefined {
+  // `encodeBadgeBody`, not the default attributable encoding `emitAndSelfIngest`
+  // applies. The marker is the only thing the send splice looks at, so the choice of
+  // encoder here IS the choice of whether the requester is named on the wire.
+  return emitBadgeRecord(engine => engine.emitBadgeRequest(slot));
+}
+
+/** Approve a badge request by its envelope hash (admin action). Phantom-routed. */
+export function composeBadgeApprove(
+  requestEh: string,
+  slot: number
+): { eh: string; body: string } | undefined {
+  return emitBadgeRecord(engine => engine.emitBadgeApprove(requestEh, slot));
+}
+
+/**
+ * Emit + self-ingest a badge record, carried under the PHANTOM badge marker.
+ *
+ * Mirrors `emitAndSelfIngest` exactly except for the encoder. Kept as its own helper so
+ * the two badge records cannot drift apart: a request that hides its sender and an
+ * approval that does not would be worse than either choice made consistently, because
+ * the pair would narrow the anonymity set to "whoever the admin replied to".
+ */
+function emitBadgeRecord(
+  produce: (engine: Engine) => Emitted
+): { eh: string; body: string } | undefined {
+  const currentEngine = getPersonasEngine();
+  if (!currentEngine) {
+    return undefined;
+  }
+  const emitted = produce(currentEngine);
+  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  return { eh: emitted.eh, body: encodeBadgeBody(emitted.bytes) };
+}
+
+/**
+ * The badges this member's own zk object contains — the ONLY authority on possession.
+ *
+ * Empty when the engine is unavailable or the addon predates `getBadges`. That default
+ * is the safe one: it under-claims rather than over-claims, so a build that cannot tell
+ * sends no badge instead of asserting an unverified one.
+ */
+export function heldBadges(): ReadonlyArray<string> {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.getBadges !== 'function') {
+    return [];
+  }
+  try {
+    return engine.getBadges();
+  } catch (error) {
+    log.error(`heldBadges failed: ${toLogFormat(error)}`);
+    return [];
+  }
+}
+
+/** Badge requests awaiting approval, read from the replica's own log. */
+export function listPendingBadgeRequests(): ReadonlyArray<{
+  eh: string;
+  slot: number;
+}> {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.pendingBadgeRequests !== 'function') {
+    return [];
+  }
+  try {
+    return engine.pendingBadgeRequests();
+  } catch (error) {
+    log.error(`listPendingBadgeRequests failed: ${toLogFormat(error)}`);
+    return [];
+  }
+}
+
+/**
+ * Prove we hold `badge`, by name. Undefined if we do not hold it — the proof is simply
+ * unsatisfiable, which is the point: a badge label can be typed, a badge proof cannot.
+ */
+export function composeBadgeProof(badge: string): Uint8Array | undefined {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.emitBadgeProof !== 'function') {
+    log.error('composeBadgeProof: addon has no emitBadgeProof binding');
+    return undefined;
+  }
+  try {
+    return engine.emitBadgeProof(badge);
+  } catch (error) {
+    log.error(`composeBadgeProof failed: ${toLogFormat(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Verify a badge proof and return the badge NAME it proves.
+ *
+ * Render this, never a label from the message — otherwise a valid Student proof could
+ * be displayed as Faculty and the checkmark would be true while the label lied.
+ */
+export function verifyBadgeProof(proof: Uint8Array): string | undefined {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.verifyBadgeProof !== 'function') {
+    return undefined;
+  }
+  try {
+    return engine.verifyBadgeProof(Buffer.from(proof)) ?? undefined;
+  } catch (error) {
+    log.error(`verifyBadgeProof failed: ${toLogFormat(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Produce a ZK proof that two of our own pseudonyms share an author.
+ *
+ * Contexts, not petnames: for an unlimited pseudonym the context IS the nonce the UI
+ * already stores, and the claimed pseudonyms are derived from our secret key inside the
+ * circuit — so this cannot assert anything about a persona we do not hold.
+ *
+ * Unlike the other compose helpers this does NOT self-ingest, because an authorship
+ * proof is not a record: nothing is folded into the replica, no accept rule applies,
+ * and there is no echo to absorb.
+ */
+export function composePersonaAuthorship(
+  contextA: number,
+  contextB: number
+): { body: string; proof: Uint8Array } | undefined {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.emitAuthorship !== 'function') {
+    log.error('composePersonaAuthorship: addon has no emitAuthorship binding');
+    return undefined;
+  }
+  try {
+    const proof = engine.emitAuthorship(contextA, contextB);
+    // Both: `body` for the wire, `proof` so the caller can verify its own output
+    // before sending and render from the verifier rather than from its own inputs.
+    return { body: encodeAuthorshipProof(proof), proof };
+  } catch (error) {
+    log.error(`composePersonaAuthorship failed: ${toLogFormat(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Prove possession of `badge` in zero knowledge.
+ *
+ * Unsatisfiable if this member's object does not actually hold it, which is the whole
+ * value of this over the decorative label: a label is a string anyone can type, a proof
+ * only exists if an admin approved the badge and the member scanned it in.
+ *
+ * Not a record, so it does not self-ingest — nothing is folded into the replica and no
+ * accept rule applies. Same shape as `composePersonaAuthorship`.
+ */
+export function composePersonaBadgeProof(
+  badge: string
+): { body: string; proof: Uint8Array } | undefined {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.emitBadgeProof !== 'function') {
+    log.error('composePersonaBadgeProof: addon has no emitBadgeProof binding');
+    return undefined;
+  }
+  try {
+    const proof = engine.emitBadgeProof(badge);
+    return { body: encodeBadgeProof(proof), proof };
+  } catch (error) {
+    // Includes the expected case: we do not hold the badge, so the witness does not
+    // exist. Logged rather than thrown — the caller turns it into a visible reason.
+    log.error(`composePersonaBadgeProof failed: ${toLogFormat(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Verify a badge proof and return the badge NAME it proves.
+ *
+ * The name comes from the proof's public inputs via the addon's own lookup, never from
+ * the message. A proof that verifies but maps to no known badge value returns undefined
+ * rather than a plausible-looking guess.
+ */
+export function verifyPersonaBadgeProof(
+  proof: Uint8Array
+): string | undefined {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.verifyBadgeProof !== 'function') {
+    return undefined;
+  }
+  try {
+    return engine.verifyBadgeProof(Buffer.from(proof)) ?? undefined;
+  } catch (error) {
+    log.error(`verifyPersonaBadgeProof failed: ${toLogFormat(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Verify an authorship proof and return the names it PROVES about.
+ *
+ * The names come from the proof's own public inputs, never from the message. That is
+ * the whole point: a sender holding a valid proof about two pseudonyms they own could
+ * otherwise display it beside someone else's persona names, and the checkmark would be
+ * true while the statement was false.
+ */
+export function verifyPersonaAuthorship(
+  proof: Uint8Array
+): { first: string; second: string } | undefined {
+  const engine = getPersonasEngine();
+  if (!engine || typeof engine.verifyAuthorship !== 'function') {
+    return undefined;
+  }
+  try {
+    return engine.verifyAuthorship(Buffer.from(proof)) ?? undefined;
+  } catch (error) {
+    log.error(`verifyPersonaAuthorship failed: ${toLogFormat(error)}`);
+    return undefined;
+  }
 }
 
 // The engine's own status line for a poll, if it publishes one we can match. Used as

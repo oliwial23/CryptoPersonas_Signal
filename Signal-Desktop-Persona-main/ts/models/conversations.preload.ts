@@ -4244,6 +4244,8 @@ export class ConversationModel {
       personaContextName,
       personaAuthorship,
       personaPoll,
+      personaBadgeNotice,
+      personaBadgeProof,
       personaRecordBase64,
       personaCarriageBody,
     }: {
@@ -4277,6 +4279,13 @@ export class ConversationModel {
       personaAuthorship?: MessageAttributesType['personaAuthorship'];
       // On a poll record, the descriptor the bubble renders from.
       personaPoll?: MessageAttributesType['personaPoll'];
+      // On a badge request/approval, what the notification renders from. Passed so the
+      // SENDER sees their own request ("waiting for an admin") rather than it vanishing
+      // — the recipients build theirs in handleDataMessage, and a flow where the person
+      // who asked for the badge gets no acknowledgement is the one that reads as broken.
+      personaBadgeNotice?: MessageAttributesType['personaBadgeNotice'];
+      // On a badge possession proof, what the bubble renders from.
+      personaBadgeProof?: MessageAttributesType['personaBadgeProof'];
       personaRecordBase64?: string;
       // On a poll, the pre-encoded carriage body (record + descriptor) for the wire.
       personaCarriageBody?: string;
@@ -4431,6 +4440,8 @@ export class ConversationModel {
       personaContextName,
       personaAuthorship,
       personaPoll,
+      personaBadgeNotice,
+      personaBadgeProof,
       personaRecordBase64,
       personaCarriageBody,
       sendHQImages,

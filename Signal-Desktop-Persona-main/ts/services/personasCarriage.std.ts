@@ -8,8 +8,9 @@
 // Mirrors personas-messenger carriage.rs `INLINE_MARKER`: a record body is
 // `PZR2:<base64>`. A body without a marker is ordinary chatter.
 //
-// SIX markers. The split follows what the ENGINE already does: any record whose
-// in-circuit identity is a pseudonym must also hide its Signal sender, or the envelope
+// NINE markers. The split follows what the ENGINE already does: any record whose
+// in-circuit identity is a pseudonym — or whose whole purpose is to prove something
+// WITHOUT naming its author — must also hide its Signal sender, or the envelope
 // re-identifies what the proof went to trouble to anonymise.
 //   - POSTS (`PZP2:`) ride the shared phantom identity.
 //   - POLLS (`PZQ2:`) ride the phantom, so the poll's CREATOR is anonymous, and carry a
@@ -19,6 +20,13 @@
 //     per member — so voting is PSEUDONYMOUS, not anonymous.
 //   - RATINGS (`PZE2:`) ride the phantom for the same reason: `member.rate` uses
 //     `context = target.context()`, giving one rating per member per target.
+//   - BADGE REQUESTS / APPROVALS (`PZB2:`) ride the phantom. The grant travels by
+//     CALLBACK, not by identity, so naming the sender leaked something the protocol
+//     never used. See PERSONAS_BADGE_MARKER for what that costs an admin.
+//   - AUTHORSHIP PROOFS (`PZU2:`) ride the phantom — a proof that two pseudonyms share
+//     an author is worthless if the envelope says who sent it.
+//   - BADGE PROOFS (`PZG2:`) ride the phantom, for the same reason: the point is that
+//     SOMEONE holds the credential, not who.
 //   - JOIN / SCAN (`PZR2:`) are sent ATTRIBUTABLY under the real account. Joins
 //     especially MUST be: the anti-Sybil / ban-evasion guarantee depends on one
 //     membership per real account, which an anonymous join would defeat.
@@ -38,31 +46,87 @@ export const PERSONAS_RATE_MARKER = 'PZE2:';
 // Topic announcements are NOT ZK records — see decodeTopicAnnouncement.
 export const PERSONAS_TOPIC_MARKER = 'PZT2:';
 
-// An AUTHORSHIP CLAIM: "these two personas are the same person". Like the topic
-// announcement (PZT2) this is NOT a ZK record — it carries no proof, the engine never
-// sees it, and it is decoded separately so it is never handed to `ingest`.
+// An AUTHORSHIP PROOF: "these two pseudonyms are the same author".
 //
-// The real thing is a proof. `authorship_pred` exists in personas-core and its Merkle
-// proving key already ships, but the serverless `Member` has no method to build the
-// statement, so there is nothing to verify against here. See PERSONAS_SERVERLESS_TODO.md
-// section 1 — this marker is exactly what that work would replace.
+// It carries a real Groth16 proof over `authorship_pred`, verified on receipt by
+// `Engine::verify_authorship`, and a proof that fails is dropped rather than rendered.
+// It is NOT a bulletin record, though, so it is decoded by its own path and never handed
+// to `ingest` — which is why this marker is absent from ALL_MARKERS.
+//
+// PHANTOM-ROUTED. The proof establishes that two pseudonyms share an author while
+// revealing nothing about who that is; sending it under the author's real account would
+// answer that question in the envelope, for free, and make the proof pointless. It was
+// attributable only for as long as it was an unverified typed claim, which it no longer
+// is. (The names come from the proof's own public inputs, never from the body — see
+// personasAuthorship.preload.ts.)
 export const PERSONAS_AUTHORSHIP_MARKER = 'PZU2:';
 
+// A BADGE REQUEST or APPROVAL. Its own marker, distinct from the attributable PZR2, for
+// one reason: these ride the SHARED PHANTOM, so the requester and the approver are both
+// unlinkable on the wire.
+//
+// That is a change of mind, and the reasoning matters. These started out attributable on
+// the theory that "a request asks a human to vouch for you, which cannot be done
+// anonymously". That turned out to be false about this protocol: the grant does not flow
+// through identity at all. A request FILES A CALLBACK; the approval names that callback
+// by its envelope hash; the replica marks the ticket and invokes it at the barrier; the
+// requester absorbs it at their next scan because they alone hold the secret to do so.
+// Identity appears nowhere in that chain, so attributing the Signal envelope was leaking
+// something the protocol never needed.
+//
+// WHAT IT COSTS, stated plainly because it is a real trade: an admin now approves "a
+// request for Faculty", not "Bob's request for Faculty". They cannot vouch for a person
+// they recognise, because they cannot see who asked. If the research design needs
+// person-specific vouching, this is the decision to revisit — not the UI label.
+//
+// `obj_root` in the record does NOT undo this. It is the root of the shared object tree,
+// the same value for every member, which is why ordinary anonymous POSTS carry it too.
+export const PERSONAS_BADGE_MARKER = 'PZB2:';
+
+// A BADGE POSSESSION PROOF: "I hold a Faculty badge", proved in zero knowledge.
+//
+// Distinct from PZB2 (the request/approval records) and from the decorative `b` field
+// inside a post envelope, and the three must not be confused:
+//
+//   PZB2:  a bulletin RECORD. Goes to `ingest`. Files or settles a callback.
+//   PZG2:  a PROOF over `badge_pred`. Never ingested — verified and rendered.
+//   post `b`: a STRING the sender chose. Checked against nothing. Decorative.
+//
+// Like authorship, this is a proof rather than a record, so it is absent from
+// ALL_MARKERS and decoded by its own path. Phantom-routed for the same reason as
+// authorship: the proof demonstrates that SOMEONE in the group holds the credential
+// without saying who, and an attributable envelope would hand over the name for free.
+export const PERSONAS_BADGE_PROOF_MARKER = 'PZG2:';
+
 // Records that must ride the shared phantom identity, i.e. whose AUTHOR must be
-// unlinkable: posts, polls, ballots and ratings. Everything else is attributable.
+// unlinkable. Everything else is attributable, and the ONLY thing that still has to be
+// is the join: the anti-Sybil accounting rests on one membership per real account, which
+// an anonymous join would defeat outright.
+//
+// AUTHORSHIP is in this list, which is the point of it. A proof that two pseudonyms share
+// an author, sent under the author's real name, is self-defeating — the envelope answers
+// the exact question the proof was built to leave unanswered. It was attributable only
+// because it predated being a proof at all.
 const PHANTOM_MARKERS = [
   PERSONAS_POST_MARKER,
   PERSONAS_POLL_MARKER,
   PERSONAS_VOTE_MARKER,
   PERSONAS_RATE_MARKER,
+  PERSONAS_BADGE_MARKER,
+  PERSONAS_AUTHORSHIP_MARKER,
+  PERSONAS_BADGE_PROOF_MARKER,
 ] as const;
 
+// Markers whose payload is a ZK RECORD to hand to `ingest`. Authorship and topic
+// announcements are deliberately absent: they are decoded by their own paths and must
+// never reach the engine.
 const ALL_MARKERS = [
   PERSONAS_MARKER,
   PERSONAS_POST_MARKER,
   PERSONAS_POLL_MARKER,
   PERSONAS_VOTE_MARKER,
   PERSONAS_RATE_MARKER,
+  PERSONAS_BADGE_MARKER,
 ] as const;
 
 // How to attribute a composed post. Pure type (no engine dependency) so the
@@ -93,6 +157,18 @@ export const MAX_PSEUDO = 4;
 // ATTRIBUTABLE one (join / scan); posts, polls, ballots and ratings have their own.
 export function encodeRecordBody(bytes: Buffer | Uint8Array): string {
   return PERSONAS_MARKER + Buffer.from(bytes).toString('base64');
+}
+
+/**
+ * Wrap a BADGE REQUEST or APPROVAL record. Phantom-routed, so neither the requester nor
+ * the approver is named on the wire.
+ *
+ * Same payload shape as `encodeRecordBody` — only the marker differs, because the marker
+ * is what the send splice reads to decide routing. Using the attributable marker here is
+ * what made these records name their sender.
+ */
+export function encodeBadgeBody(bytes: Buffer | Uint8Array): string {
+  return PERSONAS_BADGE_MARKER + Buffer.from(bytes).toString('base64');
 }
 
 // Wrap a POST record — the one kind that rides the shared phantom identity.
@@ -296,7 +372,12 @@ export function decodePollDescriptor(
     question: envelope.q,
     options: envelope.o.map(String),
     kind: envelope.k === 'ban' ? 'ban' : 'standard',
-    silent: envelope.s === true,
+    // Only present when TRUE, so an ordinary poll decodes to exactly the object it did
+    // before this field existed. Always emitting `silent: false` changed the shape of
+    // every decoded descriptor, which broke a round-trip test — and that test was
+    // right: a display-only addition should be invisible to everything that does not
+    // ask for it.
+    ...(envelope.s === true ? { silent: true } : {}),
   };
 }
 
@@ -337,12 +418,19 @@ export function decodeRecordBody(
 // Does this body carry a record whose AUTHOR must be unlinkable — i.e. one that MUST
 // ride the shared phantom identity? Used by the group send splice to decide routing.
 //
-// Posts, polls and ballots all qualify. A poll's creator and a voter are as entitled to
-// anonymity as a poster: an attributable ballot would defeat the entire point of an
-// anonymous poll, and an attributable poll would expose who called for a revocation.
+// Posts, polls, ballots, ratings, badge records and authorship proofs all qualify. A
+// poll's creator and a voter are as entitled to anonymity as a poster: an attributable
+// ballot would defeat the entire point of an anonymous poll, and an attributable poll
+// would expose who called for a revocation.
 //
-// Joins, ratings and scans deliberately do NOT: the anti-Sybil accounting rests on one
-// membership per real account, which an anonymous join would defeat.
+// JOINS AND SCANS deliberately do not, and the reason differs for each. A join must be
+// attributable because the anti-Sybil and ban-evasion guarantees rest on one membership
+// per real account. A scan is attributable because it is not a claim about anything —
+// it absorbs callbacks already addressed to this member.
+//
+// (An earlier version of this comment claimed ratings were attributable. They are not,
+// and never were in the code below — `member.rate` uses `context = target.context()`, so
+// a rating is pseudonymous in-circuit and an attributable envelope would unmask it.)
 export function isPersonaPhantomBody(body: string | undefined | null): boolean {
   if (!body) {
     return false;
@@ -401,14 +489,71 @@ export type PersonaAuthorshipClaim = {
   second: string;
 };
 
-export function encodeAuthorshipClaim(claim: PersonaAuthorshipClaim): string {
+/**
+ * Wrap a ZK authorship PROOF for the wire.
+ *
+ * Deliberately carries ONLY the proof. The previous version shipped the two petnames
+ * as plain strings, which is what made the claim unverifiable: a recipient had nothing
+ * to check and could only repeat what the sender asserted.
+ *
+ * Names are NOT carried, on purpose. They are recoverable from the proof's own public
+ * inputs (`Engine.verifyAuthorship` returns them), and carrying them would create a
+ * second, untrusted source for the same fact — which is exactly how a true checkmark
+ * ends up next to a false statement. If a name is not in the message, it cannot be
+ * believed by mistake.
+ */
+export function encodeAuthorshipProof(proof: Uint8Array): string {
   return (
-    PERSONAS_AUTHORSHIP_MARKER +
-    Buffer.from(
-      JSON.stringify({ a: claim.first, b: claim.second }),
-      'utf8'
-    ).toString('base64')
+    PERSONAS_AUTHORSHIP_MARKER + Buffer.from(proof).toString('base64')
   );
+}
+
+/**
+ * Wrap a BADGE POSSESSION proof for carriage.
+ *
+ * Carries ONLY the proof — no badge name. The name is an output of verification, which
+ * is the same rule authorship follows and for the same reason: if the name travelled
+ * alongside, a sender holding a valid Industry proof could render it as Faculty and the
+ * verified checkmark would be true while the statement was false.
+ */
+export function encodeBadgeProof(proof: Uint8Array): string {
+  return (
+    PERSONAS_BADGE_PROOF_MARKER + Buffer.from(proof).toString('base64')
+  );
+}
+
+/** The raw proof bytes behind a badge-proof message, for the engine to verify. */
+export function decodeBadgeProof(
+  body: string | undefined | null
+): Buffer | undefined {
+  if (!body?.startsWith(PERSONAS_BADGE_PROOF_MARKER)) {
+    return undefined;
+  }
+  try {
+    return Buffer.from(
+      body.slice(PERSONAS_BADGE_PROOF_MARKER.length),
+      'base64'
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** The raw proof bytes behind an authorship message, for the engine to verify. */
+export function decodeAuthorshipProof(
+  body: string | undefined | null
+): Buffer | undefined {
+  if (!body?.startsWith(PERSONAS_AUTHORSHIP_MARKER)) {
+    return undefined;
+  }
+  try {
+    return Buffer.from(
+      body.slice(PERSONAS_AUTHORSHIP_MARKER.length),
+      'base64'
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 export function decodeAuthorshipClaim(

@@ -5,11 +5,16 @@ import lodash from 'lodash';
 import type { z } from 'zod';
 
 import { createLogger } from '../logging/log.std.ts';
-import { ingestRecordForTimeline } from '../services/personasEngine.preload.ts';
+import {
+  ingestRecordForTimeline,
+  verifyPersonaAuthorship,
+  verifyPersonaBadgeProof,
+} from '../services/personasEngine.preload.ts';
 import {
   decodePostBadge,
   decodePostContextName,
-  decodeAuthorshipClaim,
+  decodeAuthorshipProof,
+  decodeBadgeProof,
 } from '../services/personasCarriage.std.ts';
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
 import { decodeTopicAnnouncement } from '../services/personasCarriage.std.ts';
@@ -142,20 +147,73 @@ export async function handleDataMessage(
     // A topic announcement is coordination metadata, not a ZK record: fold it into
     // the topic registry and drop it. It must be handled BEFORE the record path,
     // because it carries no proof and the engine would reject it.
-    // An authorship claim is not a ZK record either (see personasAuthorship): it is an
-    // unverified assertion. Unlike a topic announcement it IS shown, because the whole
-    // point is that a human reads it — but it is stamped so the bubble can label it as
-    // unverified rather than letting it pass as an ordinary message.
-    const authorshipClaim = decodeAuthorshipClaim(initialMessage.body);
-    if (authorshipClaim) {
+    // An authorship claim is now a real ZK PROOF, verified here before it is shown.
+    //
+    // It is still not a record: nothing is folded into the replica and no accept rule
+    // applies. But it is no longer an assertion either — `verifyPersonaAuthorship`
+    // checks the Groth16 proof against `authorship_pred`'s verifying key.
+    //
+    // THE NAMES COME FROM THE VERIFIER, NOT THE MESSAGE. The wire carries only the
+    // proof (see encodeAuthorshipProof), and the petnames are derived from the proof's
+    // own public inputs. That ordering is the security property: a sender holding a
+    // valid proof about two pseudonyms they genuinely own could otherwise display it
+    // beside someone else's persona names, and the checkmark would be true while the
+    // statement was false.
+    //
+    // A proof that does not verify is DROPPED, not shown as unverified. An
+    // unverifiable authorship message has no legitimate sender, so rendering it at all
+    // would only give a forger a surface.
+    const authorshipProof = decodeAuthorshipProof(initialMessage.body);
+    if (authorshipProof) {
+      const verified = verifyPersonaAuthorship(authorshipProof);
+      if (!verified) {
+        log.warn(
+          `${idLog}: authorship proof FAILED verification; dropping the message`
+        );
+        confirm();
+        return;
+      }
       message.set({
         body: undefined,
+        // ANONYMOUS. The proof's whole claim is "these two pseudonyms share an author"
+        // — it says nothing about WHICH author, and it is not supposed to. Attributing
+        // the bubble to the sender's real name answered, for free, the one question the
+        // proof deliberately leaves open. The proof now rides the phantom too (PZU2 is
+        // in PHANTOM_MARKERS), so this label matches what is actually on the wire.
+        personaAnonymous: true,
         personaAuthorship: {
-          first: authorshipClaim.first,
-          second: authorshipClaim.second,
+          first: verified.first,
+          second: verified.second,
+          verified: true,
         },
       });
-      log.info(`${idLog}: personas authorship claim received`);
+      log.info(
+        `${idLog}: authorship proof verified: ${verified.first} = ${verified.second}`
+      );
+    }
+
+    // A BADGE POSSESSION PROOF. Same treatment as authorship, and for the same reasons:
+    // verified here, dropped if it fails, and the badge NAME is taken from the
+    // verifier's output rather than from anything in the message. A sender holding a
+    // valid Industry proof must not be able to render it as Faculty.
+    const badgeProof = decodeBadgeProof(initialMessage.body);
+    if (badgeProof) {
+      const provenBadge = verifyPersonaBadgeProof(badgeProof);
+      if (!provenBadge) {
+        log.warn(
+          `${idLog}: badge proof FAILED verification; dropping the message`
+        );
+        confirm();
+        return;
+      }
+      message.set({
+        body: undefined,
+        // Anonymous: the proof establishes that SOMEONE here holds the badge, not who.
+        // The envelope agrees — it rides the phantom — so this label is not a veneer.
+        personaAnonymous: true,
+        personaBadgeProof: { badge: provenBadge, verified: true },
+      });
+      log.info(`${idLog}: badge proof verified: holds ${provenBadge}`);
     }
 
     const topicAnnouncement = decodeTopicAnnouncement(initialMessage.body);
@@ -720,6 +778,40 @@ export async function handleDataMessage(
             kind: personasRecord.descriptor.kind,
           },
         });
+      }
+
+      // A badge request or approval. Rendered as a NOTIFICATION, attributed to the real
+      // sender, with the raw carriage body cleared off the model.
+      //
+      // Deliberately not suppressed. A request needs to be seen by an admin, and burying
+      // it in a dialog is what made the flow unexplainable — an admin saw an odd record
+      // appear in the chat and had nowhere obvious to act on it. Showing it in the
+      // timeline, where the Approve button is attached to the thing being approved, is
+      // the whole fix.
+      if (
+        personasRecord.kind === 'badge-request' ||
+        personasRecord.kind === 'badge-approve'
+      ) {
+        message.set({
+          body: undefined,
+          // Anonymous, and genuinely so: these ride the phantom (PZB2), so the Signal
+          // envelope does not name the sender either. Labelling them anonymous while
+          // they still went out attributably would have been a cosmetic lie — the
+          // worst kind of privacy UI, since every recipient's client would still know
+          // exactly who sent it. `personaAnonymous` also keeps Signal from falling
+          // through to the phantom contact and rendering "Deleted Account".
+          personaAnonymous: true,
+          personaBadgeNotice: {
+            kind:
+              personasRecord.kind === 'badge-request' ? 'request' : 'approve',
+            eh: personasRecord.eh,
+            slot: personasRecord.slot,
+          },
+        });
+        log.info(
+          `${idLog}: personas ${personasRecord.kind} slot=${personasRecord.slot} ` +
+          `eh=${personasRecord.eh.slice(0, 12)}`
+        );
       }
 
       if (storyQuote) {

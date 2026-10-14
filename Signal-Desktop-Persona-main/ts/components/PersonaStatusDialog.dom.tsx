@@ -21,6 +21,7 @@
 
 import { type JSX } from 'react';
 
+import { AxoButton } from '../axo/AxoButton.dom.tsx';
 import { AxoDialog } from '../axo/AxoDialog.dom.tsx';
 import { KNOWN_LIMITATIONS } from '../services/personasLimitations.std.ts';
 import { AxoSymbol } from '../axo/AxoSymbol.dom.tsx';
@@ -41,6 +42,9 @@ export type PersonaStatusForUI = {
   isSignalAdmin: boolean;
   autoScan: boolean;
   banned?: boolean;
+  authorshipZk: boolean;
+  heldBadges: ReadonlyArray<string>;
+  pendingBadgeRequests: ReadonlyArray<{ eh: string; slot: number; name: string }>;
   scanStuck: boolean;
   outstandingCallbacks: number;
   stateLost: boolean;
@@ -52,6 +56,10 @@ export type PersonaStatusDialogProps = {
   onClose: () => void;
   /** Emit a scan immediately. See the note on the footer action. */
   onScanNow: () => void;
+  /** Approve a badge request. Only supplied to a Signal group admin. */
+  onApproveBadge?: (requestEh: string, slot: number) => void;
+  /** Hide a request from this admin's queue. LOCAL — no record, nothing broadcast. */
+  onDismissBadge?: (requestEh: string) => void;
 };
 
 function Row({
@@ -91,6 +99,8 @@ export function PersonaStatusDialog({
   i18n,
   onClose,
   onScanNow,
+  onApproveBadge,
+  onDismissBadge,
 }: PersonaStatusDialogProps): JSX.Element {
   return (
     <AxoDialog.Root open onOpenChange={onClose}>
@@ -227,6 +237,29 @@ export function PersonaStatusDialog({
                 }
               />
               <Row
+                label="Badges held (in your object)"
+                value={
+                  status.heldBadges.length > 0
+                    ? status.heldBadges.join(', ')
+                    : 'None'
+                }
+                detail={
+                  status.heldBadges.length > 0
+                    ? 'Real badges: written into your zk object by a scan after an approver invoked your callback. These are the ones a badge proof could attest to.'
+                    : 'You hold no badges in your object. The badge label the composer attaches to a post is NOT this \u2014 it is an unverified string anyone can claim. Request-and-approve is step 4 of PERSONAS_ZK_WORKPLAN.md.'
+                }
+              />
+              <Row
+                label="Authorship proofs"
+                ok={status.authorshipZk}
+                value={status.authorshipZk ? 'Verified in ZK' : 'Unavailable'}
+                detail={
+                  status.authorshipZk
+                    ? 'A claim carries a Groth16 proof over authorship_pred binding both pseudonyms to one secret key. Recipients verify before rendering and DROP a proof that fails, and the names shown are read from the proof\u2019s public inputs rather than from the message \u2014 so a valid proof cannot be shown beside someone else\u2019s persona names. Claims cannot be retracted.'
+                    : 'This addon has no emitAuthorship/verifyAuthorship binding, so a claim could only be an unverified assertion. Rebuild the native engine.'
+                }
+              />
+              <Row
                 label="Am I banned?"
                 ok={status.banned === false}
                 value={
@@ -258,6 +291,85 @@ export function PersonaStatusDialog({
                     : 'None yet — create one to use a rate-limited persona.'
                 }
               />
+              {status.isSignalAdmin && status.pendingBadgeRequests.length > 0 && (
+                <div className={tw('pt-3')}>
+                  <div className={tw('mb-1 type-body-medium font-semibold')}>
+                    Badge requests awaiting your approval
+                  </div>
+                  <div className={tw('type-body-small text-label-secondary')}>
+                    {'Usually you would approve these from the request in the chat \u2014 ' +
+                      'this list is the backstop for one that has scrolled away. ' +
+                      'Approving invokes the requester\u2019s callback at the next ' +
+                      'settlement barrier; the badge is written into their object when ' +
+                      'THEY next scan, not now.'}
+                  </div>
+                  <ul className={tw('mt-2 flex flex-col gap-2')}>
+                    {status.pendingBadgeRequests.map(request => (
+                      <li
+                        key={request.eh}
+                        className={tw('flex items-center justify-between gap-3')}
+                      >
+                        <span className={tw('type-body-small')}>
+                          {request.name}
+                          <span className={tw('text-label-secondary')}>
+                            {` \u00b7 ${request.eh.slice(0, 12)}\u2026`}
+                          </span>
+                        </span>
+                        {/* Same pair as the in-chat notification, so an admin does
+                            not learn two different gestures for one decision. */}
+                        <span className={tw('flex shrink-0 gap-2')}>
+                          {onApproveBadge != null && (
+                            <AxoButton.Root
+                              variant="strong-affirmative"
+                              size="sm"
+                              symbol="check-circle"
+                              onClick={() =>
+                                onApproveBadge(request.eh, request.slot)
+                              }
+                            >
+                              Approve
+                            </AxoButton.Root>
+                          )}
+                          {onDismissBadge != null && (
+                            <AxoButton.Root
+                              variant="subtle-secondary"
+                              size="sm"
+                              symbol="x-circle"
+                              onClick={() => onDismissBadge(request.eh)}
+                            >
+                              Dismiss
+                            </AxoButton.Root>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  {/*
+                    NO exclusivity check on these buttons, and that is not an omission.
+
+                    An earlier version disabled Approve using
+                    `badgeBlockedReason(request.name, status.heldBadges)`. That was
+                    wrong in the direction that matters: `status.heldBadges` is the
+                    ADMIN's own badges. It would have stopped an admin who happens to
+                    hold Student from approving anybody's Faculty request, while
+                    cheerfully allowing the one grant that actually conflicts.
+
+                    The deeper point is that an admin CANNOT check this. The requester's
+                    badges live in their own zk object, which nobody else can read --
+                    that is the privacy property working as designed. So exclusivity is
+                    enforced where the holder knows their own state: the requester's own
+                    menu (`requestableBadges`), and the circuit, which silently declines
+                    a conflicting assignment. Hence the note below rather than a
+                    disabled button.
+                  */}
+                  <div className={tw('mt-2 type-caption text-label-secondary')}>
+                    {'If the requester already holds a conflicting badge (Faculty and ' +
+                      'Student are mutually exclusive), the approval is recorded and ' +
+                      'the circuit declines it. You cannot tell from here \u2014 their ' +
+                      'badges are private to them.'}
+                  </div>
+                </div>
+              )}
               <div className={tw('pt-3')}>
                 <div className={tw('mb-1 type-body-medium font-semibold')}>
                   Known limitations

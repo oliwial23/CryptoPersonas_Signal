@@ -63,6 +63,11 @@ pub enum SendError {
     Codec(#[from] record::CodecError),
     #[error(transparent)]
     Transport(#[from] TransportError),
+    /// An authorship proof could not be serialized. Distinct from `Codec`, which is
+    /// about RECORD encoding — an authorship proof is not a record (see
+    /// `Messenger::prove_authorship`).
+    #[error("could not encode an authorship proof: {0}")]
+    ProofCodec(#[from] ark_serialize::SerializationError),
 }
 
 /// A record produced and folded into the sender's own replica, ready to broadcast.
@@ -366,6 +371,93 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             member.rate(rng, replica.obj_store(), target, delta)?
         };
         self.emit(record)
+    }
+
+    /// Prove that two of OUR pseudonyms share an author, returning the encoded proof
+    /// and its public inputs.
+    ///
+    /// Not an `emit_*`: this produces no record and folds nothing into the replica. An
+    /// authorship proof is a read-only statement about our object, so it needs no
+    /// accept rule, no `Record` variant and no convergence story — it travels as
+    /// display payload and each recipient verifies it independently.
+    ///
+    /// Both pseudonyms are identified by their CONTEXT; the claimed values are derived
+    /// from our own secret key inside the proof, which is the whole content of the
+    /// claim.
+    pub fn prove_authorship(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        context_a: F,
+        context_b: F,
+    ) -> Result<Vec<u8>, SendError> {
+        let (root, claimed_a, claimed_b, proof) = {
+            let (replica, member) = self.parts_mut()?;
+            member.authorship(rng, replica.obj_store(), context_a, context_b)?
+        };
+        // PUBLIC INPUT LAYOUT: pub_args first, THEN the membership root.
+        //
+        // `[ctx_a, claimed_a, ctx_b, claimed_b, obj_root]`. The first four are the
+        // order `PseudonymArgsPairVar`'s AllocVar allocates (circuits.rs: a.context,
+        // a.claimed, b.context, b.claimed); the root comes last because
+        // `prove_statement_and_in` against a MERKLE store allocates the membership root
+        // as a public input after the predicate's own arguments. The replica documents
+        // and relies on exactly this convention for the single-pseudonym case:
+        // "[context, claimed, obj_root] — pub_args first, then the membership root"
+        // (replica/mod.rs, `memo_predicate`).
+        //
+        // Omitting the root was the original bug here. It produced a proof that
+        // generated fine and then failed verification every time, because the verifier
+        // was handed four inputs for a five-input statement. The as-a-service
+        // `make_authorship_proof` really does use four — but it proves against a
+        // SIGNATURE-based store, which exposes membership differently, so copying its
+        // layout into the Merkle path was wrong.
+        let inputs = [context_a, claimed_a, context_b, claimed_b, root];
+        Ok(personas_core::encode_authorship_proof(&proof, &inputs)?)
+    }
+
+    /// Emit a badge REQUEST (files the ticket an approver invokes).
+    pub fn emit_badge_request(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        slot: u8,
+    ) -> Result<Emitted, SendError> {
+        let record = {
+            let (replica, member) = self.parts_mut()?;
+            member.badge_request(rng, replica.obj_store(), slot)?
+        };
+        self.emit(record)
+    }
+
+    /// Emit an APPROVAL of a badge request, naming the request's envelope hash.
+    ///
+    /// Needs no member proof — it is an admin's say-so — but still goes through `emit`
+    /// so every replica folds it in and reaches the same verdict.
+    pub fn emit_badge_approve(
+        &mut self,
+        target: Eh,
+        slot: u8,
+    ) -> Result<Emitted, SendError> {
+        self.emit(Record::BadgeApprove { target, slot })
+    }
+
+    /// Prove we hold `badge` in slot `i`, returning the encoded proof and its public
+    /// inputs `[i, claimed, obj_root]`.
+    ///
+    /// Same shape as `prove_authorship`: read-only, no record, no accept rule. The badge
+    /// itself must already be in our object — it gets there only when an approver
+    /// invokes our callback with a BADGE flag and we then scan.
+    pub fn prove_badge(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        i: F,
+        badge: F,
+    ) -> Result<Vec<u8>, SendError> {
+        let (root, proof) = {
+            let (replica, member) = self.parts_mut()?;
+            member.badge(rng, replica.obj_store(), i, badge)?
+        };
+        // pub_args first, then the root — the Merkle convention.
+        Ok(personas_core::encode_badge_proof(&proof, &[i, badge, root])?)
     }
 
     /// Produce a scan absorbing every callback invoked on this member since its last

@@ -844,6 +844,77 @@ function renderToast({
     );
   }
 
+  if (toastType === ToastType.PersonaBadgeRequested) {
+    return (
+      <Toast onClose={hideToast}>
+        {'Badge requested. A group admin has to approve it before you can use it.'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaBadgeApproved) {
+    // Says "will receive", not "has", on purpose: the approval invokes a callback at
+    // the next settlement barrier, and the badge is only written into the requester's
+    // object when THEY next scan. Claiming it is already granted would be wrong by
+    // several seconds and one scan.
+    return (
+      <Toast onClose={hideToast}>
+        {'Badge approved. The requester will receive it after their next scan.'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaBadgeDismissed) {
+    // Says what actually happened. "Denied" would imply the requester was refused;
+    // nothing was sent, and they are still waiting.
+    return (
+      <Toast onClose={hideToast}>
+        {'Request hidden from your queue. Nothing was sent \u2014 it is still pending ' +
+          'for other admins.'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaScanAbsorbed) {
+    return (
+      <Toast onClose={hideToast}>
+        {`Scan absorbed your ${toast.parameters.gained} badge. You can now post ` +
+          'under it and prove it.'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaScanEmpty) {
+    // Says what to do rather than just "nothing happened". An approval settles at the
+    // next barrier, so a scan a moment too early legitimately finds nothing — and that
+    // is the single most confusing moment in the badge flow.
+    return (
+      <Toast onClose={hideToast}>
+        {'Nothing to absorb. If a badge was just approved for you, give it a few ' +
+          'seconds to settle and scan again.'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaBadgeProved) {
+    return (
+      <Toast onClose={hideToast}>
+        {`Proved your ${toast.parameters.badge} badge in zero knowledge. The group can ` +
+          'verify it without learning who you are.'}
+      </Toast>
+    );
+  }
+
+  if (toastType === ToastType.PersonaActionFailed) {
+    // The reason is engine-authored text, shown verbatim. It is more use on screen,
+    // even when it reads technically, than "Something went wrong" ever was.
+    return (
+      <Toast onClose={hideToast}>
+        {`Persona action refused: ${toast.parameters.reason}`}
+      </Toast>
+    );
+  }
+
   if (toastType === ToastType.ReactionFailed) {
     return <Toast onClose={hideToast}>{i18n('icu:Reactions--error')}</Toast>;
   }

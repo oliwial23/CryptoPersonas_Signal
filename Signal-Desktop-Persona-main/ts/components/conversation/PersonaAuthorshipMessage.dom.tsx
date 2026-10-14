@@ -1,48 +1,78 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// The bubble for an UNVERIFIED authorship claim: "~alpha and ~beta are the same person."
+// The bubble for a ZK-PROVED authorship claim: "~alpha and ~beta are the same author."
 //
-// The design problem here is the opposite of most UI work. A claim like this is
-// PERSUASIVE — it tells the reader that two anonymous voices are one person, which is
-// exactly the kind of statement that changes how a conversation is read. If it renders
-// like a fact, the reader will treat it as one. So the disclaimer is not a tooltip
-// tucked away like the badge chip's: it is inline, always visible, and cannot be
-// dismissed, because a reader who sees the claim must also see that nothing verified it.
+// This used to carry a permanent, inline disclaimer, because the claim was an
+// assertion: the sender typed two names and the bubble repeated them. It is now a
+// Groth16 proof over `authorship_pred`, verified before the message is rendered, and a
+// proof that fails verification is dropped rather than shown. So the warning block is
+// GONE — deleted in the change that made it false, not softened. A caveat that has
+// stopped being true is worse than none, because it teaches readers to discount the
+// ones that still apply.
 //
-// When `Member::authorship()` and its binding land (PERSONAS_SERVERLESS_TODO.md section
-// 1), this becomes a real proof and the warning block below should be deleted in the
-// same commit — not softened, deleted, because at that point it would be false.
+// WHERE THE NAMES COME FROM, which is the whole security property: `first` and `second`
+// are derived from the PROOF's own public inputs by `Engine::verify_authorship`, never
+// from the message body. The wire carries only the proof. Without that ordering, a
+// sender holding a valid proof about two pseudonyms they genuinely own could render it
+// beside someone else's persona names and the checkmark would be true while the
+// statement was false.
+//
+// Solid border and a check glyph, deliberately the opposite of PersonaBadgeChip's
+// dashed-and-muted treatment: a badge is still an unverified claim, this is not, and
+// the two must not look alike.
 
 import type { JSX } from 'react';
 
-import { AUTHORSHIP_DISCLAIMER } from '../../services/personasAuthorship.std.ts';
+import { AUTHORSHIP_VERIFIED_LABEL } from '../../services/personasAuthorship.std.ts';
+import { AxoSymbol } from '../../axo/AxoSymbol.dom.tsx';
 import { tw } from '../../axo/tw.dom.tsx';
 
 export function PersonaAuthorshipMessage({
   first,
   second,
-}: Readonly<{ first: string; second: string }>): JSX.Element {
+  verified = false,
+}: Readonly<{
+  first: string;
+  second: string;
+  /**
+   * False only for a message stored before proofs existed. Verification happens on
+   * receipt, so a live proof is either verified or never rendered — but old rows in the
+   * database predate that and must not be shown as proved.
+   */
+  verified?: boolean;
+}>): JSX.Element {
   return (
     <div
       className={tw(
-        'flex flex-col gap-1 rounded-lg',
-        'border border-dashed border-border-secondary',
-        'px-3 py-2'
+        'flex flex-col gap-1 rounded-lg px-3 py-2',
+        verified
+          ? 'border border-border-primary'
+          : 'border border-dashed border-border-secondary'
       )}
     >
-      <div className={tw('type-body-medium text-label-primary')}>
-        Claimed authorship
+      <div
+        className={tw(
+          'flex items-center gap-1.5 type-body-medium text-label-primary'
+        )}
+      >
+        {verified && (
+          <AxoSymbol.InlineGlyph symbol="check-circle" label={null} />
+        )}
+        {verified ? 'Proved authorship' : 'Claimed authorship (not verified)'}
       </div>
       <div className={tw('type-body-small text-label-primary')}>
         <span className={tw('font-medium')}>{first}</span>
         {' and '}
         <span className={tw('font-medium')}>{second}</span>
-        {' are claimed to be the same person.'}
+        {verified
+          ? ' are provably the same author.'
+          : ' are claimed to be the same person.'}
       </div>
-      {/* Inline and permanent, not a tooltip. See the note at the top of this file. */}
       <div className={tw('type-caption text-label-secondary')}>
-        {AUTHORSHIP_DISCLAIMER}
+        {verified
+          ? AUTHORSHIP_VERIFIED_LABEL
+          : 'This message predates proof support, so nothing checked it.'}
       </div>
     </div>
   );

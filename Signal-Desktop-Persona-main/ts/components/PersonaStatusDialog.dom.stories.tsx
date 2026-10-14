@@ -35,6 +35,15 @@ const healthyStatus: PersonaStatusForUI = {
   autoScan: true,
   stateLost: false,
   scanStuck: false,
+  banned: false,
+  authorshipZk: true,
+  heldBadges: ['Faculty'],
+  pendingBadgeRequests: [
+    // Industry is grantable alongside Faculty; Student is not, so the story shows both
+    // the actionable and the blocked case.
+    { eh: 'aa11bb22cc33dd44', slot: 3, name: 'Industry' },
+    { eh: 'ee55ff66aa77bb88', slot: 2, name: 'Student' },
+  ],
   outstandingCallbacks: 0,
 };
 

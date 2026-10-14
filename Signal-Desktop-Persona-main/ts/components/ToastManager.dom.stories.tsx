@@ -311,6 +311,32 @@ function getToast(toastType: ToastType): AnyToast {
       return { toastType: ToastType.WhoCanFindMeReadOnly };
     case ToastType.PersonaBanned:
       return { toastType: ToastType.PersonaBanned };
+    case ToastType.PersonaBadgeRequested:
+      return { toastType: ToastType.PersonaBadgeRequested };
+    case ToastType.PersonaBadgeApproved:
+      return { toastType: ToastType.PersonaBadgeApproved };
+    case ToastType.PersonaBadgeDismissed:
+      return { toastType: ToastType.PersonaBadgeDismissed };
+    case ToastType.PersonaScanAbsorbed:
+      return {
+        toastType: ToastType.PersonaScanAbsorbed,
+        parameters: { gained: 'Faculty' },
+      };
+    case ToastType.PersonaScanEmpty:
+      return { toastType: ToastType.PersonaScanEmpty };
+    case ToastType.PersonaBadgeProved:
+      return {
+        toastType: ToastType.PersonaBadgeProved,
+        parameters: { badge: 'Faculty' },
+      };
+    case ToastType.PersonaActionFailed:
+      return {
+        toastType: ToastType.PersonaActionFailed,
+        parameters: {
+          reason:
+            'emit_badge_request: refused while a callback sweep is unfinished',
+        },
+      };
     default:
       throw missingCaseError(toastType);
   }

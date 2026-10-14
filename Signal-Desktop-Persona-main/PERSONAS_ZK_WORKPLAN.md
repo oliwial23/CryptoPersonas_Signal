@@ -298,55 +298,78 @@ so "banned" in the admin's UI means "ban recorded", not "already powerless".
 
 ---
 
-## Step 4 — Badges for real
+## Step 4 — Badges for real: request -> admin approval -> scan -> prove
 
-**The blocker is a design decision, not code.** More exists than previously documented.
+**The badge machinery is already implemented IN-CIRCUIT.** This is much further along
+than this document previously said.
 
-### Already done
+`standard_callback_method` and its in-circuit twin (`personas-core/src/circuits.rs`,
+~lines 585-645) map callback arguments to badge assignments:
 
-| Piece | Location |
+| argument | effect |
 |---|---|
-| Three badge slots on the user object | `circuits.rs:120` `MsgUser { badge1, badge2, badge3 }` |
-| Request predicate | `circuits.rs:492` `standard_badge_request_predicate` (**private — needs `pub`**) |
-| Request interaction | `circuits.rs:742` `get_badge_request_interaction` |
-| Proving keys | `params.rs:85-86` `badge_pred_*`, `params.rs:91-92` `badge_request_*` — **already ship** |
-| Full client flow | `personas-client/src/badges.rs` (~181 lines) — **as-a-service only** |
-| Moderator approval route | `personas-server/src/routes/moderation.rs` — **server only** |
+| `BADGE1_FLAG` (111111111) | `badge1 = FACULTY_F` |
+| `BADGE2_FLAG` (222222222) | `badge2 = STUDENT_F` |
+| `BADGE3_FLAG` (333333333) | `badge3 = INDUSTRY_F` |
+| `BAN_FLAG` | `banned = 1` |
+| anything else | `reputation += argument` |
 
-Post predicates already carry the badge slots through unchanged (`circuits.rs:417,443,475`),
-so state is preserved — it is simply never *set* in the serverless model.
+There is even a conflict rule enforced in-circuit: Faculty is only assigned if the user
+does **not** hold Student, and vice versa (`assign_badge1 = is_badge1 & !student_exists`).
+Industry is independent.
 
-### Missing
+So approval is **exactly the ban path with a different argument**: invoke the requester's
+callback with `BADGE*_FLAG`, and their next scan writes the badge into their own object.
+The replica already does `invoke(cbs, &out, arg)` at a settlement barrier.
 
-`grep -ri badge crates/personas-messenger/src/` → effectively nothing.
+### THE CONSTRAINT THAT CHANGES THE PLAN: there is no custom badge
 
-1. **An approval authority — decide this first.** As-a-service has a moderator endpoint.
-   Serverless has no server. Who grants a badge, and how does every replica agree they
-   did? Options:
-   - a designated approver public key, fixed at group creation;
-   - an admin badge bootstrapped from the group creator, which then grants others;
-   - a threshold of existing badge holders.
-   This choice determines the record kinds and accept rules, so nothing below can be
-   written until it is settled.
-2. `Record::BadgeRequest` / `Record::BadgeGrant`, with accept rules.
-3. `Member::request_badge()` / `claim_badge()`, modelled on `personas-client/src/badges.rs`.
-4. Badge state in the replica so a member's badges are verifiable by others.
-5. napi bindings, then replace the Desktop mock (`personasBadges.std.ts`,
-   `PersonaBadgeChip.dom.tsx`) and delete `BADGE_DISCLAIMER`.
+The three badges are **circuit constants**, hashed from the literal strings
+"Faculty", "Student", "Industry" (`lazy_static` FACULTY_F / STUDENT_F / INDUSTRY_F) and
+baked into both the native and the in-circuit callback method.
 
-### Why badges are also the admin answer
+A fourth, user-chosen badge is therefore **not a UI change**. It would need:
 
-Signal's GroupV2 admin role is server-enforced for Signal's *own* group operations, but
-persona records are ordinary message bodies the storage-service never inspects. A
-client-side `areWeAdmin()` check is therefore advisory — a modified client ignores it.
+1. a new flag constant and a new branch in BOTH versions of `standard_callback_method`
+   (they must agree, or proving and verifying diverge);
+2. a fourth `badge4` field on `MsgUser`, which changes the user object's layout;
+3. **regenerating the whole ~51 MB proving-key bundle**, because the circuit changed;
+4. every participant re-running that keygen (minutes) and re-joining, because their
+   existing objects have the old layout.
 
-Worse, it cannot apply to the actions that most need it. A ban poll rides the phantom
-precisely so nobody learns who called for a revocation, so checking "is the opener an
-admin" means learning who the opener is. **"Only admins can ban" and "bans are anonymous"
-are mutually exclusive** unless the credential lives inside the proof. That is what a
-badge is.
+A free-text custom badge is harder still: the circuit compares against a *constant*, so
+an arbitrary string cannot be checked without a different construction entirely (a
+signed credential, or a Merkle set of permitted badge values).
 
----
+**Recommendation:** ship the three fixed badges. If a fourth category is needed for the
+study, add it as a fourth *constant* ("Staff", say) in one keygen-regenerating change,
+done once before participants are enrolled — not as a user-supplied string.
+
+### Staged plan
+
+| # | Piece | Where | Independently testable? |
+|---|---|---|---|
+| 1 | `get_badges()` on the addon; show held badges in the status panel | `personas-node`, status panel | yes — shows an empty set today |
+| 2 | Badge **request** record. Must create a CALLBACK (that is what approval invokes), via `get_badge_request_interaction` | `personas-messenger`, carriage | yes — admin sees a pending request |
+| 3 | Admin **approval**: set the badge flag on the requester's outstanding ticket, same mechanism as `out.banned = true` | `personas-bulletin/replica` | yes — badge appears after the requester scans |
+| 4 | **Prove** possession with `badge_pred` (`BadgesArgs { i, claimed }`), public inputs `[i, claimed, obj_root]` | messenger + addon | yes — recipients verify |
+| 5 | Composer offers only badges the user actually HOLDS, and attaches the proof | UI | yes |
+
+Two details already learned the hard way and worth not rediscovering:
+
+* **Public input layout is pub_args first, then the membership root.** `badge_pred` under
+  the Merkle store takes `[i, claimed, obj_root]`. Omitting the root is what made the
+  first authorship implementation produce proofs that never verified.
+* **`prove_statement_and_in`'s 5th positional argument differs**: `pseudonym_statement`
+  passes `false`, while the as-a-service `make_badge_proof` passes `true`. Use `true`
+  for badges, matching the working reference.
+
+### What is NOT a soundness question
+
+Admin status comes from Signal's GroupV2 admin role, which is a **client-side** gate —
+the same caveat as the ban button. A modified client could approve its own badge. Making
+approval enforceable needs an admin key in the replica's accept rule (step 3b). For a
+study with cooperating participants this is acceptable and must be stated, not hidden.
 
 ## Step 5 — Other critical issues
 
