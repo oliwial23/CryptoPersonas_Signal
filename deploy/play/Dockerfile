@@ -68,13 +68,14 @@ RUN grep -hoE 'AAp8oB0D4EV2q7hSue3Kxzh1Vc88[A-Za-z0-9+/=]*' /tmp/configuration.r
 # ---------------------------------------------------------------------------------------
 FROM node:24.17.0-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      xvfb x11vnc openbox novnc websockify dbus-x11 jq procps ca-certificates \
+      xvfb x11vnc openbox novnc websockify dbus-x11 jq procps ca-certificates openssl \
       libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 libgtk-3-0 \
       libasound2 libpulse0 libxss1 libxshmfence1 libxkbcommon0 libsecret-1-0 libnotify4 \
       fonts-dejavu-core fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=client /app /app
 COPY deploy/play/entrypoint.sh /usr/local/bin/personas-play
+COPY deploy/play/tls-relay.js /usr/local/lib/personas/tls-relay.js
 # Electron's sandbox needs user namespaces, which rootless/containerised runs often lack;
 # running as an unprivileged user plus --no-sandbox is the usual container compromise.
 RUN useradd -m -u 1000 -s /bin/bash member 2>/dev/null || useradd -m -s /bin/bash member; \

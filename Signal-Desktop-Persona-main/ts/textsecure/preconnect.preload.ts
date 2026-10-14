@@ -52,6 +52,19 @@ function resolveLibsignalNet(
     });
   }
 
+  // Personas: never let a demo instance fall through to production. localTestServer mode
+  // has no host setting (it always dials localhost), so a self-hosted server must appear
+  // as https://127.0.0.1:<port> with `certificateAuthority` set; any other serverUrl lands
+  // here, and auto-registration would then create a session on the REAL Signal network.
+  if (process.env.PERSONAS_AUTO_REGISTER || process.env.PERSONAS_KEYS_DIR) {
+    throw new Error(
+      `personas: refusing to use the production Signal network for serverUrl ${url}. ` +
+        'Point serverUrl at https://127.0.0.1:<port> (or localhost) and set ' +
+        'certificateAuthority; to reach a remote test server, relay it to localhost ' +
+        '(deploy/play/tls-relay.js).'
+    );
+  }
+
   log.info('libsignal net environment resolved to prod');
   return new Net.Net({
     env: Net.Environment.Production,

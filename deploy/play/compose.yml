@@ -17,8 +17,12 @@ x-member: &member
     # and send state are coordinated through these files (see PERSONAS_SERVER_DEPLOY.md §8).
     - roster:/shared/roster
     - keys:/shared/keys
+  # Members reach the backend through the gateway on the compose network, via a TLS relay
+  # on their own 127.0.0.1 (entrypoint.sh) -- never through the public URL, which would
+  # make libsignal-net select the production Signal network.
+  depends_on: [gateway]
   environment: &member-env
-    PERSONAS_SERVER_URL: ${PERSONAS_SERVER_URL:-https://signalserver.umiacs.umd.edu}
+    PERSONAS_UPSTREAM: ${PERSONAS_UPSTREAM:-gateway:8443}
     PERSONAS_RESET: ${PERSONAS_RESET:-0}
 
 services:

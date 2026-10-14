@@ -5,38 +5,62 @@
 # Env:
 #   PERSONAS_INSTANCE   member name, e.g. alice (required)
 #   PERSONAS_NUMBER     phone number to auto-register as (required), e.g. +12025550001
-#   PERSONAS_SERVER_URL backend the client talks to (default: the UMIACS public endpoint)
-#   PERSONAS_CA_FILE    PEM of a private CA, only if PERSONAS_SERVER_URL is NOT publicly
-#                       trusted. Node's `ca` REPLACES the trust store, so never set it for
-#                       the public endpoint.
+#   PERSONAS_UPSTREAM   host:port of the backend gateway (default gateway:8443, plain HTTP)
+#   PERSONAS_UPSTREAM_TLS=1  dial the upstream over TLS instead, e.g. for
+#                       PERSONAS_UPSTREAM=signalserver.umiacs.umd.edu:443
 #   PERSONAS_RESET=1    wipe this member's userData first (needed after a backend reset)
 #   SCREEN_GEOMETRY     Xvfb size (default 1440x900x24)
 set -euo pipefail
 
 : "${PERSONAS_INSTANCE:?set PERSONAS_INSTANCE}"
 : "${PERSONAS_NUMBER:?set PERSONAS_NUMBER}"
-SERVER_URL="${PERSONAS_SERVER_URL:-https://signalserver.umiacs.umd.edu}"
+UPSTREAM="${PERSONAS_UPSTREAM:-gateway:8443}"
 GEOMETRY="${SCREEN_GEOMETRY:-1440x900x24}"
 APP=/app
 CONFIG_DIR="$APP/config"
 USER_DATA="$HOME/.config/Signal-development-$PERSONAS_INSTANCE"
 
-# --- client config (same shape personas-demo-setup.sh writes on a laptop) -------------
-CA_JSON=null
-if [[ -n "${PERSONAS_CA_FILE:-}" ]]; then
-  CA_JSON="$(jq -Rs . < "$PERSONAS_CA_FILE")"
+# --- local TLS relay ---------------------------------------------------------------------
+# The client MUST see its server as https://127.0.0.1:<port> with a private CA: that is
+# the only shape libsignal-net accepts for a self-hosted server. Anything else (e.g. the
+# public https://signalserver.umiacs.umd.edu) silently selects PRODUCTION Signal.
+# tls-relay.js terminates TLS on localhost and forwards to the gateway.
+RELAY_PORT=8443
+TLS_DIR="$HOME/.personas-tls"
+if [[ ! -s "$TLS_DIR/leaf.pem" ]]; then
+  mkdir -p "$TLS_DIR" && chmod 700 "$TLS_DIR"
+  (
+    cd "$TLS_DIR"
+    # rustls (inside libsignal) wants a proper v3 CA and a non-CA leaf with SANs.
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout ca.key -out ca.pem \
+      -subj "/CN=personas-play-$PERSONAS_INSTANCE-ca" \
+      -addext "basicConstraints=critical,CA:TRUE" \
+      -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
+    openssl req -newkey rsa:2048 -nodes -keyout leaf.key -out leaf.csr -subj "/CN=localhost" 2>/dev/null
+    printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n' > leaf.ext
+    openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 825 \
+      -extfile leaf.ext -out leaf.pem 2>/dev/null
+    rm -f leaf.csr leaf.ext ca.srl
+  )
 fi
+node /usr/local/lib/personas/tls-relay.js "$RELAY_PORT" "$UPSTREAM" "$TLS_DIR" \
+  ${PERSONAS_UPSTREAM_TLS:+--upstream-tls} &
+for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$RELAY_PORT) 2>/dev/null && break; sleep 0.1; done
+
+# --- client config (same shape personas-demo-setup.sh writes on a laptop) -------------
+SERVER_URL="https://127.0.0.1:$RELAY_PORT"
 jq -n \
   --arg url "$SERVER_URL" \
   --arg params "$(cat "$CONFIG_DIR/.server-public-params")" \
-  --argjson ca "$CA_JSON" \
+  --arg ca "$(cat "$TLS_DIR/ca.pem")" \
   '{
      serverUrl: $url, storageUrl: $url,
      cdn: { "0": $url, "2": $url, "3": $url },
+     certificateAuthority: $ca,
      serverTrustRoots: ["BS/lfaNHzWJDFSjarF+7KQcw//aEr8TPwu2QmV9Yyzt0"],
      serverPublicParams: $params,
      openDevTools: false
-   } + (if $ca == null then {} else { certificateAuthority: $ca } end)' \
+   }' \
   > "$CONFIG_DIR/local-development.json"
 echo "{\"storageProfile\": \"development-$PERSONAS_INSTANCE\"}" \
   > "$CONFIG_DIR/local-development-$PERSONAS_INSTANCE.json"
@@ -67,7 +91,7 @@ mkdir -p "$PERSONAS_ROSTER_DIR" "$PERSONAS_KEYS_DIR"
 
 cat <<EOF
 personas-play: $PERSONAS_INSTANCE ($PERSONAS_NUMBER)
-  server     $SERVER_URL
+  server     $SERVER_URL (relay -> $UPSTREAM)
   roster     $PERSONAS_ROSTER_DIR
   keys       $PERSONAS_KEYS_DIR
   userData   $USER_DATA

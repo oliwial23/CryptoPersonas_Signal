@@ -21,7 +21,7 @@ machines) needs that coordination moved into a server first; see
                  ├─ /v1|v2/groups, /v1/storage → storage-service :8090
                  └─ everything else            → chat server     :8080
    members: alice bob carol dave erin  — Electron on Xvfb, sharing roster+keys volumes,
-            talking to the backend through the same public URL
+            each reaching the gateway through a TLS relay on its own 127.0.0.1
 ```
 
 ## Requirements
@@ -70,9 +70,16 @@ docker compose up -d --force-recreate alice bob      # then drop the flag again
 
 `docker compose down -v` wipes everything, including the shared phantom bundle and keys.
 
-## Pointing at a different backend
+## How a member reaches the backend (and why not the public URL)
 
-`PERSONAS_SERVER_URL` (in `.env`) defaults to the public endpoint, so members reach the
-backend the same way outside clients will. If hairpinning through the load balancer fails
-from inside the VM, use a URL the containers can reach directly. If it isn't publicly
-trusted, also mount its CA and set `PERSONAS_CA_FILE` (see `entrypoint.sh`).
+libsignal-net only talks to a self-hosted server in its `localTestServer` mode, which has
+no host setting: it always dials `localhost:<port>` and trusts one private root CA. Any
+other `serverUrl` makes Desktop select the **production** Signal network. (A personas
+instance now refuses to start in that case; see `ts/textsecure/preconnect.preload.ts`.)
+
+So each member runs `tls-relay.js` on its own `127.0.0.1:8443` with a CA minted at first
+boot, and the client config points there. The relay forwards plain HTTP to `gateway:8443`
+on the compose network, rewriting `Host`. `PERSONAS_UPSTREAM` changes the target;
+`PERSONAS_UPSTREAM_TLS=1` dials it over TLS, e.g. `signalserver.umiacs.umd.edu:443` for
+a member running somewhere other than the VM. The same relay is what an installable
+client (stage 2) would need on each tester's machine.
