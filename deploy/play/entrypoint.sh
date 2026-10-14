@@ -73,6 +73,20 @@ personas-play: $PERSONAS_INSTANCE ($PERSONAS_NUMBER)
   userData   $USER_DATA
 EOF
 
+# Proving keys: exactly ONE member may generate them. ensure_merkle_keys draws fresh
+# random keys whenever the file is missing, so members booting together on an empty
+# keys volume would each keep a different key set in memory and reject each other's
+# proofs. The leader (alice) generates; everyone else waits for the finished file,
+# which is published by rename, so its existence means it is complete.
+KEYS_FILE="$PERSONAS_KEYS_DIR/params/serverless-merkle/merkle_groth16_keys.bin"
+if [[ "${PERSONAS_KEYGEN_LEADER:-0}" != "1" ]]; then
+  waited=0
+  until [[ -s "$KEYS_FILE" ]]; do
+    (( waited % 30 == 0 )) && echo "waiting for the keygen leader to publish $KEYS_FILE (${waited}s)"
+    sleep 5; waited=$((waited + 5))
+  done
+fi
+
 cd "$APP"
 # Relaunch if the app exits (e.g. the user picks Quit), so the slot never goes dead.
 while true; do

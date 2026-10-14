@@ -94,6 +94,47 @@ their id and the command to vote with (`transport-slack::blocks::how_to_vote`,
 *Fixed in a3, recorded here for completeness.* It requested `user/bulletin` instead of
 `api/user/bulletin` — a 404 into an `.unwrap()`. That path could never have worked.
 
+### F8. Engines that booted together on an empty keys dir each kept different Merkle keys
+
+*Found deploying the browser-viewable demo to UMIACS (2026-10). Severity: high: members
+silently reject each other's proofs.*
+
+`ensure_merkle_keys` (`personas-bulletin::merkle::params`) generates the Groth16 key bundle
+with `OsRng` when `params/serverless-merkle/merkle_groth16_keys.bin` is missing, so every
+keygen produces a **different** key set. When several Signal-Desktop members shared one
+`PERSONAS_KEYS_DIR` and started at once, each one generated its own keys, wrote them to the same
+fixed `….bin.tmp` and `rename`d it into place. The last rename won on disk, but every engine kept
+its own keys in memory, so proofs made by one member failed verification at the others. The
+shared tmp name also let concurrent writers interleave bytes in one file.
+
+**Fix.** This mirrors `ensurePhantomMaterial` in `personasPhantom.preload.ts`:
+
+- Each writer uses a tmp file unique to its process and call (`….bin.<pid>.<seq>.tmp`), so
+  writers never share one. The tmp file is always removed afterwards.
+- The bundle is published with `std::fs::hard_link(tmp, path)`, which fails with
+  `AlreadyExists` instead of overwriting. The loser drops its own keys and loads the
+  published file, so exactly one key set ever appears at `path`. This step is what guarantees
+  correctness.
+- An advisory lock (`std::fs::File::lock` on `….bin.lock`) serializes generators, and the
+  cache is re-read once the lock is held. Callers that lose the race wait and adopt the result
+  instead of spending minutes on a keygen they would discard. The lock only saves CPU. If it
+  can't be taken (for example on a filesystem without `flock`), we log a warning and carry on.
+- A cache that exists but can't be read is deleted under the lock before regenerating.
+  Otherwise the exclusive link would keep failing against it.
+
+Tests: `merkle::params::publish_tests` exercises the publish/adopt helper and the locked path
+from 8 threads with a cheap payload, plus the corrupt-cache case.
+`tests::concurrent_ensure_merkle_keys_agree` (`#[ignore]`: full keygen, ~1.5s in release) runs the real function
+from 3 threads and compares the serialized keys byte for byte.
+
+**Still to do.** The deploy-side workaround (`PERSONAS_KEYGEN_LEADER` in
+`deploy/play/entrypoint.sh` and `compose.yml`) can be removed once the `.node` binary is
+rebuilt with this fix. Hard links require one filesystem for the tmp file and the target. They
+are in the same directory, so this holds, but a filesystem with no hard-link support would
+surface as an error, not a silent fallback. Stage 2 clients on separate machines don't share a
+directory, so this fix doesn't cover them. They need to fetch the one published bundle from the
+server instead of generating their own.
+
 ---
 
 ## O — Open

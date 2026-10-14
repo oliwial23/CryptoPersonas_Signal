@@ -77,35 +77,154 @@ pub fn ensure_merkle_keys(data_dir: &Path) -> std::io::Result<ServerKeys> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(MERKLE_KEYS_FILE);
 
-    if let Ok(bytes) = std::fs::read(&path) {
-        match ServerKeys::deserialize_with_mode(&bytes[..], Compress::No, Validate::No) {
-            Ok(keys) => {
-                tracing::info!("loaded Merkle-mode keys from cache {}", path.display());
-                return Ok(keys);
-            }
-            Err(e) => tracing::warn!(
-                "Merkle key cache at {} is unreadable ({e}); regenerating",
-                path.display()
-            ),
+    let decode = |bytes: &[u8]| {
+        ServerKeys::deserialize_with_mode(bytes, Compress::No, Validate::No)
+            .map_err(std::io::Error::other)
+    };
+    let generate = || {
+        tracing::info!(
+            "generating Merkle-mode keys into {} (first run is slow)",
+            dir.display()
+        );
+        let mut rng = ark_std::rand::rngs::OsRng;
+        let keys = generate_merkle_server_keys(&mut rng, &MerkleCStore::new());
+        let mut buf = Vec::new();
+        keys.serialize_with_mode(&mut buf, Compress::No)
+            .map_err(std::io::Error::other)?;
+        Ok((keys, buf))
+    };
+    load_or_publish(&path, decode, generate)
+}
+
+/// Load the shared artifact at `path`, or generate and publish it, such that every
+/// caller sharing `path` — threads, processes, or containers on one volume — ends up
+/// with the **same** value.
+///
+/// Keygen is randomized (OsRng), so two engines that each generate on an empty cache
+/// hold different keys and reject each other's proofs (FINDINGS F8). The old code
+/// wrote a fixed `….tmp` name and `rename`d it into place, which let the last writer
+/// silently replace the file while every earlier writer kept its own keys in memory.
+///
+/// Two layers, mirroring `ensurePhantomMaterial` in the Signal-Desktop preload:
+///
+/// 1. An advisory lock on `<path>.lock` serializes generators, and the cache is
+///    re-read once the lock is held — so a caller that waited adopts the winner's
+///    file instead of spending minutes on a keygen it would throw away. This is an
+///    optimization only: if the lock is unavailable (e.g. a filesystem without
+///    `flock`), we proceed without it.
+/// 2. [`publish_or_adopt`] — the actual correctness guarantee — publishes with an
+///    exclusive hard link and adopts the on-disk file if someone beat us to it.
+fn load_or_publish<T>(
+    path: &Path,
+    decode: impl Fn(&[u8]) -> std::io::Result<T>,
+    generate: impl FnOnce() -> std::io::Result<(T, Vec<u8>)>,
+) -> std::io::Result<T> {
+    enum Cache<T> {
+        Hit(T),
+        Missing,
+        Corrupt,
+    }
+    let try_load = |path: &Path| -> std::io::Result<Cache<T>> {
+        match std::fs::read(path) {
+            Ok(bytes) => match decode(&bytes) {
+                Ok(v) => {
+                    tracing::info!("loaded Merkle-mode keys from cache {}", path.display());
+                    Ok(Cache::Hit(v))
+                }
+                Err(e) => {
+                    tracing::warn!("key cache at {} is unreadable ({e})", path.display());
+                    Ok(Cache::Corrupt)
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Cache::Missing),
+            Err(e) => Err(e),
         }
+    };
+
+    // Fast path: no lock needed to read an already-published cache.
+    if let Cache::Hit(v) = try_load(path)? {
+        return Ok(v);
     }
 
-    tracing::info!(
-        "generating Merkle-mode keys into {} (first run is slow)",
-        dir.display()
-    );
-    let mut rng = ark_std::rand::rngs::OsRng;
-    let keys = generate_merkle_server_keys(&mut rng, &MerkleCStore::new());
+    let lock_path = sibling(path, ".lock");
+    let _lock = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .and_then(|f| f.lock().map(|()| f))
+    {
+        Ok(f) => Some(f), // released when dropped (or when the process exits)
+        Err(e) => {
+            tracing::warn!(
+                "could not lock {} ({e}); generating without it",
+                lock_path.display()
+            );
+            None
+        }
+    };
 
-    let mut buf = Vec::new();
-    keys.serialize_with_mode(&mut buf, Compress::No)
-        .map_err(std::io::Error::other)?;
-    // Atomic publish: write a temp file then rename, so a crash mid-write never
-    // leaves a truncated key bundle a later boot would half-read.
-    let tmp = dir.join(format!("{MERKLE_KEYS_FILE}.tmp"));
-    std::fs::write(&tmp, &buf)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(keys)
+    // Someone may have published while we waited for the lock.
+    match try_load(path)? {
+        Cache::Hit(v) => return Ok(v),
+        Cache::Corrupt => {
+            // A corrupt cache would make the exclusive link below fail forever, so
+            // clear it. Under the lock only one caller does this per generation.
+            tracing::warn!("removing unreadable key cache {}", path.display());
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Cache::Missing => {}
+    }
+
+    let (ours, bytes) = generate()?;
+    publish_or_adopt(path, ours, &bytes, decode)
+}
+
+/// Publish `bytes` at `path` unless someone else already has; return `ours` if we
+/// published, else the decoded on-disk value.
+///
+/// The bytes go to a tmp file unique to this process **and** call (so concurrent
+/// writers never share one), which is then hard-linked to `path`. `link(2)` fails
+/// with `AlreadyExists` instead of overwriting, so exactly one caller's bytes ever
+/// appear at `path`, and it never holds a partially written file. The tmp file is
+/// always removed.
+fn publish_or_adopt<T>(
+    path: &Path,
+    ours: T,
+    bytes: &[u8],
+    decode: impl Fn(&[u8]) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = sibling(path, &format!(".{}.{seq}.tmp", std::process::id()));
+
+    let result = std::fs::write(&tmp, bytes).and_then(|()| std::fs::hard_link(&tmp, path));
+    let _ = std::fs::remove_file(&tmp);
+    match result {
+        Ok(()) => {
+            tracing::info!("published new key cache {}", path.display());
+            Ok(ours)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            tracing::info!(
+                "lost the publish race for {}; adopting the published keys",
+                path.display()
+            );
+            decode(&std::fs::read(path)?)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `path` with `suffix` appended to its file name (`keys.bin` → `keys.bin<suffix>`).
+fn sibling(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 /// Build the scan public data for Merkle mode: the callback membership and
@@ -283,6 +402,119 @@ pub fn generate_merkle_scan_key(
     scan_interaction.generate_keys::<H, Snark, Cr, MerkleOStore>(rng, None, dummy_scan, true)
 }
 
+// Concurrency tests for the publish step, with a cheap payload standing in for the
+// real key bundle (which takes minutes to generate). See FINDINGS F8.
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    const THREADS: usize = 8;
+
+    fn decode(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+        Ok(bytes.to_vec())
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("personas-publish-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn leftover_tmp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// Without the lock, every thread "generates" a distinct payload and races to
+    /// publish: exactly one wins, and every thread returns the winner's bytes.
+    #[test]
+    fn concurrent_publishers_converge_on_one_value() {
+        let dir = scratch_dir("race");
+        let path = dir.join("keys.bin");
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let (path, barrier) = (path.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let ours = vec![i as u8; 4096];
+                    barrier.wait();
+                    publish_or_adopt(&path, ours.clone(), &ours, decode).unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(results.iter().all(|r| *r == on_disk), "callers diverged");
+        assert!(leftover_tmp_files(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The full path: concurrent callers on an empty dir all return identical
+    /// bytes, and the lock means only one of them actually generates.
+    #[test]
+    fn concurrent_load_or_publish_generates_once() {
+        let dir = scratch_dir("lock");
+        let path = dir.join("keys.bin");
+        let generated = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let (path, barrier, generated) = (path.clone(), barrier.clone(), generated.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_publish(&path, decode, || {
+                        generated.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        let v = vec![i as u8; 4096];
+                        Ok((v.clone(), v))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(results.iter().all(|r| *r == on_disk), "callers diverged");
+        assert_eq!(
+            generated.load(Ordering::SeqCst),
+            1,
+            "lock should serialize keygen"
+        );
+        assert!(leftover_tmp_files(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable cache is replaced rather than adopted (the exclusive link
+    /// would otherwise keep failing against it).
+    #[test]
+    fn corrupt_cache_is_regenerated() {
+        let dir = scratch_dir("corrupt");
+        let path = dir.join("keys.bin");
+        std::fs::write(&path, b"garbage").unwrap();
+        let strict = |b: &[u8]| {
+            if b == b"good" {
+                Ok(b.to_vec())
+            } else {
+                Err(std::io::Error::other("bad"))
+            }
+        };
+        let got =
+            load_or_publish(&path, strict, || Ok((b"good".to_vec(), b"good".to_vec()))).unwrap();
+        assert_eq!(got, b"good");
+        assert_eq!(std::fs::read(&path).unwrap(), b"good");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 // End-to-end SNARK tests. These generate real Groth16 keys and proofs, which is
 // impractically slow in a debug build, so they are `#[ignore]` by default. Run
 // them with:
@@ -317,6 +549,31 @@ mod tests {
         let mut obj = ObjT::new();
         obj.push(user.commit::<H>(), Fr::from(0), vec![]);
         (user, obj)
+    }
+
+    /// Real `ensure_merkle_keys` from several threads on one empty dir: all must
+    /// return byte-identical keys (FINDINGS F8). Full keygen: ~1.5s in release, slow in debug.
+    #[test]
+    #[ignore = "generates the full Merkle key bundle; run with --release --ignored"]
+    fn concurrent_ensure_merkle_keys_agree() {
+        let dir = std::env::temp_dir().join(format!("personas-merkle-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let (dir, barrier) = (dir.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let keys = ensure_merkle_keys(&dir).unwrap();
+                    let mut buf = Vec::new();
+                    keys.serialize_with_mode(&mut buf, Compress::No).unwrap();
+                    buf
+                })
+            })
+            .collect();
+        let bufs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(bufs.windows(2).all(|w| w[0] == w[1]), "engines diverged");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A standard post proves object membership against the object **root** as a

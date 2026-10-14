@@ -38,7 +38,8 @@ services:
     <<: *member
     hostname: alice
     volumes: [roster:/shared/roster, keys:/shared/keys, alice:/home/member]
-    environment: { <<: *member-env, PERSONAS_INSTANCE: alice, PERSONAS_NUMBER: "+12025550001" }
+    # alice generates the shared proving keys; the others wait for them (entrypoint.sh).
+    environment: { <<: *member-env, PERSONAS_INSTANCE: alice, PERSONAS_NUMBER: "+12025550001", PERSONAS_KEYGEN_LEADER: "1" }
   bob:
     <<: *member
     hostname: bob

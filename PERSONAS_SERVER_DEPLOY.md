@@ -96,6 +96,26 @@ podman info --format '{{.Store.GraphRoot}} {{.Store.GraphDriverName}}'
 
 The warning must be **gone**. If it is still printed, the store did not move.
 
+**Then move image-build temp files off `/var/tmp`** (4 GB here). Buildah stages each layer
+there before committing it, and the `deploy/play` client layer is larger than that, so the
+build gets all the way through `pnpm run build:dev` and then fails with `no space left on
+device` while writing `/var/tmp/buildah…/layer`:
+
+```sh
+mkdir -p "$WORK/tmp"
+printf '[engine]\nimage_copy_tmp_dir = "%s"\n' "$WORK/tmp" > ~/.config/containers/containers.conf
+echo 'export TMPDIR="$WORK/tmp"' >> ~/.bashrc     # podman build honours TMPDIR first
+```
+
+And let short image names resolve to Docker Hub — scripts use `caddy:2` and the like, and
+RHEL's default prompts for a registry, which fails without a TTY (`short-name resolution
+enforced but cannot prompt without a TTY`):
+
+```sh
+printf 'unqualified-search-registries = ["docker.io"]\nshort-name-mode = "permissive"\n' \
+  > ~/.config/containers/registries.conf
+```
+
 ```sh
 systemctl --user enable --now podman.socket
 loginctl enable-linger "$USER"        # or the socket dies when you log out
@@ -186,7 +206,9 @@ is not path-routing to storage-service, and groups will not work.
 ## 4. Stopping everything
 
 ```sh
-pkill -f 'mvnw|TextSecure' ; pkill -f storage-service
+# The chat server runs inside its Maven JVM, whose command line names neither mvnw nor the
+# main class, so match the profile flag. EmulatorMain is storage-service's Bigtable emulator.
+pkill -f 'Ptest-server|StorageService|EmulatorMain'
 podman ps -q  | xargs -r podman stop
 podman ps -aq | xargs -r podman rm
 podman ps -a                                  # should be empty

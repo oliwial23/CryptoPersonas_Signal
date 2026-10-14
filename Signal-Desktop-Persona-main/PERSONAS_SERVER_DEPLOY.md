@@ -164,7 +164,9 @@ is not path-routing to storage-service, and groups will not work.
 ## 4. Stopping everything
 
 ```sh
-pkill -f 'mvnw|TextSecure' ; pkill -f storage-service
+# The chat server runs inside its Maven JVM, whose command line names neither mvnw nor the
+# main class, so match the profile flag. EmulatorMain is storage-service's Bigtable emulator.
+pkill -f 'Ptest-server|StorageService|EmulatorMain'
 podman ps -q  | xargs -r podman stop
 podman ps -aq | xargs -r podman rm
 podman ps -a                                  # should be empty

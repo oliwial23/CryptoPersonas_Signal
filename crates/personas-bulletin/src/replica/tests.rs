@@ -41,7 +41,8 @@ fn placeholder_keys() -> super::ReplicaKeys {
         pseudo: vk.clone(),
         pseudo_rate: vk.clone(),
         scan: vk.clone(),
-        pseudonym_pred: vk,
+        pseudonym_pred: vk.clone(),
+        badge_request: vk,
     }
 }
 

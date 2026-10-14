@@ -83,6 +83,7 @@ fn standard_only_keys(vk: &VK) -> ReplicaKeys {
         pseudo_rate: vk.clone(),
         scan: vk.clone(),
         pseudonym_pred: vk.clone(),
+        badge_request: vk.clone(),
     }
 }
 
@@ -229,6 +230,7 @@ fn full_keys(std_vk: &VK, scan_vk: &VK, pred_vk: &VK) -> ReplicaKeys {
         pseudo_rate: std_vk.clone(),
         scan: scan_vk.clone(),
         pseudonym_pred: pred_vk.clone(),
+        badge_request: std_vk.clone(),
     }
 }
 
