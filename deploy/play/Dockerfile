@@ -41,7 +41,11 @@ WORKDIR /app
 COPY Signal-Desktop-Persona-main/ ./
 # No .git in the context, so getBuildCreationTimestamp needs this or it shells out to git.
 # The build expires 30-90 days after this timestamp; rebuild the image before then.
+# Both pnpm caches are mounted so neither is baked into the layer: pnpm 11 keeps its
+# metadata cache in ~/.cache/pnpm (several GB), separate from the store, and an
+# unmounted copy filled the VM's /srv on every rebuild.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    --mount=type=cache,target=/root/.cache/pnpm \
     export SOURCE_DATE_EPOCH="$(date +%s)" \
  && pnpm install --frozen-lockfile \
  && pnpm run build:dev

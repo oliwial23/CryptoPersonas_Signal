@@ -103,6 +103,15 @@ EOF
 # proofs. The leader (alice) generates; everyone else waits for the finished file,
 # which is published by rename, so its existence means it is complete.
 KEYS_FILE="$PERSONAS_KEYS_DIR/params/serverless-merkle/merkle_groth16_keys.bin"
+if [[ "${PERSONAS_KEYGEN_LEADER:-0}" == "1" && ! -s "$KEYS_FILE" ]]; then
+  # Generate them HERE, before the app starts. Inside the app, keygen is a side effect of
+  # building the ZK engine, and the engine now waits for the phantom bundle -- which only
+  # exists once this member creates a group, which needs the other members to be up,
+  # which needs these keys. Building a throwaway observer engine runs the same keygen
+  # (ensure_merkle_keys) and publishes the file the others are waiting for.
+  echo "generating the shared proving keys into $PERSONAS_KEYS_DIR"
+  node -e "new (require('$APP/packages/personas-engine/index.cjs').Engine)({ dataDir: process.env.PERSONAS_KEYS_DIR, member: false })"
+fi
 if [[ "${PERSONAS_KEYGEN_LEADER:-0}" != "1" ]]; then
   waited=0
   until [[ -s "$KEYS_FILE" ]]; do
