@@ -6,6 +6,9 @@ Requires=personas-minio.service
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/personas/env
+# This VM's journal is admin-only (journalctl --user shows nothing), so log to a file.
+StandardOutput=append:@WORK@/logs/personas-chat.log
+StandardError=inherit
 ExecStart=@REPO@/deploy/signal-test-server/boot.sh
 # SIGTERM to the JVM only, so its shutdown hooks stop the test containers it started.
 KillMode=mixed

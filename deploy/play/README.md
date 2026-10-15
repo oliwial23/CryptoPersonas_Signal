@@ -98,7 +98,7 @@ source ~/.bashrc && ../systemd/install.sh                 # gateway + directory
 # or: PERSONAS_PLAY_MEMBERS="alice bob carol" ../systemd/install.sh
 systemctl --user start personas-minio personas-chat personas-storage personas-play
 systemctl --user status 'personas-*'
-journalctl --user -u personas-chat -f
+tail -f $WORK/logs/personas-chat.log
 ```
 
 A restart of the chat server wipes every account. Installed clients notice (their

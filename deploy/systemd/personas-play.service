@@ -7,6 +7,9 @@ Wants=podman.socket
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=%h/.config/personas/env
+# This VM's journal is admin-only (journalctl --user shows nothing), so log to a file.
+StandardOutput=append:@WORK@/logs/personas-play.log
+StandardError=inherit
 WorkingDirectory=@REPO@/deploy/play
 # Rootless podman does not restart containers after a reboot by itself; this does.
 ExecStart=@WORK@/tools/docker compose up -d gateway directory $PERSONAS_PLAY_MEMBERS

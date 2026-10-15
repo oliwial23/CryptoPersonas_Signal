@@ -9,7 +9,7 @@
 # (`loginctl enable-linger $USER`), which lets user units start at boot without a login.
 #
 # Afterwards:  systemctl --user status 'personas-*'
-#              journalctl --user -u personas-chat -f
+#              tail -f $WORK/logs/personas-chat.log
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -38,7 +38,7 @@ PERSONAS_PLAY_MEMBERS=${PERSONAS_PLAY_MEMBERS:-}
 ENV
 chmod 600 ~/.config/personas/env
 
-mkdir -p ~/.config/systemd/user
+mkdir -p ~/.config/systemd/user "$WORK/logs"
 for unit in "$HERE"/personas-*.service; do
   sed -e "s#@REPO@#$REPO#g" -e "s#@WORK@#$WORK#g" "$unit" > ~/.config/systemd/user/"$(basename "$unit")"
 done
