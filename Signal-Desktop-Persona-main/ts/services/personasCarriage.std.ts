@@ -149,8 +149,8 @@ export type PersonaChoice =
 // rate-limited post whose index is at or above it, so offering more slots would produce
 // posts nobody accepts. Each context has its own three (persona = H(sk, context, index)).
 //
-// (The circuit's own bound, `MAX_PSEUDO` = 4 there, only checks `i != 4`; the replica's
-// accept rule is what actually enforces the limit.)
+// Since protocol version 3 the circuit itself proves the index is 0, 1 or 2 (`MAX_PSEUDO`
+// = 3 there too), and the replica checks it again.
 export const MAX_PSEUDO = 3;
 
 // Wrap raw record bytes for carriage as a message body. Default marker is the

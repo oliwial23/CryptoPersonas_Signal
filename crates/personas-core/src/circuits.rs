@@ -42,16 +42,19 @@ use blake2::{Blake2s256, Digest};
 use crate::{Args, ArgsVar, CStore, Cr, H, OStore, PK, Snark};
 
 pub const NUM_INTS_BEFORE_SCAN: usize = 200;
-/// The bound inside `standard_pseudo_rate_predicate`. Part of the circuit, so changing it
-/// changes the proving keys every member downloads — leave it, and set the group's actual
-/// limit with [`RATE_LIMITED_PERSONAS_PER_CONTEXT`].
-pub const MAX_PSEUDO: usize = 4;
 /// How many rate-limited personas a member has in each context: persona `i` of context
-/// `c` is `H(sk, c, i)` for `i < 3`, so every context has its own three, unlinkable to any
-/// other context's. Enforced by the replica's accept rule (the index is a public input of
-/// every rate-limited post), which is why it can be lower than the circuit's `MAX_PSEUDO`.
-pub const RATE_LIMITED_PERSONAS_PER_CONTEXT: usize = 3;
-const _: () = assert!(RATE_LIMITED_PERSONAS_PER_CONTEXT < MAX_PSEUDO);
+/// `c` is `H(sk, c, i)` for `i` in `0..MAX_PSEUDO`, so every context has its own three,
+/// unlinkable to any other context's.
+///
+/// ENFORCED IN THE CIRCUIT (`standard_pseudo_rate_predicate` proves `i` is one of
+/// `0..MAX_PSEUDO`). Part of the circuit, so changing it changes the proving keys every
+/// member downloads. (Until protocol version 3 the circuit only proved `i != 4`, so any
+/// `i` above 4 also satisfied it; the replica's accept rule enforced the limit instead,
+/// and still checks it as a second line.)
+pub const MAX_PSEUDO: usize = 3;
+/// The group's per-context limit, as the replica and client name it. The same number as
+/// the circuit's bound since version 3.
+pub const RATE_LIMITED_PERSONAS_PER_CONTEXT: usize = MAX_PSEUDO;
 pub const BAN_FLAG: u64 = 999999999;
 pub const BADGE1_FLAG: u64 = 111111111;
 pub const BADGE2_FLAG: u64 = 222222222;
@@ -588,7 +591,15 @@ fn standard_pseudo_rate_predicate<'a>(
     let claimed = pub_args.claimed;
     let i = pub_args.i;
 
-    let x9 = i.is_neq(&FpVar::Constant(F::from(MAX_PSEUDO as u64)))?;
+    // THE RATE LIMIT, IN-CIRCUIT: `i` is one of 0, 1, ..., MAX_PSEUDO - 1, proved as
+    // (i - 0)(i - 1)...(i - (MAX_PSEUDO - 1)) == 0 — a product of field elements is zero
+    // exactly when one factor is. (This used to be `i != MAX_PSEUDO`, which every larger
+    // `i` also satisfied, so the limit was not enforced by the proof at all.)
+    let mut vanishing = FpVar::Constant(F::from(1u64));
+    for k in 0..MAX_PSEUDO {
+        vanishing *= &i - FpVar::Constant(F::from(k as u64));
+    }
+    let x9 = vanishing.is_zero()?;
 
     let derived = Poseidon::<2>::hash_in_zk(&[tu_new.data.sk.clone(), context, i])?;
     let x10 = derived.is_eq(&claimed)?;
@@ -1242,5 +1253,54 @@ mod join_and_reset_predicate_tests {
         let mut banned = fresh();
         banned.data.banned = F::from(1u64);
         assert!(!satisfied(not_banned_pred, &banned, F::from(0u64)), "banned");
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_circuit_tests {
+    use super::*;
+    use ark_r1cs_std::R1CSVar;
+    use ark_relations::r1cs::ConstraintSystem;
+    use zk_callbacks::crypto::hash::HasherZK;
+
+    /// Whether the rate-limited post predicate accepts persona index `i`, all else valid.
+    fn accepts(i: u64) -> bool {
+        let mut rng = rand::thread_rng();
+        let old = User::create(
+            MsgUser {
+                sk: F::from(77u64),
+                ..Default::default()
+            },
+            &mut rng,
+        );
+        let mut new = old.clone();
+        new.data.num_interactions_since_last_scan += F::from(1u64);
+        let context = F::from(4242u64);
+        let claimed = <Poseidon<2>>::hash(&[old.data.sk, context, F::from(i)]);
+
+        let cs = ConstraintSystem::<F>::new_ref();
+        let old_var = UserVar::new_witness(cs.clone(), || Ok(old)).unwrap();
+        let new_var = UserVar::new_witness(cs.clone(), || Ok(new)).unwrap();
+        let args = PseudonymArgsRateVar::new_input(cs.clone(), || {
+            Ok(PseudonymArgsRate {
+                context,
+                claimed,
+                i: F::from(i),
+            })
+        })
+        .unwrap();
+        let ok = standard_pseudo_rate_predicate(&old_var, &new_var, args, ()).unwrap();
+        ok.value().unwrap() && cs.is_satisfied().unwrap()
+    }
+
+    #[test]
+    fn exactly_three_rate_limited_personas_per_context() {
+        assert_eq!(MAX_PSEUDO, 3);
+        for i in 0..3 {
+            assert!(accepts(i), "persona #{} must be provable", i + 1);
+        }
+        for i in [3, 4, 5, 100] {
+            assert!(!accepts(i), "persona index {i} must NOT be provable");
+        }
     }
 }

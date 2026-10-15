@@ -795,13 +795,11 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                         )
                     }
                     Flavour::PseudoRate => {
-                        // THE RATE LIMIT. `standard_pseudo_rate_predicate` only proves
-                        // `i != MAX_PSEUDO`, so i = MAX_PSEUDO + 1, + 2, ... satisfy it and
-                        // a member could mint unlimited "rate-limited" personas in a
-                        // context. `i` is a public input carried in the record, so the
-                        // accept rule enforces the group's limit here — three per context
-                        // (`RATE_LIMITED_PERSONAS_PER_CONTEXT`) — with no circuit change
-                        // and no new keys.
+                        // THE RATE LIMIT, checked again here. The circuit proves `i` is
+                        // one of 0..MAX_PSEUDO since protocol version 3; `i` is also a
+                        // public input carried in the record, so the accept rule refuses
+                        // an out-of-range index outright — a second line, and a clear
+                        // reason, rather than a failed proof.
                         let limit = F::from(RATE_LIMITED_PERSONAS_PER_CONTEXT as u64);
                         if extra.0[2].into_bigint() >= limit.into_bigint() {
                             return Status::Rejected("persona index out of range");
