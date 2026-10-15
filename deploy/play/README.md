@@ -53,6 +53,33 @@ curl -s -o /dev/null -w '%{http_code}\n' https://signalserver.umiacs.umd.edu/pla
 docker compose logs -f alice
 ```
 
+## Proving keys from the server (recommended)
+
+Every member must prove against an identical Groth16 key set. Without a pin, alice
+generates one at first boot and the others share it through the `keys` volume. To run the
+members the way installed clients run instead — downloading the keys from the gateway and
+verifying them against a pinned SHA-256 — generate them once on the server:
+
+```sh
+./keys.sh                                   # one-time keygen into the keys volume; writes the pin to .env
+docker compose up -d --force-recreate gateway alice bob carol
+```
+
+The gateway then serves them at `/personas/keys/merkle_groth16_keys.bin`, and each member
+downloads its own copy into `~/.personas-keys` and refuses any file whose hash differs.
+Whoever generates the keys could forge proofs, so this puts that trust on the server, in
+one known place. `keys.sh` never regenerates existing keys; a new set means a new pin for
+every client.
+
+## After a `git pull`
+
+The gateway reads `Caddyfile` only when its container is created, and `git pull` replaces
+the file, so a running gateway keeps the old routes. When the pull changed `Caddyfile`:
+
+```sh
+docker compose up -d --force-recreate gateway
+```
+
 ## Playing
 
 Open `https://signalserver.umiacs.umd.edu/play/`, log in, pick a member. The first launch

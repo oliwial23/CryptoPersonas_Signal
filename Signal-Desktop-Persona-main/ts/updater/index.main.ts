@@ -8,6 +8,7 @@ import { MacOSUpdater } from './macos.main.ts';
 import { WindowsUpdater } from './windows.main.ts';
 import { LinuxAppImageUpdater } from './linuxAppImage.main.ts';
 import { initLinux } from './linux.main.ts';
+import { isPersonasBuild } from '../../app/personas.main.ts';
 
 let initialized = false;
 
@@ -68,5 +69,6 @@ export function onRestartCanceled(): void {
 }
 
 function autoUpdateDisabled() {
-  return !app.isPackaged || !config.get('updatesEnabled');
+  // A personas build must never "update" itself to the real Signal Desktop.
+  return !app.isPackaged || !config.get('updatesEnabled') || isPersonasBuild();
 }

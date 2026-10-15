@@ -44,6 +44,18 @@
 			reverse_proxy directory:8080
 		}
 
+		# --- the canonical proving keys (keys.sh) ----------------------------------------
+		# Public by nature (every member holds them). Clients verify the SHA-256 pinned in
+		# their build, so this is a plain file download.
+		handle /personas/keys/merkle_groth16_keys.bin {
+			root * /srv/keys/params/serverless-merkle
+			rewrite * /merkle_groth16_keys.bin
+			file_server
+		}
+		handle /personas/keys/* {
+			respond "not found" 404
+		}
+
 		# --- Signal backend (same routing as plain-proxy.sh / tls-proxy.sh) -------------
 		handle @storage {
 			reverse_proxy {$STORAGE_UPSTREAM:host.docker.internal:8090}

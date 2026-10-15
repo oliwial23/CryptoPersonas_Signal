@@ -36,6 +36,8 @@ import {
   encodeBadgeProof,
 } from './personasCarriage.std.ts';
 import { hasPhantomMaterial } from './personasPhantom.preload.ts';
+import { ensureProvingKeys, getPinnedKeysSha256 } from './personasKeys.preload.ts';
+import { drop } from '../util/drop.std.ts';
 import {
   getBarrierSchedule,
   ingestTimestampFor,
@@ -72,6 +74,10 @@ function getKeysDir(): string {
 
 let engine: Engine | undefined;
 let constructionFailed = false;
+// With a pinned key hash, the engine is built only once the downloaded keys verified.
+let keysReady = false;
+let keysRetry: NodeJS.Timeout | undefined;
+const KEYS_RETRY_MS = 30_000;
 
 // The engine singleton for this instance (one Member per process). Built lazily on
 // first use; construction reads the ~51MB key bundle and mints this member's
@@ -85,6 +91,11 @@ export function getPersonasEngine(): Engine | undefined {
   // share, and the replica's schedule is fixed at construction. Background warms the
   // engine again the moment the bundle is minted or adopted.
   if (!hasPhantomMaterial()) {
+    return undefined;
+  }
+  // And for the group's proving keys when they come from our server (personasKeys):
+  // built before they arrive, the engine would generate a private, incompatible set.
+  if (getPinnedKeysSha256() && !keysReady) {
     return undefined;
   }
   const dataDir = getKeysDir();
@@ -129,7 +140,22 @@ export function warmPersonasEngine(): void {
   if (!isPersonasEngineEnabled()) {
     return;
   }
-  getPersonasEngine();
+  // Fetch (or verify) the pinned proving keys first; a no-op without a pinned hash.
+  drop(
+    (async () => {
+      keysReady = await ensureProvingKeys(getKeysDir());
+      if (keysReady) {
+        getPersonasEngine();
+      } else if (!keysRetry) {
+        // Server unreachable or a bad download: try again shortly rather than leaving
+        // this member without an engine until the next restart.
+        keysRetry = setTimeout(() => {
+          keysRetry = undefined;
+          warmPersonasEngine();
+        }, KEYS_RETRY_MS);
+      }
+    })()
+  );
 }
 
 // The result of examining an incoming message body for a personas record.

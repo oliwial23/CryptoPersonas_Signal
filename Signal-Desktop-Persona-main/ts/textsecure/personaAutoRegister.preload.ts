@@ -104,7 +104,10 @@ export async function ensureDemoProfileUploaded(): Promise<void> {
   }
   const us = window.ConversationController.getOurConversationOrThrow();
   const firstName =
-    process.env.NODE_APP_INSTANCE?.trim() || us.get('e164') || 'Personas';
+    process.env.PERSONAS_DISPLAY_NAME?.trim() ||
+    process.env.NODE_APP_INSTANCE?.trim() ||
+    us.get('e164') ||
+    'Personas';
   us.set({ profileName: firstName });
   await DataWriter.updateConversation(us.attributes);
   try {

@@ -45,6 +45,9 @@ const DEFAULT_ROSTER_DIR = join(tmpdir(), 'personas-demo-roster');
 const POLL_INTERVAL_MS = 5000;
 // Re-publish our own entry this often, so a restarted directory relearns us.
 const REPUBLISH_INTERVAL_MS = 5 * 60_000;
+// After a FAILED publish (directory down, gateway not routing it yet), retry this soon
+// instead of staying invisible to everyone until the next periodic republish.
+const PUBLISH_RETRY_MS = 15_000;
 const DIRECTORY_PATH = '/personas/directory';
 const DIRECTORY_TIMEOUT_MS = 10_000;
 
@@ -83,7 +86,10 @@ async function myEntry(): Promise<RosterEntry | undefined> {
     aci,
     pni: pni ?? undefined,
     e164,
-    name: process.env.NODE_APP_INSTANCE?.trim() || e164,
+    name:
+      process.env.PERSONAS_DISPLAY_NAME?.trim() ||
+      process.env.NODE_APP_INSTANCE?.trim() ||
+      e164,
     profileKey: profileKeyBytes ? Bytes.toBase64(profileKeyBytes) : undefined,
   };
 }
@@ -193,6 +199,8 @@ function directoryRequest(
   });
 }
 
+let publishRetry: NodeJS.Timeout | undefined;
+
 async function publishToDirectory(): Promise<void> {
   const entry = await myEntry();
   if (!entry) {
@@ -203,7 +211,15 @@ async function publishToDirectory(): Promise<void> {
     await directoryRequest('PUT', `/${aci}`, rest, await directorySecret());
     log.info(`publishToDirectory: published ${entry.name} (${aci})`);
   } catch (error) {
-    log.warn(`publishToDirectory: ${toLogFormat(error)}`);
+    log.warn(
+      `publishToDirectory: ${toLogFormat(error)}; retrying in ${PUBLISH_RETRY_MS / 1000}s`
+    );
+    if (!publishRetry) {
+      publishRetry = setTimeout(() => {
+        publishRetry = undefined;
+        drop(publishToDirectory());
+      }, PUBLISH_RETRY_MS);
+    }
   }
 }
 

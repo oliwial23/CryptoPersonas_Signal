@@ -11,6 +11,8 @@ stylesheets/*.css.map
 .DS_Store
 config/local.json
 config/local-*
+# Personas build settings, written when packaging (see config/personas.example.json).
+config/personas.json
 *.provisionprofile
 release/
 /dev-app-update.yml

@@ -9,6 +9,7 @@ import { start } from './base_config.node.ts';
 import config from './config.main.ts';
 import * as Errors from '../ts/types/errors.std.ts';
 import OS from '../ts/util/os/osMain.node.ts';
+import { isPersonasBuild } from './personas.main.ts';
 
 let userData: string | undefined;
 // Use separate data directory for benchmarks & development
@@ -20,6 +21,10 @@ if (config.has('storagePath')) {
     // oxlint-disable-next-line typescript/restrict-template-expressions
     `Signal-${config.get('storageProfile')}`
   );
+} else if (isPersonasBuild()) {
+  // Its own data folder, so a personas build can never open (or damage) a real Signal
+  // Desktop installation's account on the same machine.
+  userData = join(app.getPath('appData'), 'Signal-Personas');
 } else if (OS.isAppImage()) {
   userData = join(app.getPath('appData'), `${app.getName()} AppImage`);
 }

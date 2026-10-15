@@ -143,6 +143,7 @@ import { getAppRootDir } from '../ts/util/appRootDir.main.ts';
 import { trackHeapSize } from '../ts/util/oomNotifier.node.ts';
 import { sendDummyKeystroke } from './WindowsNotifications.main.ts';
 import { maybeMigrateSafeStorageBackend } from '../ts/util/linuxPasswordStoreMigration.main.ts';
+import { startPersonasRuntime } from './personas.main.ts';
 
 const { chmod, realpath, writeFile } = fsExtra;
 const { get, pick, isNumber, isBoolean, some, debounce, noop } = lodash;
@@ -2113,6 +2114,10 @@ electronProtocol.registerSchemesAsPrivileged([
 // Some APIs can only be used after this event occurs.
 let ready = false;
 app.on('ready', async () => {
+  // Personas build: start the localhost relay and set the PERSONAS_* environment before
+  // any window (and so any renderer process, which inherits it) exists. No-op otherwise.
+  await startPersonasRuntime(app.getPath('userData'));
+
   dns.setFallback(await getDNSFallback());
   if (DISABLE_IPV6) {
     dns.setIPv6Enabled(false);
@@ -2879,6 +2884,9 @@ function removeDarkOverlay() {
 
 ipc.on('get-config', async event => {
   const theme = await getResolvedThemeSetting();
+  // Personas build: our server through the localhost relay, in place of the production
+  // values below. undefined for a normal build.
+  const personas = await startPersonasRuntime(app.getPath('userData'));
 
   const svr2Config = safeParseLoose(svr2ConfigSchema, {
     svr2Url: config.get<string | null>('svr2Url') || undefined,
@@ -2905,14 +2913,15 @@ ipc.on('get-config', async event => {
     buildCreation: config.get<number>('buildCreation'),
     buildExpiration: config.get<number>('buildExpiration'),
     challengeUrl: config.get<string>('challengeUrl'),
-    serverUrl: config.get<string>('serverUrl'),
-    storageUrl: config.get<string>('storageUrl'),
+    serverUrl: personas?.serverUrl ?? config.get<string>('serverUrl'),
+    storageUrl: personas?.serverUrl ?? config.get<string>('storageUrl'),
     updatesUrl: config.get<string>('updatesUrl'),
     resourcesUrl: config.get<string>('resourcesUrl'),
-    cdnUrl0: config.get<string>('cdn.0'),
-    cdnUrl2: config.get<string>('cdn.2'),
-    cdnUrl3: config.get<string>('cdn.3'),
-    certificateAuthority: config.get<string>('certificateAuthority'),
+    cdnUrl0: personas?.serverUrl ?? config.get<string>('cdn.0'),
+    cdnUrl2: personas?.serverUrl ?? config.get<string>('cdn.2'),
+    cdnUrl3: personas?.serverUrl ?? config.get<string>('cdn.3'),
+    certificateAuthority: personas?.certificateAuthority ??
+      config.get<string>('certificateAuthority'),
     environment:
       !isTestEnvironment(getEnvironment()) && ciMode
         ? Environment.PackagedApp
@@ -2935,8 +2944,10 @@ ipc.on('get-config', async event => {
     sfuUrl: config.get('sfuUrl'),
     reducedMotionSetting: animationSettings.prefersReducedMotion,
     registrationChallengeUrl: config.get<string>('registrationChallengeUrl'),
-    serverPublicParams: config.get<string>('serverPublicParams'),
-    serverTrustRoots: config.get<Array<string>>('serverTrustRoots'),
+    serverPublicParams: personas?.serverPublicParams ??
+      config.get<string>('serverPublicParams'),
+    serverTrustRoots: personas?.serverTrustRoots ??
+      config.get<Array<string>>('serverTrustRoots'),
     stripePublishableKey: config.get<string>('stripePublishableKey'),
     genericServerPublicParams: config.get<string>('genericServerPublicParams'),
     backupServerPublicParams: config.get<string>('backupServerPublicParams'),

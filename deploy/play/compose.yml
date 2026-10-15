@@ -23,6 +23,9 @@ x-member: &member
   depends_on: [gateway]
   environment: &member-env
     PERSONAS_UPSTREAM: ${PERSONAS_UPSTREAM:-gateway:8443}
+    # Set by keys.sh: members then download the server's proving keys and verify them,
+    # as installed clients do. Empty: alice generates a set the others share.
+    PERSONAS_KEYS_SHA256: ${PERSONAS_KEYS_SHA256:-}
     PERSONAS_RESET: ${PERSONAS_RESET:-0}
 
 services:
@@ -37,6 +40,8 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./index.html:/srv/play/index.html:ro
+      # The canonical proving keys (keys.sh), served at /personas/keys/.
+      - keys:/srv/keys:ro
 
   # Member directory (directory.js): clients publish themselves and poll for each other.
   directory:
