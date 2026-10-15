@@ -30,6 +30,7 @@ use std::path::Path;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use ark_std::rand::{CryptoRng, RngCore};
 use personas_core::circuits::{
+    join_pred, not_banned_pred,
     BadgesArgs, BadgesArgsVar, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsPair,
     PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, PubScan, ScanInt, authorship_pred,
     badge_pred, get_badge_request_interaction, get_callbacks, get_scan_interaction,
@@ -38,7 +39,8 @@ use personas_core::circuits::{
 };
 use personas_core::params::ServerKeys;
 use personas_core::{Cr, F, H, PK, Snark, VK};
-use zk_callbacks::generic::interaction::generate_keys_for_statement_in;
+use ark_r1cs_std::fields::fp::FpVar;
+use zk_callbacks::generic::interaction::{generate_keys_for_statement, generate_keys_for_statement_in};
 use zk_callbacks::generic::object::Time;
 
 use super::callback::{DEFAULT_CB_MEMB_HEIGHT, DEFAULT_CB_NMEMB_HEIGHT, MerkleCallbackStore};
@@ -356,6 +358,23 @@ pub fn generate_merkle_server_keys(
             MerkleOStore,
         >(rng, badge_pred, None, dummy_badge_request);
 
+    // A join proves its object is fresh: a statement about the object alone (no
+    // membership — it is not in any tree yet), its commitment the first public input.
+    let (join_pred_proving_key, join_pred_verifying_key) =
+        generate_keys_for_statement::<F, H, MsgUser, F, FpVar<F>, (), (), Snark>(
+            rng,
+            join_pred,
+            F::from(0u64),
+        );
+    // A reset request proves a CURRENT object (membership) is unbanned and just swept.
+    let (not_banned_pred_proving_key, not_banned_pred_verifying_key) =
+        generate_keys_for_statement_in::<F, H, MsgUser, F, FpVar<F>, (), (), Snark, MerkleOStore>(
+            rng,
+            not_banned_pred,
+            None,
+            F::from(0u64),
+        );
+
     ServerKeys {
         standard_proving_key,
         standard_verifying_key,
@@ -373,6 +392,10 @@ pub fn generate_merkle_server_keys(
         standard_pseudor_verifying_key,
         badge_request_proving_key,
         badge_request_verifying_key,
+        join_pred_proving_key,
+        join_pred_verifying_key,
+        not_banned_pred_proving_key,
+        not_banned_pred_verifying_key,
     }
 }
 

@@ -241,6 +241,10 @@ export type OwnProps = Readonly<{
   scanPersonaCallbacksNow: (conversationId: string) => unknown;
   // Personas demo: open extra member 1 or 2 (installable build only).
   openPersonasExtraMember?: (slot: 1 | 2) => unknown;
+  // Personas demo: admin-approved reset (personasReset).
+  requestPersonaReset: (conversationId: string) => unknown;
+  approvePersonaReset: (conversationId: string, account: string) => unknown;
+  dismissPersonaReset: (account: string) => unknown;
   // Personas demo: the instance's UNVERIFIED badge claim, and the setter for it.
   selectedBadge: string | undefined;
   setPersonaBadge: (badge: PersonaBadge | undefined) => unknown;
@@ -372,6 +376,9 @@ export const CompositionArea = memo(function CompositionArea({
   createPersonaPseudonym,
   scanPersonaCallbacksNow,
   openPersonasExtraMember,
+  requestPersonaReset,
+  approvePersonaReset,
+  dismissPersonaReset,
   selectedBadge,
   setPersonaBadge,
   sendPersonaAuthorshipClaim,
@@ -2056,6 +2063,9 @@ export const CompositionArea = memo(function CompositionArea({
           }
           onDismissBadge={dismissPersonaBadgeRequest}
           onOpenExtraMember={openPersonasExtraMember}
+          onRequestReset={() => requestPersonaReset(conversationId)}
+          onApproveReset={account => approvePersonaReset(conversationId, account)}
+          onDismissReset={dismissPersonaReset}
           status={personaStatus}
           i18n={i18n}
           onClose={() => setIsStatusDialogOpen(false)}

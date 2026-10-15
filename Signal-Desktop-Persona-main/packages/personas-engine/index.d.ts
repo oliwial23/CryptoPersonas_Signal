@@ -72,7 +72,23 @@ export class Engine {
   constructor(options: EngineOptions);
 
   /** Emit a join record (a member advertising itself to the group). */
-  emitJoin(): Emitted;
+  /**
+   * Join as `account` (the ACI, 32 hex characters without dashes), proving this
+   * member's object is fresh. Accepted once per account, plus once per admin approval.
+   */
+  emitJoin(account: string): Emitted;
+  /** As a group admin: allow `account` one more join. Send it under your own account. */
+  emitRejoinApprove(account: string): Emitted;
+  /** A reset request's proof: not banned and just swept, as `account`. */
+  proveNotBanned(account: string): Buffer;
+  /** The account a reset-request proof is for, if it verifies against our tree. */
+  verifyNotBanned(proof: Buffer): string | null;
+  /** Start over with a fresh object (after an approved re-join). */
+  resetMember(): void;
+  /** Joins applied and re-joins approved for `account`. */
+  joinCounts(account: string): { joins: number; approved: number };
+  /** For a join or re-join approval: which, and the account it names (hex). */
+  recordAccountClaim(record: Buffer): { kind: 'join' | 'rejoin-approve'; account: string } | null;
   /** Emit a pseudonymous post under `context`. Real Groth16 proof — seconds. */
   emitPostPseudo(body: string, context: number): Emitted;
   /** Emit an anonymous post (no linkable persona). */

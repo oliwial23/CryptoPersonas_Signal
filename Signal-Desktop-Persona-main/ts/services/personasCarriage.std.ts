@@ -653,3 +653,54 @@ export function encodeVoteBody(bytes: Buffer | Uint8Array): string {
 export function encodeRateBody(bytes: Buffer | Uint8Array): string {
   return PERSONAS_RATE_MARKER + Buffer.from(bytes).toString('base64');
 }
+
+// A RESET REQUEST: a member asks the group's admins to let its account join once more
+// (personasReset). NOT a ZK record, and deliberately ATTRIBUTABLE — it rides the member's
+// real account, never the phantom: an admin is being asked to vouch for a person, and
+// the one-join-per-account rule only means something if the request names the account.
+//
+//   PZX1:<base64 {"a": "<ACI hex>", "p": "<not-banned proof base64>" | null, "r"?: reason}>
+//
+// `p` is the "not banned and just swept" proof (Engine.proveNotBanned); null when the
+// member could not make one (out of sync, or banned), with `r` saying why, so the admin
+// decides knowing that.
+export const PERSONAS_RESET_REQUEST_MARKER = 'PZX1:';
+
+export type PersonaResetRequestWire = {
+  a: string;
+  p: string | null;
+  r?: string;
+};
+
+export function encodeResetRequest(request: PersonaResetRequestWire): string {
+  return (
+    PERSONAS_RESET_REQUEST_MARKER +
+    Buffer.from(JSON.stringify(request), 'utf8').toString('base64')
+  );
+}
+
+export function decodeResetRequest(
+  body: string | undefined | null
+): PersonaResetRequestWire | undefined {
+  if (!body?.startsWith(PERSONAS_RESET_REQUEST_MARKER)) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(body.slice(PERSONAS_RESET_REQUEST_MARKER.length), 'base64').toString(
+        'utf8'
+      )
+    ) as Partial<PersonaResetRequestWire>;
+    if (
+      typeof parsed.a !== 'string' ||
+      !/^[0-9a-f]{32}$/.test(parsed.a) ||
+      (parsed.p != null && typeof parsed.p !== 'string') ||
+      (parsed.r !== undefined && typeof parsed.r !== 'string')
+    ) {
+      return undefined;
+    }
+    return { a: parsed.a, p: parsed.p ?? null, ...(parsed.r ? { r: parsed.r.slice(0, 200) } : {}) };
+  } catch {
+    return undefined;
+  }
+}

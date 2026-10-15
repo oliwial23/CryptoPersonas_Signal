@@ -48,6 +48,18 @@ export type PersonaStatusForUI = {
   scanStuck: boolean;
   outstandingCallbacks: number;
   stateLost: boolean;
+  resetState?: 'none' | 'requested' | 'approved';
+  resetRequests?: ReadonlyArray<{
+    account: string;
+    name: string;
+    proofOk: boolean;
+    reason?: string;
+  }>;
+};
+
+const RESET_STATE_TEXT: Record<string, string | undefined> = {
+  requested: 'Reset requested \u2014 waiting for a group admin to approve it.',
+  approved: 'Approved \u2014 re-joining as a new member in a moment.',
 };
 
 export type PersonaStatusDialogProps = {
@@ -62,6 +74,12 @@ export type PersonaStatusDialogProps = {
   onDismissBadge?: (requestEh: string) => void;
   /** Open (or bring forward) extra member 1 or 2. Only in the installable build. */
   onOpenExtraMember?: (slot: 1 | 2) => void;
+  /** Ask the group's admins to let this account join again with a fresh member. */
+  onRequestReset?: () => void;
+  /** As an admin: allow a member's re-join. */
+  onApproveReset?: (account: string) => void;
+  /** As an admin: hide a reset request (local only). */
+  onDismissReset?: (account: string) => void;
 };
 
 function Row({
@@ -104,6 +122,9 @@ export function PersonaStatusDialog({
   onApproveBadge,
   onDismissBadge,
   onOpenExtraMember,
+  onRequestReset,
+  onApproveReset,
+  onDismissReset,
 }: PersonaStatusDialogProps): JSX.Element {
   return (
     <AxoDialog.Root open onOpenChange={onClose}>
@@ -371,6 +392,89 @@ export function PersonaStatusDialog({
                       'the circuit declines it. You cannot tell from here \u2014 their ' +
                       'badges are private to them.'}
                   </div>
+                </div>
+              )}
+              {status.isSignalAdmin && (status.resetRequests?.length ?? 0) > 0 && (
+                <div className={tw('py-2')}>
+                  <div className={tw('mb-1 type-body-medium font-semibold')}>
+                    Reset requests
+                  </div>
+                  <div className={tw('type-body-small text-label-secondary')}>
+                    {'Approving lets that account join once more as a brand-new member ' +
+                      '(its old reputation, badges and personas are abandoned). "Not ' +
+                      'banned" means they proved, in zero knowledge and against this ' +
+                      'group\u2019s own state, that their member is not banned and ' +
+                      'has just finished a scan, so every ban settled so far was ' +
+                      'absorbed. A ban decided later on one of their old posts cannot ' +
+                      'follow them to the new member.'}
+                  </div>
+                  <ul className={tw('mt-2 flex flex-col gap-2')}>
+                    {status.resetRequests?.map(request => (
+                      <li
+                        key={request.account}
+                        className={tw('flex items-center justify-between gap-3')}
+                      >
+                        <span className={tw('type-body-small')}>
+                          {request.name}
+                          <span className={tw('text-label-secondary')}>
+                            {request.proofOk
+                              ? ' \u00b7 not banned (proved)'
+                              : ` \u00b7 NOT proved: ${request.reason ?? 'no proof'}`}
+                          </span>
+                        </span>
+                        <span className={tw('flex shrink-0 gap-2')}>
+                          {onApproveReset != null && (
+                            <AxoButton.Root
+                              variant="strong-affirmative"
+                              size="sm"
+                              symbol="check-circle"
+                              onClick={() => onApproveReset(request.account)}
+                            >
+                              Approve
+                            </AxoButton.Root>
+                          )}
+                          {onDismissReset != null && (
+                            <AxoButton.Root
+                              variant="subtle-secondary"
+                              size="sm"
+                              symbol="x-circle"
+                              onClick={() => onDismissReset(request.account)}
+                            >
+                              Dismiss
+                            </AxoButton.Root>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {onRequestReset != null && (
+                <div className={tw('py-2')}>
+                  <div className={tw('mb-1 type-body-medium font-semibold')}>
+                    Start over
+                  </div>
+                  <div className={tw('type-body-small text-label-secondary')}>
+                    {RESET_STATE_TEXT[status.resetState ?? 'none'] ??
+                      'If your persona member is stuck (posts are not getting ' +
+                          'through), ask a group admin to let you join again as a new ' +
+                          'member. Each account can join once; an admin\u2019s approval ' +
+                          'allows one more. You lose your reputation, badges and ' +
+                          'personas. The request names you, and proves you are not ' +
+                          'banned.'}
+                  </div>
+                  {status.resetState === 'none' || status.resetState == null ? (
+                    <div className={tw('mt-2')}>
+                      <AxoButton.Root
+                        variant="subtle-secondary"
+                        size="sm"
+                        symbol="refresh"
+                        onClick={onRequestReset}
+                      >
+                        Request a reset
+                      </AxoButton.Root>
+                    </div>
+                  ) : null}
                 </div>
               )}
               <div className={tw('pt-3')}>

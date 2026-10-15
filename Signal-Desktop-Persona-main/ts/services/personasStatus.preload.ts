@@ -19,6 +19,11 @@
 
 import type { ConversationModel } from '../models/conversations.preload.ts';
 import { pendingBadgeRequests } from './personasBadgeFlow.preload.ts';
+import {
+  listResetRequests,
+  ownResetState,
+  type ResetState,
+} from './personasReset.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
@@ -112,6 +117,10 @@ export type PersonaStatus = {
    * state tallies read as zero and bans cannot settle.
    */
   stateLost: boolean;
+  /** Our own reset request: none, waiting for an admin, or approved (re-joining). */
+  resetState: ResetState;
+  /** Reset requests from other members. Only actionable by a Signal group admin. */
+  resetRequests: ReadonlyArray<{ account: string; name: string; proofOk: boolean; reason?: string }>;
 };
 
 export function getPersonaStatus(
@@ -141,6 +150,8 @@ export function getPersonaStatus(
     scanStuck: false,
     outstandingCallbacks: 0,
     stateLost: false,
+    resetState: ownResetState(),
+    resetRequests: conversation?.areWeAdmin() ? listResetRequests() : [],
   };
 
   if (!enabled) {

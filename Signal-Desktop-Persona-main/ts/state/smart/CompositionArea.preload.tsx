@@ -244,6 +244,9 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
     refreshPersonaStatus,
     requestPersonaBadge,
     dismissPersonaBadgeRequest,
+    requestPersonaReset,
+    approvePersonaReset,
+    dismissPersonaReset,
     provePersonaBadge,
     joinPersonaBulletin,
     approvePersonaBadge,
@@ -451,6 +454,9 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
       personaJoined={personaStatus?.joined ?? false}
       requestPersonaBadge={requestPersonaBadge}
       dismissPersonaBadgeRequest={dismissPersonaBadgeRequest}
+      requestPersonaReset={requestPersonaReset}
+      approvePersonaReset={approvePersonaReset}
+      dismissPersonaReset={dismissPersonaReset}
       provePersonaBadge={provePersonaBadge}
       joinPersonaBulletin={joinPersonaBulletin}
       approvePersonaBadge={approvePersonaBadge}

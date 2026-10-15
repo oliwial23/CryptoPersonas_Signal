@@ -41,7 +41,7 @@ use personas_bulletin::replica::record::{Ark, Eh, Flavour, PollKind, Record};
 use personas_core::circuits::{
     MsgUser, NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate,
     BadgesArgs, BadgesArgsVar, PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsVar,
-    PubScan, PubScanVar, authorship_pred, badge_pred, get_badge_request_interaction, get_callbacks,
+    PubScan, PubScanVar, authorship_pred, join_pred, not_banned_pred, badge_pred, get_badge_request_interaction, get_callbacks,
     get_scan_interaction,
     get_standard_interaction, get_standard_pseudo_interaction,
     get_standard_pseudo_rate_interaction, pseudonym_pred,
@@ -73,6 +73,14 @@ pub enum MemberError {
     /// Groth16 proving failed.
     #[error("proof generation failed: {0}")]
     Proof(#[from] SynthesisError),
+    /// Only a fresh object can join (`join_pred`): this member has already interacted.
+    /// A member that needs to join again resets to a new object first.
+    #[error("this member's object is not fresh, so it cannot join (reset first)")]
+    NotFresh,
+    /// The "not banned" proof needs a completed scan sweep with nothing since, and no
+    /// ban absorbed.
+    #[error("cannot prove 'not banned': {0}")]
+    NotBannedUnprovable(&'static str),
 }
 
 /// The **proving** keys a member needs — the mirror of
@@ -96,6 +104,10 @@ pub struct MemberKeys {
     pub badge_pred: PK,
     /// The badge REQUEST interaction's proving key.
     pub badge_request: PK,
+    /// A join's freshness proof (`join_pred`).
+    pub join: PK,
+    /// A reset request's "not banned, just swept" proof (`not_banned_pred`).
+    pub not_banned: PK,
 }
 
 impl MemberKeys {
@@ -111,6 +123,8 @@ impl MemberKeys {
             authorship_pred: keys.authorship_pred_proving_key.clone(),
             badge_pred: keys.badge_pred_proving_key.clone(),
             badge_request: keys.badge_request_proving_key.clone(),
+            join: keys.join_pred_proving_key.clone(),
+            not_banned: keys.not_banned_pred_proving_key.clone(),
         }
     }
 }
@@ -225,14 +239,105 @@ impl Member {
         self.user.commit::<H>()
     }
 
-    /// The `Join` record committing this member's current object. Serverless carries
-    /// the initial nullifier as data (`F::from(0)`) so every replica appends an
-    /// identical leaf.
-    pub fn join(&self) -> Record {
-        Record::Join {
-            object: Ark(self.commitment()),
-            old_nul: Ark(F::from(0)),
+    /// The `Join` record committing this member's current object, with the proof that
+    /// the object is fresh (`join_pred`, public inputs `[object, account]`). Serverless
+    /// carries the initial nullifier as data (`F::from(0)`) so every replica appends an
+    /// identical leaf. `account` is the joining Signal account
+    /// (`personas_core::account_field`).
+    pub fn join(
+        &self,
+        rng: &mut (impl CryptoRng + RngCore),
+        account: F,
+    ) -> Result<Record, MemberError> {
+        if !self.is_fresh() {
+            return Err(MemberError::NotFresh);
         }
+        let result = self.user.prove_statement::<H, F, FpVar<F>, (), (), Snark>(
+            rng,
+            join_pred,
+            &self.keys.join,
+            account,
+            (),
+        )?;
+        Ok(Record::Join {
+            object: Ark(result.object),
+            old_nul: Ark(F::from(0)),
+            account: Ark(account),
+            proof: Ark(result.proof),
+        })
+    }
+
+    /// Whether this member's object is still as created (what `join_pred` requires).
+    pub fn is_fresh(&self) -> bool {
+        let zero = F::from(0u64);
+        let d = &self.user.data;
+        let z = &self.user.zk_fields;
+        d.reputation == zero
+            && d.num_interactions_since_last_scan == zero
+            && d.pseudo_counter == zero
+            && d.banned == zero
+            && d.badge1 == zero
+            && d.badge2 == zero
+            && d.badge3 == zero
+            && z.callback_hash == zero
+            && z.new_in_progress_callback_hash == zero
+            && z.old_in_progress_callback_hash == zero
+            && z.is_ingest_over
+            && self.user.num_outstanding_callbacks() == 0
+    }
+
+    /// Start over as a brand-new member: a fresh object under a new secret key. Used
+    /// after an admin approved a re-join; the old object (its reputation, badges and
+    /// pseudonyms) is abandoned.
+    pub fn reset(&mut self, rng: &mut (impl CryptoRng + RngCore)) {
+        self.user = User::create(
+            MsgUser {
+                sk: F::rand(rng),
+                ..Default::default()
+            },
+            rng,
+        );
+    }
+
+    /// Prove this member is NOT BANNED and has just completed a scan sweep, against
+    /// `obj`'s current root (`not_banned_pred`, public inputs `[account, root]`). What a
+    /// reset request carries. Returns `(root, proof)`.
+    pub fn not_banned<const OH: usize>(
+        &self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        account: F,
+    ) -> Result<(F, <Snark as ark_snark::SNARK<F>>::Proof), MemberError> {
+        let zero = F::from(0u64);
+        if self.user.data.banned != zero {
+            return Err(MemberError::NotBannedUnprovable("this member is banned"));
+        }
+        if self.user.data.num_interactions_since_last_scan != zero
+            || !self.user.zk_fields.is_ingest_over
+        {
+            return Err(MemberError::NotBannedUnprovable(
+                "a full scan is needed first (it absorbs any settled ban)",
+            ));
+        }
+        let (root, path) =
+            <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
+                obj,
+                self.commitment(),
+            )
+            .ok_or(MemberError::NotJoined)?;
+        let proof = self
+            .user
+            .prove_statement_and_in::<H, F, FpVar<F>, (), (), Snark, MerkleObjStore<F, OH>>(
+                rng,
+                not_banned_pred,
+                &self.keys.not_banned,
+                (path, root),
+                // Merkle membership: the root is a public input (see `badge`).
+                false,
+                account,
+                (),
+            )?;
+        Ok((root, proof))
     }
 
     /// An anonymous post against the object tree's current root.

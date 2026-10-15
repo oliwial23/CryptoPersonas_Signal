@@ -118,8 +118,9 @@ async fn scenario(rk: ReplicaKeys, mk: MemberKeys) -> Result<()> {
     // (1) Everyone joins; every replica ingests every join.
     println!("→ Three members join.");
     let mut joins = Vec::new();
-    for m in members.iter_mut() {
-        joins.push(m.emit_join().map_err(se)?);
+    // Each demo member stands for a distinct account (one join per account).
+    for (i, m) in members.iter_mut().enumerate() {
+        joins.push(m.emit_join(&mut rng, F::from(1 + i as u64)).map_err(se)?);
     }
     for e in &joins {
         deliver_all(&mut members, e);

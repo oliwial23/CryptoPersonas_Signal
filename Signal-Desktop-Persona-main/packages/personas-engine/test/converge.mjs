@@ -10,6 +10,10 @@
 //   keyDir defaults to a shared scratch dir; the first run generates ~51MB of keys.
 
 import { Engine } from '../index.mjs';
+
+// Each member joins as a distinct account (one join per account): a 16-byte ACI as hex.
+let accountSeq = 0;
+const nextAccount = () => (++accountSeq).toString(16).padStart(32, '0');
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,7 +52,7 @@ const deliverAll = emitted => {
 // (1) Both join; every replica ingests every join.
 console.log('\n(1) Both members join.');
 for (const m of members) {
-  deliverAll(m.emitJoin());
+  deliverAll(m.emitJoin(nextAccount()));
 }
 
 // (2) alice posts under a persona.

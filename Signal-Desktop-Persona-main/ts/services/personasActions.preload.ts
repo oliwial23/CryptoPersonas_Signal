@@ -589,6 +589,30 @@ export function isPersonaBanned(): boolean | undefined {
  * directly — if a round does not shorten the sweep, stop rather than spin.
  */
 /**
+ * Run ONE complete sweep even if nothing has been invoked — what a reset request needs:
+ * its "not banned" proof requires the object's last action to be a finished sweep.
+ */
+export async function runFullPersonaSweep(conversation: ConversationModel): Promise<boolean> {
+  const engine = getPersonasEngine();
+  if (!engine) {
+    return false;
+  }
+  if (engine.outstandingCallbacks() === 0) {
+    return true; // nothing to sweep: the object is already in a swept state
+  }
+  for (let i = 0; i < 40; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await sendPersonaScan(conversation, { quiet: true }))) {
+      return false;
+    }
+    if (!engine.isScanning()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Joined, and not in the middle of a sweep. The engine refuses every proving action while
  * a sweep is unfinished (a single "Scan now", or an interrupted drain, can leave one), so
  * ratings, votes, polls and badge actions finish it first instead of failing. Unlike a

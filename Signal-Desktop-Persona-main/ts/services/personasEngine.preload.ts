@@ -144,7 +144,9 @@ export function getPersonasEngine(): Engine | undefined {
   // Continue as the saved member, on the saved replica (personasPersistence). Without a
   // state key both are undefined and the engine starts fresh, in memory, as before.
   const fingerprint = getPhantomBundleFingerprint();
-  const groupState = fingerprint ? openPersonasGroupState(fingerprint) : undefined;
+  // Keyed by protocol version too: a version-3 replica cannot read version-2 records,
+  // and a member saved under version 2 joined without a proof, so both start fresh.
+  const groupState = fingerprint ? openPersonasGroupState(`${fingerprint}-v3`) : undefined;
   const memberState = groupState ? loadPersonasState() : undefined;
   try {
     engine = new Engine({

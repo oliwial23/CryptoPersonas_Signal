@@ -84,6 +84,7 @@ fn standard_only_keys(vk: &VK) -> ReplicaKeys {
         scan: vk.clone(),
         pseudonym_pred: vk.clone(),
         badge_request: vk.clone(),
+        join: vk.clone(),
     }
 }
 
@@ -93,6 +94,8 @@ fn make_user(rng: &mut StdRng) -> (User<F, MsgUser>, Record) {
     let join = Record::Join {
         object: Ark(user.commit::<H>()),
         old_nul: Ark(F::from(0)),
+        account: Ark(user.commit::<H>()),
+        proof: Ark(Default::default()),
     };
     (user, join)
 }
@@ -155,7 +158,7 @@ fn e2e_convergence_out_of_order_delivery() {
     // apply both records.
     let mut roots = Vec::new();
     for order in [vec![&join_b, &post_b], vec![&post_b, &join_b]] {
-        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default());
+        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default()).trust_unproven_joins_for_tests();
         for bytes in order {
             r.ingest(bytes.clone()).unwrap();
         }
@@ -204,7 +207,7 @@ fn e2e_double_spend_resolves_to_one_winner_everywhere() {
         vec![&b_by, &a_by, &join_by],
         vec![&a_by, &join_by, &b_by],
     ] {
-        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default());
+        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default()).trust_unproven_joins_for_tests();
         for bytes in order {
             r.ingest(bytes.clone()).unwrap();
         }
@@ -231,6 +234,7 @@ fn full_keys(std_vk: &VK, scan_vk: &VK, pred_vk: &VK) -> ReplicaKeys {
         scan: scan_vk.clone(),
         pseudonym_pred: pred_vk.clone(),
         badge_request: std_vk.clone(),
+        join: std_vk.clone(),
     }
 }
 
@@ -250,6 +254,8 @@ fn join_of(user: &User<F, MsgUser>) -> (F, Vec<u8>, Eh) {
     let rec = Record::Join {
         object: Ark(user.commit::<H>()),
         old_nul: Ark(F::from(0)),
+        account: Ark(user.commit::<H>()),
+        proof: Ark(Default::default()),
     };
     let (b, eh) = encode(&rec).unwrap();
     (user.commit::<H>(), b, eh)
@@ -448,7 +454,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
         vec![3, 0, 5, 1, 6, 2, 4],
     ];
     for order in orders {
-        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), config);
+        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), config).trust_unproven_joins_for_tests();
         for &i in &order {
             r.ingest(base[i].clone()).unwrap();
         }
@@ -475,7 +481,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
     );
 
     // Prepare a replica that has seen the ban, for the scan assertions.
-    let mut r = Replica::<OH, MH, NH>::new(keys.clone(), config);
+    let mut r = Replica::<OH, MH, NH>::new(keys.clone(), config).trust_unproven_joins_for_tests();
     for bytes in &base {
         r.ingest(bytes.clone()).unwrap();
     }

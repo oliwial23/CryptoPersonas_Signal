@@ -40,7 +40,10 @@ use personas_core::{Args, Cr, F, Snark};
 /// The serverless protocol version. Distinct from [`personas_wire::VERSION`] (1):
 /// a reader that sees a version it does not know refuses the record rather than
 /// misread a version-1 service payload as a version-2 serverless one.
-pub const SERVERLESS_VERSION: u16 = 2;
+///
+/// 3: a join carries the joining account and a proof that its object is fresh, and a
+/// group admin's re-join approval exists. A version-2 record is refused.
+pub const SERVERLESS_VERSION: u16 = 3;
 
 /// Records are compressed, matching `personas_wire`'s reasoning: every member
 /// downloads every record forever, so halving a proof is worth the point
@@ -192,10 +195,25 @@ pub enum Record {
     /// nullifier that object consumes. Unlike the service store (which samples the
     /// nullifier randomly on join), serverless carries it as data so every replica
     /// appends an identical leaf — determinism is a hard requirement (§d1).
+    ///
+    /// PROVEN (version 3): `proof` is a `join_pred` proof with public inputs
+    /// `[object, account]` — the committed object is fresh (no badges, reputation, ban
+    /// flag, callbacks or scan state; only its secret key and randomness are its own) —
+    /// so a member can no longer join with an object of its own making. `account` is the
+    /// joining Signal account (`personas_core::account_field` of its ACI); the replica
+    /// allows one join per account plus one per admin re-join approval, and the client
+    /// refuses a join whose `account` is not the account that sent it.
     Join {
         object: Ark<Com<F>>,
         old_nul: Ark<Nul<F>>,
+        account: Ark<F>,
+        proof: Ark<PredProof>,
     },
+
+    /// A group admin allows `account` ONE more join (after a reset request). Carries no
+    /// proof; the client accepts it only when its sender is a Signal group admin, and
+    /// it is sent under the admin's own account so every member can check that.
+    RejoinApprove { account: Ark<F> },
 
     /// A post. `extra` is the flavour's public arguments: empty for `Anon`,
     /// `[context, claimed]` for `Pseudo`, `[context, claimed, i]` for
@@ -311,6 +329,7 @@ impl Record {
             Record::Scan { .. } => "Scan",
             Record::BadgeRequest { .. } => "BadgeRequest",
             Record::BadgeApprove { .. } => "BadgeApprove",
+            Record::RejoinApprove { .. } => "RejoinApprove",
         }
     }
 }
@@ -391,15 +410,20 @@ mod tests {
         let rec = Record::Join {
             object: Ark(F::rand(&mut rng)),
             old_nul: Ark(F::rand(&mut rng)),
+            account: Ark(F::rand(&mut rng)),
+            proof: Ark(PredProof::default()),
         };
         let (bytes, eh) = encode(&rec).unwrap();
         let (back, eh2) = decode(&bytes).unwrap();
         assert_eq!(eh, eh2, "decode recomputes the same eh");
         match back {
-            Record::Join { object, old_nul } => {
+            Record::Join {
+                object, old_nul, ..
+            } => {
                 let Record::Join {
                     object: o0,
                     old_nul: n0,
+                    ..
                 } = &rec
                 else {
                     unreachable!()

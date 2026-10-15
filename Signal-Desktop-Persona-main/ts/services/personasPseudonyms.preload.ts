@@ -117,6 +117,13 @@ export function recordPetname(nonce: number, petname: string): void {
   personasExtrasChanged();
 }
 
+/** Forget every pseudonym — after a reset, the new secret key derives different ones. */
+export function clearPseudonyms(): void {
+  pseudonyms.splice(0);
+  notify();
+  personasExtrasChanged();
+}
+
 /** Ensure at least one pseudonym exists, so the picker is never empty. */
 export function ensureOnePseudonym(): PersonaPseudonym {
   return pseudonyms[0] ?? createPseudonym();

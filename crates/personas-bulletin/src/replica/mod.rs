@@ -117,6 +117,8 @@ pub struct ReplicaKeys {
     pub pseudonym_pred: VK,
     /// A badge request interaction. Already in every `ServerKeys` bundle.
     pub badge_request: VK,
+    /// A join's freshness proof (`join_pred`).
+    pub join: VK,
 }
 
 impl ReplicaKeys {
@@ -130,6 +132,7 @@ impl ReplicaKeys {
             scan: keys.scan_verifying_key.clone(),
             pseudonym_pred: keys.pseudonym_pred_verifying_key.clone(),
             badge_request: keys.badge_request_verifying_key.clone(),
+            join: keys.join_pred_verifying_key.clone(),
         }
     }
 }
@@ -214,6 +217,10 @@ pub struct Replica<
     /// genesis (see the module docs). Always holds `current_barrier` after a rebuild.
     checkpoints: std::collections::BTreeMap<u64, BuildState<OH, MH, NH>>,
 
+    /// TEST BUILDS ONLY: accept a join without checking its freshness proof, for the
+    /// proof-free ordering tests that build joins without keys. Always false otherwise.
+    trust_unproven_joins: bool,
+
     /// Append-only journal of accepted record bytes; replayed on [`Replica::open`].
     journal: Option<PathBuf>,
 }
@@ -234,6 +241,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             derived: Derived::default(),
             statuses: HashMap::new(),
             checkpoints: std::collections::BTreeMap::new(),
+            trust_unproven_joins: false,
             journal: None,
         };
         r.rebuild();
@@ -428,6 +436,33 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     }
 
     // --- Accessors --------------------------------------------------------------
+
+    /// Whether `root` is one of the object roots this replica produced (within the
+    /// last-`K` window) — the only roots a proof may be made against. Standalone proofs
+    /// (badge possession, authorship) are not records and never pass the accept rule, so
+    /// their verifier must ask this itself: a proof against a root the group never had is
+    /// a proof about a tree the prover built, containing whatever object it liked.
+    /// How many joins this replica has applied for `account`, and how many re-joins an
+    /// admin has approved for it. A member may join while `joins < 1 + approved`.
+    pub fn join_counts(&self, account: F) -> (u32, u32) {
+        let key = f_key(account);
+        (
+            self.derived.joins.get(&key).copied().unwrap_or(0),
+            self.derived.rejoin_allowance.get(&key).copied().unwrap_or(0),
+        )
+    }
+
+    /// TEST BUILDS ONLY — see the field.
+    #[cfg(test)]
+    pub(crate) fn trust_unproven_joins_for_tests(mut self) -> Self {
+        self.trust_unproven_joins = true;
+        self.rebuild();
+        self
+    }
+
+    pub fn has_produced_root(&self, root: F) -> bool {
+        self.produced.contains(&f_key(root))
+    }
 
     /// The current object-tree root — the membership data a member proves against.
     pub fn obj_root(&self) -> F {
@@ -630,8 +665,13 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         polls.sort_by_key(|p| p.0);
         let mut produced: Vec<_> = self.produced.iter().copied().collect();
         produced.sort();
+        let mut joins: Vec<_> = self.derived.joins.iter().map(|(k, v)| (*k, *v)).collect();
+        joins.sort();
+        let mut allowance: Vec<_> =
+            self.derived.rejoin_allowance.iter().map(|(k, v)| (*k, *v)).collect();
+        allowance.sort();
         format!(
-            "{:?}|{:?}|{:?}|{statuses:?}|{log:?}|{outstanding:?}|{polls:?}|{produced:?}|{:?}",
+            "{:?}|{:?}|{:?}|{statuses:?}|{log:?}|{outstanding:?}|{polls:?}|{produced:?}|{joins:?}|{allowance:?}|{:?}",
             self.obj.root(),
             self.cbs.memb_root(),
             self.cbs.nmemb_root(),
@@ -658,9 +698,61 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         // disjoint field, so a free helper can memoise while we hold `&record`.
         let seen = &self.seen[&eh];
         match &seen.record {
-            Record::Join { object, old_nul } => {
+            Record::Join {
+                object,
+                old_nul,
+                account,
+                proof,
+            } => {
+                // FRESH OBJECTS ONLY. Without this a join appended any commitment at all,
+                // so a member could join with a badge, a reputation or a clean ban flag of
+                // its own making. The proof binds `[object, account]`.
+                if !self.trust_unproven_joins
+                    && !memo_statement(
+                        &mut self.verify_cache,
+                        eh,
+                        &self.keys.join,
+                        &[object.0, account.0],
+                        &proof.0,
+                    )
+                {
+                    return Status::Rejected("join proof failed");
+                }
+                // ONE JOIN PER ACCOUNT, plus one per admin re-join approval. Joins are
+                // attributable (the client refuses one whose `account` is not its
+                // sender), so this is one membership per Signal account: no Sybil
+                // memberships, and no fresh identity to escape a ban without an admin.
+                let key = f_key(account.0);
+                let used = derived.joins.get(&key).copied().unwrap_or(0);
+                let allowed = 1 + derived.rejoin_allowance.get(&key).copied().unwrap_or(0);
+                if used >= allowed {
+                    return Status::Rejected("account already joined");
+                }
+                derived.joins.insert(key, used + 1);
                 obj.push(object.0, old_nul.0, Vec::new());
                 record_root(produced, produced_order, obj.root(), window);
+                derived.log.push(LogEntry {
+                    eh,
+                    kind: "Join",
+                    author: None,
+                    body: hex::encode(key),
+                    flagged: false,
+                });
+                Status::Applied
+            }
+
+            Record::RejoinApprove { account } => {
+                // Admin-ness is checked by the client before ingest (the record is sent
+                // under the admin's own account); here it only grants the allowance.
+                let key = f_key(account.0);
+                *derived.rejoin_allowance.entry(key).or_insert(0) += 1;
+                derived.log.push(LogEntry {
+                    eh,
+                    kind: "RejoinApprove",
+                    author: None,
+                    body: hex::encode(key),
+                    flagged: false,
+                });
                 Status::Applied
             }
 
@@ -1035,7 +1127,7 @@ fn is_applicable(record: &Record, produced: &HashSet<[u8; 32]>, derived: &Derive
     let holds = |root: F| produced.contains(&f_key(root));
     match record {
         // No object root: applicable the moment its barrier arrives.
-        Record::Join { .. } | Record::PollOpen { .. } => true,
+        Record::Join { .. } | Record::PollOpen { .. } | Record::RejoinApprove { .. } => true,
         Record::Post { obj_root, .. } => holds(obj_root.0),
         Record::BadgeRequest { obj_root, .. } => holds(obj_root.0),
         // An approval pins no root: it carries no proof, only a reference to a ticket
@@ -1252,6 +1344,22 @@ where
 /// and every one of them is supplied by the *replica* (`context` derived from the
 /// referenced record, `obj_root` pinned to a produced root), so a forged context
 /// or a stale root simply fails to verify.
+/// Verify a standalone statement proof against explicit public inputs, memoised by `eh`.
+fn memo_statement(
+    cache: &mut HashMap<Eh, bool>,
+    eh: Eh,
+    vk: &VK,
+    inputs: &[F],
+    proof: &<Snark as SNARK<F>>::Proof,
+) -> bool {
+    if let Some(&v) = cache.get(&eh) {
+        return v;
+    }
+    let v = Snark::verify(vk, inputs, proof).unwrap_or(false);
+    cache.insert(eh, v);
+    v
+}
+
 fn memo_predicate(
     cache: &mut HashMap<Eh, bool>,
     eh: Eh,

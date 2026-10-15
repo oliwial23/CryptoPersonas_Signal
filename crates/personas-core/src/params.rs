@@ -27,11 +27,13 @@ use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use tracing::info;
 use zk_callbacks::generic::fold::{gen_fold_proof_snark_key, FoldingScan};
-use zk_callbacks::generic::interaction::generate_keys_for_statement_in;
+use ark_r1cs_std::fields::fp::FpVar;
+use zk_callbacks::generic::interaction::{generate_keys_for_statement, generate_keys_for_statement_in};
 use zk_callbacks::generic::object::Time;
 use zk_callbacks::generic::scan::PubScanArgs;
 
 use crate::circuits::{
+    join_pred, not_banned_pred,
     authorship_pred, badge_pred, get_badge_request_interaction, get_callbacks,
     get_extra_pubdata_for_scan, get_scan_interaction, get_standard_interaction,
     get_standard_pseudo_interaction, get_standard_pseudo_rate_interaction, pseudonym_pred,
@@ -90,6 +92,14 @@ pub struct ServerKeys {
     pub standard_pseudor_verifying_key: VK,
     pub badge_request_proving_key: PK,
     pub badge_request_verifying_key: VK,
+    /// A JOIN: the committed object is fresh (`join_pred`, no membership — the object is
+    /// not in any tree yet).
+    pub join_pred_proving_key: PK,
+    pub join_pred_verifying_key: VK,
+    /// A reset request: a current object that is not banned and has just been swept
+    /// (`not_banned_pred`, with object membership).
+    pub not_banned_pred_proving_key: PK,
+    pub not_banned_pred_verifying_key: VK,
 }
 
 /// Nova folding material plus the Groth16 keys for the fold-proof SNARK.
@@ -332,6 +342,23 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
         dummy_pub_badge,
     );
 
+    // A join proves its object is fresh: a statement about the object alone (no
+    // membership — it is not in any tree yet), its commitment the first public input.
+    let (join_pred_proving_key, join_pred_verifying_key) =
+        generate_keys_for_statement::<F, H, MsgUser, F, FpVar<F>, (), (), Snark>(
+            rng,
+            join_pred,
+            F::from(0u64),
+        );
+    // A reset request proves a CURRENT object (membership) is unbanned and just swept.
+    let (not_banned_pred_proving_key, not_banned_pred_verifying_key) =
+        generate_keys_for_statement_in::<F, H, MsgUser, F, FpVar<F>, (), (), Snark, OStore>(
+            rng,
+            not_banned_pred,
+            Some(db.obj_bul.get_pubkey()),
+            F::from(0u64),
+        );
+
     ServerKeys {
         standard_proving_key,
         standard_verifying_key,
@@ -349,6 +376,10 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
         standard_pseudor_verifying_key,
         badge_request_proving_key,
         badge_request_verifying_key,
+        join_pred_proving_key,
+        join_pred_verifying_key,
+        not_banned_pred_proving_key,
+        not_banned_pred_verifying_key,
     }
 }
 

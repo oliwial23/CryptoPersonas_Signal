@@ -51,6 +51,7 @@ fn placeholder_keys() -> personas_bulletin::replica::ReplicaKeys {
         pseudo_rate: vk.clone(),
         scan: vk.clone(),
         badge_request: vk.clone(),
+        join: vk.clone(),
         pseudonym_pred: vk,
     }
 }
@@ -138,6 +139,12 @@ mod e2e {
     use zk_callbacks::generic::interaction::generate_keys_for_statement_in;
     use zk_callbacks::generic::object::Time;
 
+    /// A distinct account for each member a test creates (one join per account).
+    fn acct() -> F {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        F::from(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
     // Tiny heights: the mechanism is height-independent (d3's e2e make the same call).
     const OH: usize = 4;
     const MH: usize = 4;
@@ -151,6 +158,7 @@ mod e2e {
     struct Keys {
         replica: ReplicaKeys,
         member: MemberKeys,
+        not_banned_vk: VK,
     }
 
     fn keygen(rng: &mut StdRng) -> Keys {
@@ -179,12 +187,37 @@ mod e2e {
             ObjT,
         >(rng, pseudonym_pred, None, dummy_pseudo);
 
+        let (join_pk, join_vk): (PK, VK) =
+            zk_callbacks::generic::interaction::generate_keys_for_statement::<
+                F,
+                H,
+                MsgUser,
+                F,
+                ark_r1cs_std::fields::fp::FpVar<F>,
+                (),
+                (),
+                Snark,
+            >(rng, personas_core::circuits::join_pred, F::from(0u64));
+        let (not_banned_pk, not_banned_vk): (PK, VK) = generate_keys_for_statement_in::<
+            F,
+            H,
+            MsgUser,
+            F,
+            ark_r1cs_std::fields::fp::FpVar<F>,
+            (),
+            (),
+            Snark,
+            ObjT,
+        >(rng, personas_core::circuits::not_banned_pred, None, F::from(0u64));
+
         Keys {
+            not_banned_vk,
             replica: ReplicaKeys {
                 standard: std_vk,
                 pseudo: pseudo_vk,
                 pseudo_rate: scan_vk.clone(), // unused by this suite
                 badge_request: scan_vk.clone(), // unused by this suite
+                join: join_vk,
                 scan: scan_vk,
                 pseudonym_pred: pred_vk,
             },
@@ -195,6 +228,8 @@ mod e2e {
                 badge_request: scan_pk.clone(), // unused by this suite
                 authorship_pred: pred_pk.clone(), // unused by this suite
                 badge_pred: pred_pk.clone(), // unused by this suite
+                join: join_pk,
+                not_banned: not_banned_pk,
                 scan: scan_pk,
                 pseudonym_pred: pred_pk,
             },
@@ -283,9 +318,9 @@ mod e2e {
 
         // (1) Everyone joins; deliver all three joins to all three replicas.
         let joins = [
-            poster.emit_join().unwrap(),
-            v1.emit_join().unwrap(),
-            v2.emit_join().unwrap(),
+            poster.emit_join(&mut rng, acct()).unwrap(),
+            v1.emit_join(&mut rng, acct()).unwrap(),
+            v2.emit_join(&mut rng, acct()).unwrap(),
         ];
         for e in &joins {
             deliver(&mut poster, e);
@@ -423,9 +458,9 @@ mod e2e {
         // (1) Joins, all in barrier 0. Every replica needs all three to hold the full-set
         //     root the coming proofs are built on; the delivery order is shuffled per
         //     replica, which the set-committing object tree converges through regardless.
-        let jp = poster.emit_join().unwrap();
-        let jc = c.emit_join().unwrap();
-        let jd = d.emit_join().unwrap();
+        let jp = poster.emit_join(&mut rng, acct()).unwrap();
+        let jc = c.emit_join(&mut rng, acct()).unwrap();
+        let jd = d.emit_join(&mut rng, acct()).unwrap();
         let joins = [(&jp, 100u64), (&jc, 150u64), (&jd, 200u64)];
         for &(e, t) in &[joins[0], joins[1], joins[2]] {
             deliver_at(&mut poster, e, t);
@@ -573,9 +608,9 @@ mod e2e {
         );
 
         let joins = [
-            poster.emit_join().unwrap(),
-            v1.emit_join().unwrap(),
-            v2.emit_join().unwrap(),
+            poster.emit_join(&mut rng, acct()).unwrap(),
+            v1.emit_join(&mut rng, acct()).unwrap(),
+            v2.emit_join(&mut rng, acct()).unwrap(),
         ];
         for e in &joins {
             deliver(&mut poster, e);
@@ -663,7 +698,7 @@ mod e2e {
             config(),
             Some(Member::create(keys.member.clone(), &mut rng)),
         );
-        for e in [poster.emit_join().unwrap(), peer.emit_join().unwrap()] {
+        for e in [poster.emit_join(&mut rng, acct()).unwrap(), peer.emit_join(&mut rng, acct()).unwrap()] {
             deliver(&mut poster, &e);
             deliver(&mut peer, &e);
         }
@@ -732,9 +767,9 @@ mod e2e {
         let mut v2 = new_member(&mut rng);
 
         let joins = [
-            poster.emit_join().unwrap(),
-            v1.emit_join().unwrap(),
-            v2.emit_join().unwrap(),
+            poster.emit_join(&mut rng, acct()).unwrap(),
+            v1.emit_join(&mut rng, acct()).unwrap(),
+            v2.emit_join(&mut rng, acct()).unwrap(),
         ];
         for e in &joins {
             for m in [&mut poster, &mut v1, &mut v2] {
@@ -830,7 +865,7 @@ mod e2e {
             config(),
             Some(Member::create(keys.member.clone(), &mut rng)),
         );
-        let join = m.emit_join().unwrap();
+        let join = m.emit_join(&mut rng, acct()).unwrap();
         deliver(&mut m, &join);
         for i in 0..3u64 {
             let e = m.emit_post_pseudo(&mut rng, "post", F::from(100 + i)).unwrap();
@@ -862,6 +897,188 @@ mod e2e {
         assert!(!m.scan_needed());
     }
 
+    /// A badge proof is only as good as the root it is made against. A forger gives its
+    /// own object the public FACULTY value (no approval, no callback), builds a one-leaf
+    /// tree around it and proves possession: the proof verifies cryptographically, but its
+    /// root is not one the group's replica ever produced, which is what the verifier must
+    /// check (`Replica::has_produced_root`).
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_forged_badge_proof_names_a_root_the_group_never_had() {
+        use personas_core::circuits::{BadgesArgs, BadgesArgsVar, FACULTY_F, badge_pred};
+        let mut rng = StdRng::seed_from_u64(43);
+        let keys = keygen(&mut rng);
+        let (badge_pk, badge_vk): (PK, VK) = generate_keys_for_statement_in::<
+            F,
+            H,
+            MsgUser,
+            BadgesArgs<F>,
+            BadgesArgsVar<F>,
+            (),
+            (),
+            Snark,
+            ObjT,
+        >(
+            &mut rng,
+            badge_pred,
+            None,
+            BadgesArgs {
+                i: F::from(1u64),
+                claimed: F::from(0u64),
+            },
+        );
+        let mut member_keys = keys.member.clone();
+        member_keys.badge_pred = badge_pk;
+
+        // A real group the forger is not part of.
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let mut group = Msg::new(
+            transport,
+            ConversationId("forgery".into()),
+            keys.replica.clone(),
+            config(),
+            Some(Member::create(member_keys.clone(), &mut rng)),
+        );
+        let join = group.emit_join(&mut rng, acct()).unwrap();
+        deliver(&mut group, &join);
+
+        let mut forger = Member::create(member_keys, &mut rng);
+        forger.user.data.badge1 = *FACULTY_F;
+        let mut own_tree = ObjT::new();
+        own_tree.push(forger.commitment(), F::from(0u64), Vec::new());
+        let (root, proof) = forger
+            .badge(&mut rng, &own_tree, F::from(1u64), *FACULTY_F)
+            .expect("a proof against the forger's own tree");
+        let bytes =
+            personas_core::encode_badge_proof(&proof, &[F::from(1u64), *FACULTY_F, root]).unwrap();
+
+        assert!(
+            personas_core::verify_badge_proof(&badge_vk, &bytes).is_some(),
+            "the forged proof is cryptographically valid — which is the whole problem"
+        );
+        assert!(
+            !group.replica().has_produced_root(root),
+            "but its root is not one the group produced, so it must be refused"
+        );
+        assert!(group.replica().has_produced_root(group.replica().obj_root()));
+    }
+
+    /// Proven joins, one per account, and the admin-approved re-join a reset needs.
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_proven_joins_one_per_account_and_admin_rejoin() {
+        use personas_core::circuits::{FACULTY_F, join_pred};
+        let mut rng = StdRng::seed_from_u64(47);
+        let keys = keygen(&mut rng);
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let conv = ConversationId("joins".into());
+        let mut new_member = |rng: &mut StdRng| {
+            Msg::new(
+                transport.clone(),
+                conv.clone(),
+                keys.replica.clone(),
+                config(),
+                Some(Member::create(keys.member.clone(), rng)),
+            )
+        };
+        let mut admin = new_member(&mut rng);
+        let mut alice = new_member(&mut rng);
+        let (admin_acct, alice_acct) = (F::from(9001u64), F::from(9002u64));
+        let status = |m: &mut Msg, e: &Emitted| deliver(m, e).unwrap().unwrap();
+        // Records in one barrier are ordered by eh, not by arrival; the client keeps a
+        // re-join a barrier after its approval, and so does this test.
+        let tick = |ms: [&mut Msg; 2]| {
+            for m in ms {
+                m.barrier();
+            }
+        };
+
+        let j = admin.emit_join(&mut rng, admin_acct).unwrap();
+        status(&mut alice, &j);
+        let j = alice.emit_join(&mut rng, alice_acct).unwrap();
+        assert_eq!(status(&mut admin, &j), Status::Applied, "a fresh, proven join");
+
+        // A doctored object cannot produce an acceptable join...
+        let mut forger = Member::create(keys.member.clone(), &mut rng);
+        forger.user.data.badge1 = *FACULTY_F;
+        assert!(matches!(forger.join(&mut rng, F::from(1u64)), Err(MemberError::NotFresh)));
+        let forced = forger
+            .user
+            .prove_statement::<H, F, ark_r1cs_std::fields::fp::FpVar<F>, (), (), Snark>(
+                &mut rng,
+                join_pred,
+                &keys.member.join,
+                F::from(1u64),
+                (),
+            )
+            .unwrap();
+        let (bytes, _) = record::encode(&Record::Join {
+            object: Ark(forced.object),
+            old_nul: Ark(F::from(0u64)),
+            account: Ark(F::from(1u64)),
+            proof: Ark(forced.proof),
+        })
+        .unwrap();
+        let forged = Emitted { bytes, eh: record::decode(&record::encode(&Record::PollOpen { question: String::new(), options: vec![], kind: PollKind::Standard, target: None }).unwrap().0).unwrap().1, persona: None };
+        assert_eq!(status(&mut admin, &forged), Status::Rejected("join proof failed"));
+        // ...nor can a valid proof be pinned to someone else's object or account.
+        let honest = Member::create(keys.member.clone(), &mut rng)
+            .join(&mut rng, F::from(2u64))
+            .unwrap();
+        let Record::Join { proof, .. } = honest else { unreachable!() };
+        let (bytes, _) = record::encode(&Record::Join {
+            object: Ark(forger.commitment()),
+            old_nul: Ark(F::from(0u64)),
+            account: Ark(F::from(2u64)),
+            proof,
+        })
+        .unwrap();
+        let swapped = Emitted { bytes, eh: forged.eh, persona: None };
+        assert_eq!(status(&mut admin, &swapped), Status::Rejected("join proof failed"));
+
+        // One join per account: a second identity for alice is refused.
+        let mut alice2 = new_member(&mut rng);
+        let again = alice2.emit_join(&mut rng, alice_acct).unwrap();
+        assert_eq!(status(&mut admin, &again), Status::Rejected("account already joined"));
+        tick([&mut alice, &mut admin]);
+
+        // Not banned: needs a completed sweep first.
+        let post = alice.emit_post_pseudo(&mut rng, "hi", F::from(5u64)).unwrap();
+        status(&mut admin, &post);
+        assert!(alice.prove_not_banned(&mut rng, alice_acct).is_err(), "not swept since posting");
+        for m in [&mut alice, &mut admin] {
+            for _ in 0..=config().settlement_barriers {
+                m.barrier();
+            }
+        }
+        while alice.scan_needed() {
+            alice.prepare_scan(&mut rng).unwrap();
+            let scan = alice.commit_scan().unwrap();
+            assert_eq!(status(&mut admin, &scan), Status::Applied);
+        }
+        let proof = alice.prove_not_banned(&mut rng, alice_acct).unwrap();
+        let (account, root) =
+            personas_core::verify_not_banned_proof(&keys.not_banned_vk, &proof).unwrap();
+        assert_eq!(account, alice_acct);
+        assert!(admin.replica().has_produced_root(root), "made against the group's tree");
+
+        // The admin approves; alice resets to a fresh object and joins once more.
+        let approve = admin.emit_rejoin_approve(alice_acct).unwrap();
+        status(&mut alice, &approve);
+        assert_eq!(alice.replica().join_counts(alice_acct), (1, 1));
+        tick([&mut alice, &mut admin]);
+        alice.reset_member(&mut rng).unwrap();
+        let rejoin = alice.emit_join(&mut rng, alice_acct).unwrap();
+        assert_eq!(status(&mut admin, &rejoin), Status::Applied, "the approved re-join");
+        assert!(alice.member_on_bulletin());
+        tick([&mut alice, &mut admin]);
+        // The approval is used up.
+        let mut alice3 = new_member(&mut rng);
+        let third = alice3.emit_join(&mut rng, alice_acct).unwrap();
+        assert_eq!(status(&mut admin, &third), Status::Rejected("account already joined"));
+        assert_eq!(fingerprint(&alice), fingerprint(&admin));
+    }
+
     /// A late joiner adopts a snapshot from an inviter, TOFU-pinned (§12): with the
     /// right pin it re-derives identical roots; a wrong pin is refused.
     #[test]
@@ -880,7 +1097,7 @@ mod e2e {
             config(),
             Some(Member::create(keys.member.clone(), &mut rng)),
         );
-        let join = inviter.emit_join().unwrap();
+        let join = inviter.emit_join(&mut rng, acct()).unwrap();
         deliver(&mut inviter, &join);
         let post = inviter
             .emit_post_pseudo(&mut rng, "history", F::from(9))

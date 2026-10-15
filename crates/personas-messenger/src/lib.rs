@@ -44,7 +44,7 @@ use transport_api::{ConversationId, Incoming, Sent, Transport, TransportError};
 
 use personas_bulletin::merkle::callback::{DEFAULT_CB_MEMB_HEIGHT, DEFAULT_CB_NMEMB_HEIGHT};
 use personas_bulletin::merkle::obj::DEFAULT_OBJ_HEIGHT;
-use personas_bulletin::replica::record::{self, Eh, Flavour, PollKind, Record};
+use personas_bulletin::replica::record::{self, Ark, Eh, Flavour, PollKind, Record};
 use personas_bulletin::replica::{Config, Replica, ReplicaKeys, Status};
 use personas_core::{F, persona};
 
@@ -367,10 +367,60 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
 
     // --- Send: produce (sync) ---------------------------------------------------
 
-    /// Announce this member's join (no proof). Must land before any other send.
-    pub fn emit_join(&mut self) -> Result<Emitted, SendError> {
-        let record = self.member.as_ref().ok_or(SendError::Observer)?.join();
+    /// Announce this member's join as `account`, proving its object is fresh. Must land
+    /// before any other send. Accepted once per account, plus once per admin re-join
+    /// approval ([`emit_rejoin_approve`](Self::emit_rejoin_approve)).
+    pub fn emit_join(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        account: F,
+    ) -> Result<Emitted, SendError> {
+        if self.pending_scan.is_some() {
+            return Err(SendError::ScanPending);
+        }
+        let record = self
+            .member
+            .as_ref()
+            .ok_or(SendError::Observer)?
+            .join(rng, account)?;
         self.emit(record)
+    }
+
+    /// As a group admin, allow `account` one more join (after it asked for a reset).
+    /// The client sends this under the admin's own account and every member checks the
+    /// sender is an admin before ingesting it.
+    pub fn emit_rejoin_approve(&mut self, account: F) -> Result<Emitted, SendError> {
+        if self.member.is_none() {
+            return Err(SendError::Observer);
+        }
+        self.emit(Record::RejoinApprove {
+            account: Ark(account),
+        })
+    }
+
+    /// Prove this member is not banned and has just completed a scan sweep, as
+    /// `account`, against the replica's current root — the proof a reset request
+    /// carries. Encoded as `personas_core::encode_not_banned_proof` (`[account, root]`).
+    pub fn prove_not_banned(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        account: F,
+    ) -> Result<Vec<u8>, SendError> {
+        let (root, proof) = {
+            let (replica, member) = self.parts_mut()?;
+            member.not_banned(rng, replica.obj_store(), account)?
+        };
+        Ok(personas_core::encode_not_banned_proof(&proof, &[account, root])?)
+    }
+
+    /// Start over as a brand-new member (fresh object, new secret key), keeping the
+    /// replica. Only useful once an admin approved a re-join for this account.
+    pub fn reset_member(&mut self, rng: &mut (impl CryptoRng + RngCore)) -> Result<(), SendError> {
+        if self.pending_scan.is_some() {
+            return Err(SendError::ScanPending);
+        }
+        self.member.as_mut().ok_or(SendError::Observer)?.reset(rng);
+        Ok(())
     }
 
     /// Produce an anonymous post.
@@ -673,9 +723,13 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         Ok((e.eh, sent))
     }
 
-    /// Emit and broadcast this member's join.
-    pub async fn send_join(&mut self) -> Result<(Eh, Sent), SendError> {
-        let e = self.emit_join()?;
+    /// Emit and broadcast this member's join as `account`.
+    pub async fn send_join(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        account: F,
+    ) -> Result<(Eh, Sent), SendError> {
+        let e = self.emit_join(rng, account)?;
         let sent = self.broadcast(&e).await?;
         Ok((e.eh, sent))
     }

@@ -198,6 +198,10 @@ pub struct Derived {
     pub personas: HashMap<[u8; 32], String>,
     /// The accepted records in ingest order, for rendering and debugging.
     pub log: Vec<LogEntry>,
+    /// Joins applied per account (`f_key` of the account field).
+    pub joins: HashMap<[u8; 32], u32>,
+    /// Admin-approved extra joins per account.
+    pub rejoin_allowance: HashMap<[u8; 32], u32>,
 }
 
 impl Derived {

@@ -21,6 +21,9 @@ fn join(x: u64) -> (Vec<u8>, super::record::Eh) {
     let rec = Record::Join {
         object: Ark(F::from(x)),
         old_nul: Ark(F::from(1_000_000 + x)),
+        // Distinct accounts (one join each). No proof: these replicas trust joins.
+        account: Ark(F::from(2_000_000 + x)),
+        proof: Ark(Default::default()),
     };
     encode(&rec).unwrap()
 }
@@ -28,7 +31,7 @@ fn join(x: u64) -> (Vec<u8>, super::record::Eh) {
 /// A replica with placeholder keys — fine because these tests only ingest records
 /// that carry no proof, so no key is ever touched.
 fn replica() -> TestReplica {
-    TestReplica::new(placeholder_keys(), Config::default())
+    TestReplica::new(placeholder_keys(), Config::default()).trust_unproven_joins_for_tests()
 }
 
 /// A `ReplicaKeys` whose verifying keys are default/empty — never used by the
@@ -42,7 +45,8 @@ fn placeholder_keys() -> super::ReplicaKeys {
         pseudo_rate: vk.clone(),
         scan: vk.clone(),
         pseudonym_pred: vk.clone(),
-        badge_request: vk,
+        badge_request: vk.clone(),
+        join: vk,
     }
 }
 
@@ -170,7 +174,7 @@ fn advance_to_closes_a_ban_poll_on_cadence() {
     let (poll, eh) = ban_poll();
     let config = Config::default();
     let close = config.poll_close_barriers;
-    let mut r = Replica::<4, 4, 4>::new(placeholder_keys(), config);
+    let mut r = Replica::<4, 4, 4>::new(placeholder_keys(), config).trust_unproven_joins_for_tests();
     r.ingest_at(poll, 0).unwrap();
     assert!(!r.poll(&eh).unwrap().closed, "open at barrier 0");
 
@@ -212,14 +216,18 @@ fn the_journal_survives_a_restart() {
 
     let root;
     {
-        let mut r = TestReplica::open(&path, placeholder_keys(), Config::default()).unwrap();
+        let mut r = TestReplica::open(&path, placeholder_keys(), Config::default())
+            .unwrap()
+            .trust_unproven_joins_for_tests();
         r.ingest(a.clone()).unwrap();
         r.ingest(b.clone()).unwrap();
         root = r.obj_root();
     }
 
     // Reopen: the journal replays the same records into the same tree.
-    let reopened = TestReplica::open(&path, placeholder_keys(), Config::default()).unwrap();
+    let reopened = TestReplica::open(&path, placeholder_keys(), Config::default())
+        .unwrap()
+        .trust_unproven_joins_for_tests();
     assert_eq!(reopened.obj_root(), root, "replay reproduces the root");
     assert_eq!(reopened.status(&a_eh), Some(Status::Applied));
 
@@ -256,7 +264,8 @@ fn checkpointed_rebuilds_match_a_full_replay_across_a_long_schedule() {
     records.push((148, late));
     r.advance_to(151);
 
-    let fresh = TestReplica::from_records(placeholder_keys(), Config::default(), records, 151);
+    let fresh = TestReplica::from_records(placeholder_keys(), Config::default(), records, 151)
+        .trust_unproven_joins_for_tests();
     assert_eq!(r.obj_root(), fresh.obj_root());
     assert_eq!(r.status(&late_eh), Some(Status::Applied));
     assert_eq!(

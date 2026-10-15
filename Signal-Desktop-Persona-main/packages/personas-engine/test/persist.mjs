@@ -9,6 +9,10 @@
 // Usage: node persist.mjs <keyDir>
 
 import { Engine } from '../index.mjs';
+
+// Each member joins as a distinct account (one join per account): a 16-byte ACI as hex.
+let accountSeq = 0;
+const nextAccount = () => (++accountSeq).toString(16).padStart(32, '0');
 import { appendFileSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +37,7 @@ const deliver = (emitted, to) => to.map(m => m.ingest(emitted.bytes, 0).status);
 
 console.log('(1) join, post, save, restart');
 for (const m of [alice, bob]) {
-  deliver(m.emitJoin(), [alice, bob]);
+  deliver(m.emitJoin(nextAccount()), [alice, bob]);
 }
 const first = alice.emitPostPseudo('before the restart', 0x51);
 const saved = alice.exportMemberState(); // saved BEFORE the post is delivered

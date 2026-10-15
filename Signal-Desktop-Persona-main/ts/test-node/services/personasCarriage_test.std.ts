@@ -38,6 +38,9 @@ import {
   encodeTopicAnnouncement,
   decodeTopicAnnouncement,
   isPersonaPhantomBody,
+  encodeResetRequest,
+  decodeResetRequest,
+  PERSONAS_RESET_REQUEST_MARKER,
   encodeAuthorshipProof,
   decodeAuthorshipProof,
   encodeBadgeProof,
@@ -441,5 +444,32 @@ describe('personasCarriage phantom bundle', () => {
     assert.isUndefined(decodePhantomBundle(`${PERSONAS_PHANTOM_BUNDLE_MARKER}not base64 json`));
     assert.isUndefined(decodePhantomBundle('just a message'));
     assert.isUndefined(decodePhantomBundle(undefined));
+  });
+});
+
+describe('personas reset request carriage', () => {
+  const account = '0123456789abcdef0123456789abcdef';
+
+  it('round-trips a request with and without a proof', () => {
+    const withProof = { a: account, p: 'cHJvb2Y=' };
+    assert.deepEqual(decodeResetRequest(encodeResetRequest(withProof)), withProof);
+    const without = { a: account, p: null, r: 'a full scan is needed first' };
+    assert.deepEqual(decodeResetRequest(encodeResetRequest(without)), without);
+  });
+
+  it('refuses malformed requests', () => {
+    assert.isUndefined(decodeResetRequest('hello'));
+    assert.isUndefined(decodeResetRequest(`${PERSONAS_RESET_REQUEST_MARKER}not base64 json`));
+    assert.isUndefined(decodeResetRequest(encodeResetRequest({ a: 'not-an-account', p: null })));
+    assert.isUndefined(
+      decodeResetRequest(
+        PERSONAS_RESET_REQUEST_MARKER +
+          Buffer.from(JSON.stringify({ a: account, p: 42 })).toString('base64')
+      )
+    );
+  });
+
+  it('is never routed through the anonymous phantom', () => {
+    assert.isFalse(isPersonaPhantomBody(encodeResetRequest({ a: account, p: null })));
   });
 });

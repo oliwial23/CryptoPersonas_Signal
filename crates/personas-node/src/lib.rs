@@ -122,6 +122,32 @@ pub struct JsLogEntry {
     pub flagged: bool,
 }
 
+/// Joins applied and re-joins approved for one account.
+#[napi(object)]
+pub struct JsJoinCounts {
+    pub joins: u32,
+    pub approved: u32,
+}
+
+/// The account a join or re-join approval names, and which kind it is.
+#[napi(object)]
+pub struct JsAccountClaim {
+    /// `"join"` or `"rejoin-approve"`.
+    pub kind: String,
+    /// The account's ACI as 32 hex characters (no dashes).
+    pub account: String,
+}
+
+/// An account as the engine's field element, from the ACI's 32 hex characters.
+fn account_from_hex(account: &str) -> napi::Result<F> {
+    let bytes = hex::decode(account.replace('-', ""))
+        .map_err(|e| napi::Error::from_reason(format!("bad account hex: {e}")))?;
+    let arr: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("an account is 16 bytes (an ACI)"))?;
+    Ok(personas_core::account_field(&arr))
+}
+
 /// The personas ZK engine: a production-height messenger plus its RNG.
 #[napi]
 pub struct Engine {
@@ -133,6 +159,8 @@ pub struct Engine {
     authorship_vk: personas_core::VK,
     /// Verifying key for `badge_pred`, so a recipient can check a badge proof.
     badge_vk: personas_core::VK,
+    /// Verifying key for `not_banned_pred`, so an admin can check a reset request.
+    not_banned_vk: personas_core::VK,
     /// The record journal, when persistence is on.
     journal: Option<Journal>,
 }
@@ -274,6 +302,7 @@ impl Engine {
 
         let authorship_vk = keys.authorship_pred_verifying_key.clone();
         let badge_vk = keys.badge_pred_verifying_key.clone();
+        let not_banned_vk = keys.not_banned_pred_verifying_key.clone();
 
         let heartbeat = match (options.heartbeat_anchor_ms, options.heartbeat_period_ms) {
             (Some(anchor), Some(period)) => Some(Heartbeat::new(anchor as u64, period as u64)),
@@ -318,6 +347,7 @@ impl Engine {
             rng,
             authorship_vk,
             badge_vk,
+            not_banned_vk,
             journal,
         })
     }
@@ -454,6 +484,10 @@ impl Engine {
     #[napi]
     pub fn verify_authorship(&self, proof: Buffer) -> Option<JsAuthorship> {
         let inputs = personas_core::verify_authorship_proof(&self.authorship_vk, proof.as_ref())?;
+        // Made against OUR group's tree, not one the prover built (inputs[4] is the root).
+        if !self.inner.replica().has_produced_root(inputs[4]) {
+            return None;
+        }
         Some(JsAuthorship {
             first: personas_core::persona::petname(inputs[1]),
             second: personas_core::persona::petname(inputs[3]),
@@ -547,7 +581,14 @@ impl Engine {
     /// the message: otherwise a valid Student proof could be displayed as Faculty.
     #[napi]
     pub fn verify_badge_proof(&self, proof: Buffer) -> Option<String> {
-        let (_slot, value) = personas_core::verify_badge_proof(&self.badge_vk, proof.as_ref())?;
+        let (_slot, value, root) =
+            personas_core::verify_badge_proof(&self.badge_vk, proof.as_ref())?;
+        // THE ROOT CHECK. Without it a badge is forgeable: build a one-leaf tree around an
+        // object whose badge slot holds the public FACULTY constant, prove against that,
+        // and every recipient shows a verified badge nobody approved.
+        if !self.inner.replica().has_produced_root(root) {
+            return None;
+        }
         // Map back through the same table the prover used, so an unrecognised value is
         // reported as unverified rather than rendered as something plausible.
         ["Faculty", "Student", "Industry"]
@@ -653,12 +694,82 @@ impl Engine {
 
     /// Emit a join record (a member advertising itself to the group).
     #[napi]
-    pub fn emit_join(&mut self) -> napi::Result<JsEmitted> {
+    pub fn emit_join(&mut self, account: String) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_join")?;
-        {
-            let r = self.inner.emit_join();
-            self.emit(r)
+        let account = account_from_hex(&account)?;
+        let r = self.inner.emit_join(&mut self.rng, account);
+        self.emit(r)
+    }
+
+    /// As a group admin, allow `account` (32 hex chars: the ACI without dashes) one more
+    /// join. Send it under the admin's OWN account: members only ingest it from an admin.
+    #[napi]
+    pub fn emit_rejoin_approve(&mut self, account: String) -> napi::Result<JsEmitted> {
+        let account = account_from_hex(&account)?;
+        let r = self.inner.emit_rejoin_approve(account);
+        self.emit(r)
+    }
+
+    /// The proof a reset request carries: this member, as `account`, is not banned and
+    /// has just completed a scan sweep, against the group's current tree. Fails when the
+    /// member is banned, has not swept since its last action, or is out of sync.
+    #[napi]
+    pub fn prove_not_banned(&mut self, account: String) -> napi::Result<Buffer> {
+        self.guard_not_scanning("prove_not_banned")?;
+        let account = account_from_hex(&account)?;
+        self.inner
+            .prove_not_banned(&mut self.rng, account)
+            .map(Buffer::from)
+            .map_err(|e| napi::Error::from_reason(format!("prove_not_banned failed: {e}")))
+    }
+
+    /// Check a reset request's proof. Returns the account (hex) it proves for, only if
+    /// the proof verifies AND was made against a tree this replica produced — otherwise
+    /// it is a statement about a tree the requester built.
+    #[napi]
+    pub fn verify_not_banned(&self, proof: Buffer) -> Option<String> {
+        let (account, root) =
+            personas_core::verify_not_banned_proof(&self.not_banned_vk, proof.as_ref())?;
+        if !self.inner.replica().has_produced_root(root) {
+            return None;
         }
+        Some(hex::encode(personas_core::account_bytes(&account)))
+    }
+
+    /// Start over as a brand-new member (fresh object, new secret key) — after an admin
+    /// approved this account's re-join. Badges, reputation and pseudonyms are abandoned.
+    #[napi]
+    pub fn reset_member(&mut self) -> napi::Result<()> {
+        self.inner
+            .reset_member(&mut self.rng)
+            .map_err(|e| napi::Error::from_reason(format!("reset_member failed: {e}")))
+    }
+
+    /// Joins applied and re-joins approved for `account`. It may join while
+    /// `joins < 1 + approved`.
+    #[napi]
+    pub fn join_counts(&self, account: String) -> napi::Result<JsJoinCounts> {
+        let (joins, approved) = self.inner.replica().join_counts(account_from_hex(&account)?);
+        Ok(JsJoinCounts { joins, approved })
+    }
+
+    /// For records whose sender the client must check before ingesting: a JOIN (the
+    /// account must be the sender) or a RE-JOIN APPROVAL (the sender must be a group
+    /// admin). `None` for any other record.
+    #[napi]
+    pub fn record_account_claim(&self, record: Buffer) -> Option<JsAccountClaim> {
+        let (rec, _) = personas_bulletin::replica::record::decode(record.as_ref()).ok()?;
+        let (kind, account) = match rec {
+            personas_bulletin::replica::record::Record::Join { account, .. } => ("join", account.0),
+            personas_bulletin::replica::record::Record::RejoinApprove { account } => {
+                ("rejoin-approve", account.0)
+            }
+            _ => return None,
+        };
+        Some(JsAccountClaim {
+            kind: kind.to_string(),
+            account: hex::encode(personas_core::account_bytes(&account)),
+        })
     }
 
     /// Emit a pseudonymous post under `context` (the thread/topic the persona is

@@ -17,7 +17,12 @@ import {
   decodeAuthorshipProof,
   decodeBadgeProof,
   decodeRecordBody,
+  decodeResetRequest,
 } from '../services/personasCarriage.std.ts';
+import {
+  ingestResetRequest,
+  recordSenderProblem,
+} from '../services/personasReset.preload.ts';
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
 import { recordTimestamp } from '../services/personasBarrier.preload.ts';
 import {
@@ -252,10 +257,31 @@ export async function handleDataMessage(
       return;
     }
 
+    // A RESET REQUEST (personasReset): coordination for admins, never rendered.
+    const resetRequest = decodeResetRequest(initialMessage.body);
+    if (resetRequest) {
+      await waitForPersonasEngineIfStarting();
+      ingestResetRequest(resetRequest, sourceServiceId);
+      confirm();
+      return;
+    }
+
     // A record that arrives while the engine is still starting waits for it rather
     // than being dropped (a dropped record forks this member off the group).
     if (decodeRecordBody(initialMessage.body)) {
       await waitForPersonasEngineIfStarting();
+      // A join must come from the account it names, and a re-join approval from a
+      // group admin. Dropped otherwise, before the engine sees it (personasReset).
+      const senderProblem = recordSenderProblem(
+        initialMessage.body,
+        sourceServiceId,
+        conversation
+      );
+      if (senderProblem) {
+        log.warn(`${idLog}: personas record dropped: ${senderProblem}`);
+        confirm();
+        return;
+      }
     }
     const personasRecord = ingestRecordForTimeline(
       initialMessage.body,

@@ -33,6 +33,7 @@ import {
   isPostFlagged,
 } from './personasEngine.preload.ts';
 import { sendPersonaScan } from './personasActions.preload.ts';
+import { maybeCompletePersonasReset } from './personasReset.preload.ts';
 import { hasJoinedPersonaGroup } from './personasMembership.preload.ts';
 import { getTrackedPersonaPosts } from './personasRegistry.std.ts';
 
@@ -138,6 +139,8 @@ export function startPersonaFlagLoops(
           log.error(`flag refresh failed: ${toLogFormat(error)}`)
         )
       );
+      // An admin-approved reset completes itself once the approval has landed.
+      drop(maybeCompletePersonasReset());
     }, REFRESH_INTERVAL_MS);
   }
 

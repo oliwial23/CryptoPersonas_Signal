@@ -196,7 +196,12 @@ pub fn encode_badge_proof(
 /// As with authorship, the caller must render what comes BACK from here rather than any
 /// badge label carried in the message: otherwise a valid proof for Student could be
 /// displayed as Faculty, and the checkmark would be true while the label lied.
-pub fn verify_badge_proof(vk: &VK, bytes: &[u8]) -> Option<(F, F)> {
+///
+/// The third value is the object ROOT the proof was made against. A valid proof only
+/// says "some object in the tree with this root holds the badge" — and anyone can build a
+/// tree of their own around an object with any badge in it. The caller MUST check that
+/// the root is one its own replica produced (`Replica::has_produced_root`).
+pub fn verify_badge_proof(vk: &VK, bytes: &[u8]) -> Option<(F, F, F)> {
     use ark_serialize::CanonicalDeserialize;
     use ark_snark::SNARK;
 
@@ -211,9 +216,62 @@ pub fn verify_badge_proof(vk: &VK, bytes: &[u8]) -> Option<(F, F)> {
         return None;
     }
     match Snark::verify(vk, &inputs, &proof) {
+        Ok(true) => Some((inputs[0], inputs[1], inputs[2])),
+        Ok(false) | Err(_) => None,
+    }
+}
+
+/// Serialize a not-banned (reset request) proof and its public inputs `[account, root]`.
+pub fn encode_not_banned_proof(
+    proof: &<Snark as ark_snark::SNARK<F>>::Proof,
+    inputs: &[F; 2],
+) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+    use ark_serialize::CanonicalSerialize;
+
+    let mut bytes = Vec::new();
+    proof.serialize_uncompressed(&mut bytes)?;
+    inputs.to_vec().serialize_uncompressed(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// VERIFY a not-banned proof, returning `(account, root)` only if it is sound. As with a
+/// badge proof, the caller MUST check the root is one its replica produced, and that the
+/// account is the one asking.
+pub fn verify_not_banned_proof(vk: &VK, bytes: &[u8]) -> Option<(F, F)> {
+    use ark_serialize::CanonicalDeserialize;
+    use ark_snark::SNARK;
+
+    let mut reader = bytes;
+    let proof =
+        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(
+            &mut reader,
+        )
+        .ok()?;
+    let inputs = Vec::<F>::deserialize_uncompressed(&mut reader).ok()?;
+    if inputs.len() != 2 {
+        return None;
+    }
+    match Snark::verify(vk, &inputs, &proof) {
         Ok(true) => Some((inputs[0], inputs[1])),
         Ok(false) | Err(_) => None,
     }
+}
+
+/// The field element standing for a Signal account in join and reset proofs: the
+/// account's 16 ACI bytes, little-endian. Below the modulus, so it is invertible
+/// (`account_bytes`).
+pub fn account_field(aci: &[u8; 16]) -> F {
+    use ark_ff::PrimeField;
+    F::from_le_bytes_mod_order(aci)
+}
+
+/// The 16 ACI bytes back from [`account_field`].
+pub fn account_bytes(account: &F) -> [u8; 16] {
+    use ark_ff::{BigInteger, PrimeField};
+    let le = account.into_bigint().to_bytes_le();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&le[..16]);
+    out
 }
 
 /// The field element a badge NAME maps to, or `None` for an unknown name.

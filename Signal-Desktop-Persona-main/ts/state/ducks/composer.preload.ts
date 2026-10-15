@@ -74,6 +74,7 @@ import {
   maybeSendPersonaRateForReaction,
   sendPersonaPoll,
   drainPersonaScans,
+  runFullPersonaSweep,
   isPersonaBanned,
 } from '../../services/personasActions.preload.ts';
 import { blockSendUntilConversationsAreVerified } from '../../util/blockSendUntilConversationsAreVerified.dom.ts';
@@ -145,6 +146,11 @@ import {
   dismissBadgeRequest as doDismissBadgeRequest,
 } from '../../services/personasBadgeFlow.preload.ts';
 import { sendBadgeProof as doSendBadgeProof } from '../../services/personasBadgeProof.preload.ts';
+import {
+  approvePersonasReset as doApprovePersonaReset,
+  dismissResetRequest as doDismissResetRequest,
+  requestPersonasReset as doRequestPersonaReset,
+} from '../../services/personasReset.preload.ts';
 
 const { debounce, isEqual } = lodash;
 
@@ -541,6 +547,56 @@ function provePersonaBadge(
   };
 }
 
+// Ask the group's admins to allow this account one more join (personasReset).
+function requestPersonaReset(
+  conversationId: string
+): ThunkAction<void, RootStateType, unknown, NoopActionType | ShowToastActionType> {
+  return async dispatch => {
+    const conversation = window.ConversationController.get(conversationId);
+    if (conversation) {
+      const result = await doRequestPersonaReset(conversation, () =>
+        runFullPersonaSweep(conversation)
+      );
+      if (!result.ok) {
+        dispatch(
+          showToast({
+            toastType: ToastType.PersonaActionFailed,
+            parameters: { reason: result.reason },
+          })
+        );
+      }
+    }
+    dispatch(noopAction('requestPersonaReset'));
+  };
+}
+
+// As an admin: allow a member to join once more.
+function approvePersonaReset(
+  conversationId: string,
+  account: string
+): ThunkAction<void, RootStateType, unknown, NoopActionType | ShowToastActionType> {
+  return async dispatch => {
+    const conversation = window.ConversationController.get(conversationId);
+    if (conversation) {
+      const result = await doApprovePersonaReset(conversation, account);
+      if (!result.ok) {
+        dispatch(
+          showToast({
+            toastType: ToastType.PersonaActionFailed,
+            parameters: { reason: result.reason },
+          })
+        );
+      }
+    }
+    dispatch(noopAction('approvePersonaReset'));
+  };
+}
+
+function dismissPersonaReset(account: string): NoopActionType {
+  doDismissResetRequest(account);
+  return noopAction('dismissPersonaReset');
+}
+
 // Take a badge request off this admin's queue. LOCAL ONLY — nothing is broadcast and
 // the requester is not told; see `dismissBadgeRequest`. No record is emitted, so this
 // needs no conversation and cannot fail on the wire.
@@ -629,6 +685,9 @@ export const actions = {
   requestPersonaBadge,
   approvePersonaBadge,
   dismissPersonaBadgeRequest,
+  requestPersonaReset,
+  approvePersonaReset,
+  dismissPersonaReset,
   provePersonaBadge,
   joinPersonaBulletin,
   createPersonaPseudonym,

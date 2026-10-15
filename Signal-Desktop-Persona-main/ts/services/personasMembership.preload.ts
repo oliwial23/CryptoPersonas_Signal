@@ -23,6 +23,7 @@
 import type { ConversationModel } from '../models/conversations.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
+import { itemStorage } from '../textsecure/Storage.preload.ts';
 import { toLogFormat } from '../types/errors.std.ts';
 import {
   emitAndSelfIngest,
@@ -53,8 +54,25 @@ export function hasJoinedPersonaGroup(): boolean {
   return isRestoredMember();
 }
 
+// Our account as the engine names it: the ACI's 32 hex characters. A join is accepted
+// once per account (plus once per admin-approved re-join), and every member refuses a
+// join whose account is not the account that sent it.
+export function ourPersonasAccount(): string | undefined {
+  return itemStorage.user.getAci()?.replaceAll('-', '').toLowerCase();
+}
+
+// After an approved reset the member is a new object that has not joined.
+export function forgetPersonaJoin(): void {
+  state = 'not-joined';
+}
+
 async function sendJoin(conversation: ConversationModel): Promise<boolean> {
-  const result = emitAndSelfIngest(engine => engine.emitJoin());
+  const account = ourPersonasAccount();
+  if (!account) {
+    log.error('sendJoin: no ACI yet; cannot join');
+    return false;
+  }
+  const result = emitAndSelfIngest(engine => engine.emitJoin(account));
   if (!result) {
     log.error('sendJoin: engine unavailable; cannot join');
     return false;

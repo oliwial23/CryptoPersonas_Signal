@@ -390,6 +390,82 @@ pub fn authorship_pred<'a, 'b>(
     Ok(x1 & x2)
 }
 
+/// A Groth16 public input is bound to the proof only through constraints that use it: an
+/// input no constraint touches has an all-zero verifying-key term, so it could be changed
+/// freely without invalidating the proof. Squaring it puts it into a constraint.
+fn bind_public_input(value: &FpVar<F>) -> ArkResult<()> {
+    let _bound = value * value;
+    Ok(())
+}
+
+/// JOIN: the committed object is FRESH. Proved by every joining member, checked by every
+/// replica before the object is added to the tree.
+///
+/// Without it a join was a bare commitment the replica appended unchecked, so a modified
+/// client could join with an object of its own making — a badge nobody approved, any
+/// reputation, an empty ban flag on a fresh identity. Everything except the secret key
+/// and the commitment randomness/nullifier (which must be secret and random) is pinned
+/// to its fresh value: zero reputation, no interactions since a scan, no pseudonym
+/// count, not banned, no badges, no callbacks, no scan in progress.
+///
+/// `com` is the proof's first public input and IS the join's object: the predicate
+/// recomputes the commitment of the witnessed object and requires equality, so the
+/// proof is about exactly the leaf being added. `pub_args` is the joining ACCOUNT (a
+/// field element of the account's ACI), bound so the proof cannot be replayed as
+/// another account's join.
+pub fn join_pred<'a, 'b>(
+    tu: &'a UserVar<F, MsgUser>,
+    com: &'b FpVar<F>,
+    account: FpVar<F>,
+    _priv_args: (),
+) -> ArkResult<Boolean<F>> {
+    bind_public_input(&account)?;
+    let zero = FpVar::Constant(F::from(0u64));
+    let committed = User::<F, MsgUser>::commit_in_zk::<Poseidon<2>>(tu.clone())?;
+
+    let checks = [
+        committed.is_eq(com)?,
+        tu.data.reputation.is_eq(&zero)?,
+        tu.data.num_interactions_since_last_scan.is_eq(&zero)?,
+        tu.data.pseudo_counter.is_eq(&zero)?,
+        tu.data.banned.is_eq(&zero)?,
+        tu.data.badge1.is_eq(&zero)?,
+        tu.data.badge2.is_eq(&zero)?,
+        tu.data.badge3.is_eq(&zero)?,
+        tu.zk_fields.callback_hash.is_eq(&zero)?,
+        tu.zk_fields.new_in_progress_callback_hash.is_eq(&zero)?,
+        tu.zk_fields.old_in_progress_callback_hash.is_eq(&zero)?,
+        tu.zk_fields.is_ingest_over.clone(),
+    ];
+    Ok(Boolean::kary_and(&checks)?)
+}
+
+/// NOT BANNED, AND JUST SWEPT: the predicate a reset request carries (proved with
+/// object membership, so the object is a real, current one in the group's tree).
+///
+/// `banned == 0` alone would be weak: a ban reaches the object only when a scan absorbs
+/// it, so a member who simply stopped scanning would still read "not banned". So the
+/// object must ALSO be the result of a completed scan sweep with nothing since —
+/// `num_interactions_since_last_scan == 0` (a scan zeroes it, every other interaction
+/// increments it) and `is_ingest_over` (true only once a sweep has visited every
+/// callback). Every ban settled before that sweep was therefore absorbed. `pub_args` is
+/// the requesting ACCOUNT, bound so the proof cannot be presented by another account.
+pub fn not_banned_pred<'a, 'b>(
+    tu: &'a UserVar<F, MsgUser>,
+    _com: &'b FpVar<F>,
+    account: FpVar<F>,
+    _priv_args: (),
+) -> ArkResult<Boolean<F>> {
+    bind_public_input(&account)?;
+    let zero = FpVar::Constant(F::from(0u64));
+    let checks = [
+        tu.data.banned.is_eq(&zero)?,
+        tu.data.num_interactions_since_last_scan.is_eq(&zero)?,
+        tu.zk_fields.is_ingest_over.clone(),
+    ];
+    Ok(Boolean::kary_and(&checks)?)
+}
+
 fn standard_method(tu: &User<F, MsgUser>, _args: F, _priv: ()) -> User<F, MsgUser> {
     let mut u = tu.clone();
     u.data.num_interactions_since_last_scan += F::from(1);
@@ -1083,5 +1159,88 @@ mod callback_consistency_tests {
                 assert!(cs.is_satisfied().unwrap(), "constraints: {label}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod join_and_reset_predicate_tests {
+    use super::*;
+    use ark_r1cs_std::R1CSVar;
+    use ark_relations::r1cs::ConstraintSystem;
+    use zk_callbacks::crypto::hash::HasherZK;
+
+    fn satisfied(
+        pred: fn(&UserVar<F, MsgUser>, &FpVar<F>, FpVar<F>, ()) -> ArkResult<Boolean<F>>,
+        user: &User<F, MsgUser>,
+        com: F,
+    ) -> bool {
+        let cs = ConstraintSystem::<F>::new_ref();
+        let user_var = UserVar::new_witness(cs.clone(), || Ok(user.clone())).unwrap();
+        let com_var = FpVar::new_input(cs.clone(), || Ok(com)).unwrap();
+        let account = FpVar::new_input(cs.clone(), || Ok(F::from(42u64))).unwrap();
+        let ok = pred(&user_var, &com_var, account, ()).unwrap();
+        ok.value().unwrap() && cs.is_satisfied().unwrap()
+    }
+
+    fn fresh() -> User<F, MsgUser> {
+        let mut rng = rand::thread_rng();
+        User::create(
+            MsgUser {
+                sk: F::from(1234u64),
+                ..Default::default()
+            },
+            &mut rng,
+        )
+    }
+
+    #[test]
+    fn a_fresh_object_may_join() {
+        let u = fresh();
+        assert!(satisfied(join_pred, &u, u.commit::<Poseidon<2>>()));
+    }
+
+    #[test]
+    fn a_doctored_object_may_not_join() {
+        let tweaks: [(&str, fn(&mut User<F, MsgUser>)); 6] = [
+            ("badge", |u| u.data.badge1 = *FACULTY_F),
+            ("reputation", |u| u.data.reputation = F::from(100u64)),
+            ("banned flag", |u| u.data.banned = F::from(1u64)),
+            ("interactions", |u| u.data.num_interactions_since_last_scan = F::from(3u64)),
+            ("callbacks", |u| u.zk_fields.callback_hash = F::from(9u64)),
+            ("scan in progress", |u| u.zk_fields.is_ingest_over = false),
+        ];
+        for (what, tweak) in tweaks {
+            let mut u = fresh();
+            tweak(&mut u);
+            assert!(
+                !satisfied(join_pred, &u, u.commit::<Poseidon<2>>()),
+                "a join with a doctored {what} must not be provable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_join_proves_exactly_the_committed_object() {
+        let u = fresh();
+        let other = <Poseidon<2>>::hash(&[F::from(7u64)]);
+        assert!(!satisfied(join_pred, &u, other), "the proof's commitment is the object");
+    }
+
+    #[test]
+    fn not_banned_needs_a_completed_sweep_and_no_ban() {
+        let u = fresh();
+        assert!(satisfied(not_banned_pred, &u, u.commit::<Poseidon<2>>()));
+
+        let mut posted = fresh();
+        posted.data.num_interactions_since_last_scan = F::from(1u64);
+        assert!(!satisfied(not_banned_pred, &posted, F::from(0u64)), "not swept since posting");
+
+        let mut mid_sweep = fresh();
+        mid_sweep.zk_fields.is_ingest_over = false;
+        assert!(!satisfied(not_banned_pred, &mid_sweep, F::from(0u64)), "sweep unfinished");
+
+        let mut banned = fresh();
+        banned.data.banned = F::from(1u64);
+        assert!(!satisfied(not_banned_pred, &banned, F::from(0u64)), "banned");
     }
 }
