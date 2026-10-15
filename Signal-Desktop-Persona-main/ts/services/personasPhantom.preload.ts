@@ -18,18 +18,24 @@
 //
 // This module owns the bundle and its distribution, with no shared folder or server:
 //
-//   MINT     the member who creates a group mints the bundle (mintPhantomBundle);
-//   SHARE    any member holding it sends it 1:1 to each fellow group member who does
-//            not have it yet, over the pairwise Double Ratchet (distributePhantomBundle);
-//   ADOPT    a member adopts the FIRST bundle it gets from a fellow group member and
-//            refuses any different one afterwards (adoptPhantomBundle).
+//   MINT     the member who creates a group mints the bundle (mintPhantomBundle), or an
+//            admin turns personas on in an existing group (turnOnPersonasInGroup);
+//   SHARE    any member holding it sends it 1:1 to each fellow member OF THAT GROUP who
+//            does not have it yet, over the pairwise Double Ratchet
+//            (distributePhantomBundle);
+//   ADOPT    a member adopts the FIRST bundle it gets for a group from a fellow member
+//            of that group, and refuses any different one afterwards
+//            (adoptPhantomBundle).
 //
 // The bundle lives in item storage (the encrypted DB). Delivery rides Desktop's real
 // GroupV2 sender-key path — the phantom lives only INSIDE the sealed envelope; the real
 // account still authorizes delivery as a group member.
 //
-// ONE BUNDLE PER INSTALL: the engine is single-conversation, so a member takes part in
-// one personas group. A second group reuses the same bundle.
+// A BUNDLE BELONGS TO ONE GROUP (version 2). Each group has its own phantom identity,
+// chain and barrier schedule, and so its own persona engine, state and personas: none of
+// it is shared with another group. For now an install takes part in ONE personas group
+// (the first it mints or adopts a bundle for); persona features are off elsewhere. A
+// version 1 bundle named no group and was shared across all of them; it is discarded.
 //
 // Gated on the same signals as the rest of the demo (isPersonasEngineEnabled's env).
 
@@ -121,6 +127,8 @@ export const getSharedDistributionId = (): string => SHARED_DISTRIBUTION_ID;
 
 // The immutable, shared phantom bundle (all fields base64), as kept in item storage.
 type SerializedBundle = {
+  // The Signal group (GroupV2 id) this bundle is for.
+  groupId: string;
   // Public key of the trust root we mint; goes into config.serverTrustRoots.
   trustRootPublic: string;
   // The shared phantom identity keypair (private state — the load-bearing secret).
@@ -228,6 +236,7 @@ class PhantomIdentityStore extends IdentityKeyStore {
 
 // The loaded, live phantom material (deserialized once per process).
 export type PhantomMaterial = {
+  groupId: string;
   trustRootPublicBase64: string;
   phantomIdentity: IdentityKeyPair;
   phantomCert: SenderCertificate;
@@ -256,8 +265,9 @@ function unb64(s: string): Uint8Array<ArrayBuffer> {
   return Bytes.fromBase64(s);
 }
 
-// Mint a fresh bundle. Only the creator of a group does this; everyone else adopts.
-async function generateBundle(): Promise<SerializedBundle> {
+// Mint a fresh bundle for `groupId`. Only the group's creator (or an admin turning
+// personas on) does this; everyone else adopts.
+async function generateBundle(groupId: string): Promise<SerializedBundle> {
   const trustRoot = IdentityKeyPair.generate();
   const serverKey = IdentityKeyPair.generate();
   const serverCert = ServerCertificate.new(1, serverKey.publicKey, trustRoot.privateKey);
@@ -287,6 +297,7 @@ async function generateBundle(): Promise<SerializedBundle> {
 
   const period = Number(process.env.PERSONAS_BARRIER_PERIOD_MS);
   return {
+    groupId,
     trustRootPublic: b64(trustRoot.publicKey.serialize()),
     phantomIdentityKeyPair: b64(phantomIdentity.serialize()),
     phantomCert: b64(phantomCert.serialize()),
@@ -302,6 +313,7 @@ async function generateBundle(): Promise<SerializedBundle> {
 
 function deserialize(bundle: SerializedBundle): PhantomMaterial {
   return {
+    groupId: bundle.groupId,
     trustRootPublicBase64: bundle.trustRootPublic,
     phantomIdentity: IdentityKeyPair.deserialize(unb64(bundle.phantomIdentityKeyPair)),
     phantomCert: SenderCertificate.deserialize(unb64(bundle.phantomCert)),
@@ -332,6 +344,14 @@ export async function ensurePhantomMaterial(): Promise<PhantomMaterial | undefin
     return undefined;
   }
   try {
+    if (!(JSON.parse(json) as Partial<SerializedBundle>).groupId) {
+      // A version 1 bundle, shared across every group. Drop it, and who it was sent to,
+      // so personas start over per group.
+      log.warn('ensurePhantomMaterial: discarding a bundle that names no group (version 1)');
+      await itemStorage.remove('personasPhantomBundle');
+      await itemStorage.remove('personasPhantomSentTo');
+      return undefined;
+    }
     return activate(json, 'loaded from storage');
   } catch (error) {
     log.error(`ensurePhantomMaterial: stored bundle unreadable: ${toLogFormat(error)}`);
@@ -341,6 +361,37 @@ export async function ensurePhantomMaterial(): Promise<PhantomMaterial | undefin
 
 export function hasPhantomMaterial(): boolean {
   return material !== undefined;
+}
+
+// The one Signal group (GroupV2 id) this install uses personas in, once it holds a bundle.
+export function getPersonasGroupId(): string | undefined {
+  return material?.groupId;
+}
+
+// Whether `conversation` is this install's personas group.
+export function isPersonasGroup(conversation: ConversationModel | undefined): boolean {
+  const groupId = conversation?.get('groupId');
+  return material != null && groupId != null && groupId === material.groupId;
+}
+
+// How persona features stand in `conversation`, for the composer: this is the personas
+// group; personas are not on anywhere yet; or they are on in another group (by name).
+export type PersonasGroupStanding =
+  | { kind: 'this' }
+  | { kind: 'none' }
+  | { kind: 'other'; name: string };
+
+export function personasGroupStanding(
+  conversation: ConversationModel | undefined
+): PersonasGroupStanding {
+  if (!material) {
+    return { kind: 'none' };
+  }
+  if (isPersonasGroup(conversation)) {
+    return { kind: 'this' };
+  }
+  const group = window.ConversationController.get(material.groupId);
+  return { kind: 'other', name: group?.getTitle() ?? 'another group' };
 }
 
 // Which group's bundle this member holds — what its saved engine state is keyed by, so a
@@ -377,23 +428,60 @@ async function commitBundle(json: string, how: string): Promise<PhantomMaterial>
   return mat;
 }
 
-// The group creator mints the bundle. Idempotent: a member that already holds one keeps
-// it (one bundle per install).
-export async function mintPhantomBundle(): Promise<PhantomMaterial | undefined> {
-  if (!isPersonasMode()) {
+// The group creator mints the group's bundle. One personas group per install for now: a
+// member that already holds a bundle (for any group) keeps it and mints nothing.
+export async function mintPhantomBundle(
+  groupId: string | undefined
+): Promise<PhantomMaterial | undefined> {
+  if (!isPersonasMode() || !groupId) {
     return undefined;
   }
   const existing = await ensurePhantomMaterial();
   if (existing) {
+    if (existing.groupId !== groupId) {
+      log.info('mintPhantomBundle: personas are already on in another group; not minting');
+    }
     return existing;
   }
-  return commitBundle(JSON.stringify(await generateBundle()), 'minted');
+  return commitBundle(JSON.stringify(await generateBundle(groupId)), 'minted');
+}
+
+export type TurnOnResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+// An ADMIN turns personas on in an existing group that has none: mints the group's
+// bundle and shares it with the members. Only ONE admin should do this per group — two
+// bundles minted at once for one group would split it, and each member keeps the first
+// it receives.
+export async function turnOnPersonasInGroup(
+  conversation: ConversationModel
+): Promise<TurnOnResult> {
+  if (!isPersonasMode()) {
+    return { ok: false, reason: 'personas are not enabled in this app' };
+  }
+  const groupId = conversation.get('groupId');
+  if (!isGroupV2(conversation.attributes) || !groupId) {
+    return { ok: false, reason: 'personas work in groups only' };
+  }
+  if (!conversation.areWeAdmin()) {
+    return { ok: false, reason: 'only a group admin can turn personas on' };
+  }
+  const existing = await ensurePhantomMaterial();
+  if (existing) {
+    return existing.groupId === groupId
+      ? { ok: true }
+      : { ok: false, reason: 'personas are already on in another group in this app' };
+  }
+  await mintPhantomBundle(groupId);
+  await distributePhantomBundle();
+  return { ok: true };
 }
 
 export type AdoptResult = 'adopted' | 'duplicate' | 'conflict' | 'disabled';
 
-// Adopt a bundle received from a fellow group member. The caller must already have
-// checked that the sender shares a group with us (isFellowGroupMember).
+// Adopt a bundle received from a fellow member of the group it names. The caller must
+// already have checked that (isFellowGroupMember).
 //
 // FIRST ONE WINS, AND IT IS FINAL. A second, different bundle is refused: switching
 // would silently strand our chain, and a member being fed a different certificate is
@@ -414,15 +502,23 @@ export async function adoptPhantomBundle(
       log.info(`adoptPhantomBundle: already hold this bundle; ignoring copy from ${from}`);
       return 'duplicate';
     }
+    if (existing.groupId !== wire.groupId) {
+      log.warn(
+        `adoptPhantomBundle: ignoring a bundle for another group from ${from}: this app ` +
+          'takes part in one personas group for now'
+      );
+      return 'conflict';
+    }
     log.error(
-      `adoptPhantomBundle: REFUSED a different phantom bundle from ${from}. We hold ` +
-        `${bundleFingerprint(existing)}. A second bundle means either two groups minted ` +
-        'separately or someone is handing members different certificates; either way, ' +
+      `adoptPhantomBundle: REFUSED a different phantom bundle for our group from ${from}. ` +
+        `We hold ${bundleFingerprint(existing)}. Either two admins turned personas on at ` +
+        'once or someone is handing members different certificates; either way, ' +
         'switching would strand this member.'
     );
     return 'conflict';
   }
   const bundle: SerializedBundle = {
+    groupId: wire.groupId,
     trustRootPublic: wire.trustRootPublic,
     phantomIdentityKeyPair: wire.phantomIdentityKeyPair,
     phantomCert: wire.phantomCert,
@@ -436,13 +532,14 @@ export async function adoptPhantomBundle(
 }
 
 // Whether a conversation (the 1:1 chat a bundle arrived in) belongs to someone who is a
-// full member of one of our groups. Bundles from anyone else are ignored.
-export function isFellowGroupMember(conversationId: string): boolean {
-  return window.ConversationController.getAll().some(
-    group =>
-      isGroupV2(group.attributes) &&
-      !group.get('left') &&
-      group.getMemberConversationIds().has(conversationId)
+// full member of `groupId`, a group we are in. Bundles from anyone else are ignored.
+export function isFellowGroupMember(conversationId: string, groupId: string): boolean {
+  const group = window.ConversationController.get(groupId);
+  return (
+    group != null &&
+    isGroupV2(group.attributes) &&
+    !group.get('left') &&
+    group.getMemberConversationIds().has(conversationId)
   );
 }
 
@@ -478,7 +575,7 @@ async function retryPendingBundles(): Promise<void> {
       pendingBundles.clear();
       return;
     }
-    if (isFellowGroupMember(conversationId)) {
+    if (isFellowGroupMember(conversationId, wire.groupId)) {
       pendingBundles.delete(conversationId);
       // oxlint-disable-next-line no-await-in-loop
       const result = await adoptPhantomBundle(wire, from);
@@ -510,7 +607,7 @@ async function readCurrentChainRecord(
 
 let distributing = false;
 
-// Send the bundle 1:1 to every full member of our groups who has not been sent it yet.
+// Send the bundle 1:1 to every full member of ITS group who has not been sent it yet.
 // Any holder distributes, not only the creator, so the group does not depend on the
 // creator staying online. Recipients ignore copies of a bundle they already hold.
 export async function distributePhantomBundle(): Promise<void> {
@@ -523,10 +620,8 @@ export async function distributePhantomBundle(): Promise<void> {
     const fingerprint = bundleFingerprint(mat);
     const sent = new Set(itemStorage.get('personasPhantomSentTo') ?? []);
     const pending = new Map<string, ConversationModel>();
-    for (const group of window.ConversationController.getAll()) {
-      if (!isGroupV2(group.attributes) || group.get('left')) {
-        continue;
-      }
+    const group = window.ConversationController.get(mat.groupId);
+    if (group && isGroupV2(group.attributes) && !group.get('left')) {
       for (const member of group.getMembers()) {
         const serviceId = member.getServiceId();
         if (!serviceId || isMe(member.attributes)) {
@@ -548,7 +643,8 @@ export async function distributePhantomBundle(): Promise<void> {
     }
     const stored = JSON.parse(bundleJson) as SerializedBundle;
     const body = encodePhantomBundle({
-      v: 1,
+      v: 2,
+      groupId: mat.groupId,
       trustRootPublic: stored.trustRootPublic,
       phantomIdentityKeyPair: stored.phantomIdentityKeyPair,
       phantomCert: stored.phantomCert,

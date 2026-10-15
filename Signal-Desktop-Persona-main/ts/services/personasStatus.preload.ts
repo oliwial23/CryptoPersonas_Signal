@@ -17,6 +17,7 @@
 // The panel deliberately reports what IS, including when that is unflattering. A status
 // display that only ever shows green is worth nothing.
 
+import { catchUpState, type CatchUpState } from './personasCatchUp.preload.ts';
 import type { ConversationModel } from '../models/conversations.preload.ts';
 import { pendingBadgeRequests } from './personasBadgeFlow.preload.ts';
 import {
@@ -119,6 +120,8 @@ export type PersonaStatus = {
   stateLost: boolean;
   /** Our own reset request: none, waiting for an admin, or approved (re-joining). */
   resetState: ResetState;
+  /** Late-join catch-up: whether we have the group's state yet (personasCatchUp). */
+  catchUp: CatchUpState;
   /** Reset requests from other members. Only actionable by a Signal group admin. */
   resetRequests: ReadonlyArray<{ account: string; name: string; proofOk: boolean; reason?: string }>;
 };
@@ -151,6 +154,7 @@ export function getPersonaStatus(
     outstandingCallbacks: 0,
     stateLost: false,
     resetState: ownResetState(),
+    catchUp: catchUpState(),
     resetRequests: conversation?.areWeAdmin() ? listResetRequests() : [],
   };
 

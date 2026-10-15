@@ -46,6 +46,7 @@ import {
   openPersonasGroupState,
   savePersonasState,
 } from './personasPersistence.preload.ts';
+import { initPersonasCatchUp } from './personasCatchUp.preload.ts';
 import { ensureProvingKeys, getPinnedKeysSha256 } from './personasKeys.preload.ts';
 import { drop } from '../util/drop.std.ts';
 import { sleep } from '../util/sleep.std.ts';
@@ -172,6 +173,8 @@ export function getPersonasEngine(): Engine | undefined {
       const state = engine.exportMemberState();
       savePersonasState(state ? Buffer.from(state) : undefined);
     }
+    // A new member has an empty replica: it needs the group's history first.
+    initPersonasCatchUp({ fresh: !memberState });
     log.info(
       `constructed engine (keys: ${dataDir}; ${
         schedule
@@ -309,6 +312,13 @@ export function ingestRecordForTimeline(
         eh: status.eh,
         slot,
       };
+    }
+
+    // Only a Post is something to show. Joins, re-join approvals and scans are logged
+    // too (a Join's body is its account), and rendering them showed a stranger's
+    // account id as an anonymous message.
+    if (entry.kind !== 'Post') {
+      return { kind: 'ingested' };
     }
 
     return {

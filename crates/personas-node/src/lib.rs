@@ -171,16 +171,25 @@ pub struct Engine {
 ///
 /// Layout: `PZJ1`, then entries of `[u64 LE barrier][u32 LE length][record bytes]`. A
 /// torn final entry (a crash mid-append) is ignored on read.
+///
+/// A record taken in from a late-join history has its private text removed, so its
+/// bytes no longer hash to its envelope hash. Such an entry sets the top bit of the
+/// barrier and carries the real hash (32 bytes) between the length and the bytes.
 struct Journal {
     file: std::fs::File,
     written: std::collections::HashMap<Eh, u64>,
 }
 
 const JOURNAL_MAGIC: &[u8; 4] = b"PZJ1";
+/// Set on a journal entry's barrier when the entry carries its envelope hash.
+const JOURNAL_EH_FLAG: u64 = 1 << 63;
+/// A late-join history (`export_catch_up`): `PZH1`, the barrier it was taken at, then
+/// entries of `[u64 LE barrier][32-byte eh][u32 LE length][record bytes]`.
+const CATCH_UP_MAGIC: &[u8; 4] = b"PZH1";
 
 impl Journal {
     /// Open (creating if needed) and read back the records, last entry per record wins.
-    fn open(path: &str) -> std::io::Result<(Self, Vec<(u64, Vec<u8>)>)> {
+    fn open(path: &str) -> std::io::Result<(Self, Vec<(u64, Eh, Vec<u8>)>)> {
         use std::io::{Read, Write};
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -202,19 +211,34 @@ impl Journal {
             std::collections::BTreeMap::new();
         let mut at = 4;
         while raw.len() >= at + 12 {
-            let barrier = u64::from_le_bytes(raw[at..at + 8].try_into().expect("8 bytes"));
+            let tagged = u64::from_le_bytes(raw[at..at + 8].try_into().expect("8 bytes"));
             let len =
                 u32::from_le_bytes(raw[at + 8..at + 12].try_into().expect("4 bytes")) as usize;
-            let Some(bytes) = raw.get(at + 12..at + 12 + len) else {
+            let (barrier, given_eh, start) = if tagged & JOURNAL_EH_FLAG != 0 {
+                let Some(eh) = raw.get(at + 12..at + 44) else {
+                    break; // torn tail
+                };
+                (
+                    tagged & !JOURNAL_EH_FLAG,
+                    Some(Eh(eh.try_into().expect("32 bytes"))),
+                    at + 44,
+                )
+            } else {
+                (tagged, None, at + 12)
+            };
+            let Some(bytes) = raw.get(start..start + len) else {
                 break; // torn tail
             };
-            if let Ok((_, eh)) = personas_bulletin::replica::record::decode(bytes) {
-                latest.insert(eh, (barrier, bytes.to_vec()));
+            if let Ok((_, computed)) = personas_bulletin::replica::record::decode(bytes) {
+                latest.insert(given_eh.unwrap_or(computed), (barrier, bytes.to_vec()));
             }
-            at += 12 + len;
+            at = start + len;
         }
         let written = latest.iter().map(|(eh, (b, _))| (*eh, *b)).collect();
-        let records = latest.into_values().collect();
+        let records = latest
+            .into_iter()
+            .map(|(eh, (barrier, bytes))| (barrier, eh, bytes))
+            .collect();
         Ok((Self { file, written }, records))
     }
 
@@ -224,9 +248,16 @@ impl Journal {
         if self.written.get(&eh) == Some(&barrier) {
             return Ok(());
         }
-        let mut entry = Vec::with_capacity(12 + bytes.len());
-        entry.extend_from_slice(&barrier.to_le_bytes());
-        entry.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        let mut entry = Vec::with_capacity(44 + bytes.len());
+        if Eh::of_bytes(bytes) == eh {
+            entry.extend_from_slice(&barrier.to_le_bytes());
+            entry.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        } else {
+            // A stripped late-join record: keep its real hash beside it.
+            entry.extend_from_slice(&(barrier | JOURNAL_EH_FLAG).to_le_bytes());
+            entry.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            entry.extend_from_slice(&eh.0);
+        }
         entry.extend_from_slice(bytes);
         self.file.write_all(&entry)?;
         self.file.sync_data()?;
@@ -321,21 +352,25 @@ impl Engine {
         } else {
             // Resume at the barrier the schedule says it is now (or, without one, the
             // latest journalled barrier).
-            let latest = records.iter().map(|(b, _)| *b).max().unwrap_or(0);
+            let latest = records.iter().map(|(b, _, _)| *b).max().unwrap_or(0);
             let now = heartbeat
                 .as_ref()
                 .map(|h| h.barrier_at(now_ms()))
                 .unwrap_or(latest)
                 .max(latest);
-            Messenger::restore(
+            // Each record under its journalled envelope hash (a late-join record's
+            // bytes no longer hash to it), all in one rebuild.
+            let mut restored = Messenger::restore(
                 transport,
                 conversation,
                 replica_keys,
                 config,
                 member,
-                records,
+                Vec::new(),
                 now,
-            )
+            );
+            restored.import_records(records, now);
+            restored
         };
 
         if let Some(heartbeat) = heartbeat {
@@ -690,6 +725,58 @@ impl Engine {
             )));
         }
         Ok(())
+    }
+
+    /// This replica's history for a member who joined LATE, with the text of past
+    /// posts and polls removed (they need the group's state, not its old messages).
+    /// A Signal group admin sends it; the newcomer passes it to `import_catch_up`.
+    #[napi]
+    pub fn export_catch_up(&self) -> Buffer {
+        let records = self.inner.catch_up_records();
+        let mut out = Vec::new();
+        out.extend_from_slice(CATCH_UP_MAGIC);
+        out.extend_from_slice(&self.inner.replica().current_barrier().to_le_bytes());
+        for (barrier, eh, bytes) in records {
+            out.extend_from_slice(&barrier.to_le_bytes());
+            out.extend_from_slice(&eh.0);
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&bytes);
+        }
+        Buffer::from(out)
+    }
+
+    /// Take in a history from `export_catch_up`, TRUSTING whoever sent it (the client
+    /// accepts one only from a group admin): the records are verified as usual, but
+    /// nothing checks that the set is complete or that the hashes are genuine. Journalled
+    /// so it survives a restart. Returns how many records were new.
+    #[napi]
+    pub fn import_catch_up(&mut self, history: Buffer) -> napi::Result<u32> {
+        let raw = history.as_ref();
+        let bad = || napi::Error::from_reason("not a personas catch-up history");
+        if raw.len() < 12 || &raw[..4] != CATCH_UP_MAGIC {
+            return Err(bad());
+        }
+        let at = u64::from_le_bytes(raw[4..12].try_into().expect("8 bytes"));
+        let mut items = Vec::new();
+        let mut pos = 12;
+        while pos < raw.len() {
+            let head = raw.get(pos..pos + 44).ok_or_else(bad)?;
+            let barrier = u64::from_le_bytes(head[..8].try_into().expect("8 bytes"));
+            let eh = Eh(head[8..40].try_into().expect("32 bytes"));
+            let len = u32::from_le_bytes(head[40..44].try_into().expect("4 bytes")) as usize;
+            let bytes = raw.get(pos + 44..pos + 44 + len).ok_or_else(bad)?;
+            items.push((barrier, eh, bytes.to_vec()));
+            pos += 44 + len;
+        }
+        let ehs: Vec<Eh> = items.iter().map(|(_, eh, _)| *eh).collect();
+        let added = self.inner.import_records(items, at);
+        for eh in ehs {
+            let Some(bytes) = self.inner.replica().seen_bytes(&eh).map(<[u8]>::to_vec) else {
+                continue;
+            };
+            self.journal_record(eh, &bytes)?;
+        }
+        Ok(added as u32)
     }
 
     /// Emit a join record (a member advertising itself to the group).

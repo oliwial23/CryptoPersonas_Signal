@@ -294,6 +294,26 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         )
     }
 
+    /// This replica's history for a LATE JOINER: every record with its first-seen
+    /// barrier and real envelope hash, private text removed
+    /// ([`Replica::catch_up_records`]).
+    pub fn catch_up_records(&self) -> Vec<(u64, record::Eh, Vec<u8>)> {
+        self.replica.catch_up_records()
+    }
+
+    /// Take in a history from [`catch_up_records`](Self::catch_up_records) (or a
+    /// journal), with one rebuild, then cross to `at_barrier` (the barrier the history
+    /// was taken at; never backwards). Returns how many records were new.
+    pub fn import_records(
+        &mut self,
+        items: Vec<(u64, record::Eh, Vec<u8>)>,
+        at_barrier: u64,
+    ) -> usize {
+        let added = self.replica.import_records(items);
+        self.replica.advance_to(at_barrier);
+        added
+    }
+
     // --- Receive ----------------------------------------------------------------
 
     /// Ingest an incoming messenger event. Returns the accept-rule [`Status`] if the

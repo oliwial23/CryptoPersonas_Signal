@@ -49,6 +49,7 @@ export type PersonaStatusForUI = {
   outstandingCallbacks: number;
   stateLost: boolean;
   resetState?: 'none' | 'requested' | 'approved';
+  catchUp?: 'done' | 'needed' | 'requested';
   resetRequests?: ReadonlyArray<{
     account: string;
     name: string;
@@ -152,9 +153,10 @@ export function PersonaStatusDialog({
                     Protocol state was lost
                   </div>
                   This conversation shows persona messages, but the replica holds no
-                  records — so the app was restarted. The bulletin is memory-only and
-                  does not survive a restart, while the chat history does. Tallies read
-                  as zero and bans cannot settle until the group is re-established.
+                  records. The protocol state is saved (encrypted) and restored on
+                  restart, so this means the saved copy was missing or unreadable — a
+                  reinstall, a new keychain, or a server reset. Your persona posts will
+                  not get through; use “Request a reset” below.
                 </div>
               )}
               {status.banned === true && (
@@ -207,7 +209,17 @@ export function PersonaStatusDialog({
                 detail={
                   status.joined
                     ? undefined
-                    : 'Persona actions are refused until this instance joins (happens automatically on first use).'
+                    : 'Persona actions are refused until this instance joins (happens automatically on first use). Each Signal account can join once, with a zero-knowledge proof that it starts as a fresh member; joining again needs an admin-approved reset.'
+                }
+              />
+              <Row
+                label="Group state"
+                ok={(status.catchUp ?? 'done') === 'done'}
+                value={(status.catchUp ?? 'done') === 'done' ? 'Up to date' : 'Waiting for an admin'}
+                detail={
+                  (status.catchUp ?? 'done') === 'done'
+                    ? undefined
+                    : 'You were added after this group started, so you need its state before persona messages can work. A group admin\u2019s app sends it automatically (without any old message text) while it is open; until then persona actions wait.'
                 }
               />
               <Row
@@ -244,8 +256,8 @@ export function PersonaStatusDialog({
                   'A scan is attempted before every persona message, which is what keeps ' +
                   'you under the 200-interaction limit the post predicate enforces \u2014 ' +
                   'past it, your proofs stop being satisfiable and you cannot post at all. ' +
-                  'Most attempts do nothing, because the engine refuses a scan with no ' +
-                  'callbacks outstanding.' +
+                  'When nothing is waiting to be absorbed it is skipped, so most sends ' +
+                  'cost no extra proof. Badges, ratings and bans land at your next scan.' +
                   (status.autoScan
                     ? ' A 24-hour catch-up also runs, for a client left open without sending.'
                     : ' The 24-hour catch-up is disabled (PERSONAS_AUTO_SCAN=off), so an idle client will not absorb a revocation until it sends something.')
@@ -304,7 +316,7 @@ export function PersonaStatusDialog({
               <Row
                 label="Records held"
                 value={String(status.recordCount)}
-                detail="Joins, posts, polls, ballots and scans this replica has folded in."
+                detail="Joins, re-join approvals, posts, badge requests and approvals, polls, ballots and scans this replica has folded in. Saved with the rest of the protocol state, so it survives a restart."
               />
               <Row
                 label="Contexts"
@@ -312,7 +324,7 @@ export function PersonaStatusDialog({
                 detail={
                   status.topics.length > 0
                     ? status.topics.map(topic => topic.name).join(', ')
-                    : 'None yet — create one to use a rate-limited persona.'
+                    : 'None yet — create one to use a rate-limited persona. Each context allows up to 3 rate-limited personas per member, enforced by the proof itself.'
                 }
               />
               {status.isSignalAdmin && status.pendingBadgeRequests.length > 0 && (

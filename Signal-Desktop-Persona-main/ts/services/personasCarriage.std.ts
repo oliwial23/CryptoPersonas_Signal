@@ -467,11 +467,17 @@ export function encodeTopicAnnouncement(
 // dropped by the receiver before the message is saved.
 //
 // Sent ATTRIBUTABLY under the real account on purpose: the recipient decides whether to
-// trust it by checking that the sender is a member of one of its groups.
+// trust it by checking that the sender is a member of the group it names.
+//
+// Version 2: a bundle belongs to ONE Signal group (`groupId`). Each group has its own
+// phantom identity, chain and barrier schedule, and so its own persona engine; a version
+// 1 bundle named no group and was shared across all of them.
 export const PERSONAS_PHANTOM_BUNDLE_MARKER = 'PZK1:';
 
 export type PersonaPhantomBundleWire = {
-  v: 1;
+  v: 2;
+  // The Signal group (GroupV2 id) this bundle is for.
+  groupId: string;
   trustRootPublic: string;
   phantomIdentityKeyPair: string;
   phantomCert: string;
@@ -503,6 +509,7 @@ export function decodePhantomBundle(
       ).toString('utf8')
     ) as PersonaPhantomBundleWire;
     const strings = [
+      parsed?.groupId,
       parsed?.trustRootPublic,
       parsed?.phantomIdentityKeyPair,
       parsed?.phantomCert,
@@ -511,7 +518,7 @@ export function decodePhantomBundle(
       parsed?.chainRecord,
     ];
     if (
-      parsed?.v !== 1 ||
+      parsed?.v !== 2 ||
       !strings.every(field => typeof field === 'string' && field.length > 0) ||
       !Number.isFinite(parsed.schedule?.anchorMs) ||
       !(parsed.schedule?.periodMs > 0)
@@ -700,6 +707,106 @@ export function decodeResetRequest(
       return undefined;
     }
     return { a: parsed.a, p: parsed.p ?? null, ...(parsed.r ? { r: parsed.r.slice(0, 200) } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+// LATE-JOIN CATCH-UP (personasCatchUp). A member added after the group started posting
+// has none of the group's records, so its posts name a tree nobody else has and it
+// cannot apply anyone else's. It asks; a group admin sends its history.
+//
+//   PZC1:<base64 {"v": 1}>      the REQUEST, to the group, under the member's own account
+//   PZH1:<base64 {"g": groupId, "s": copy id, "i": part, "n": parts, "d": data}>
+//                               one PART of the history, 1:1 from an admin, under the
+//                               admin's own account; `d` is a base64 slice of
+//                               Engine.exportCatchUp (no message text in it)
+//
+// Parts keep each body under Signal's 2 KiB inline limit: a longer body would travel
+// as a long-text attachment and arrive here truncated.
+export const PERSONAS_CATCH_UP_REQUEST_MARKER = 'PZC1:';
+
+// Any personas carriage at all (every marker is `PZ`, a letter, a digit, a colon). Used
+// to drop personas traffic in a group that is not this app's personas group.
+export function isPersonasCarriage(body: string | undefined | null): boolean {
+  return body != null && /^PZ[A-Z][0-9]:/.test(body);
+}
+export const PERSONAS_CATCH_UP_PART_MARKER = 'PZH1:';
+export const CATCH_UP_PART_DATA_CHARS = 1400;
+
+export type PersonaCatchUpPartWire = {
+  g: string;
+  s: string;
+  i: number;
+  n: number;
+  d: string;
+};
+
+export function encodeCatchUpRequest(): string {
+  return (
+    PERSONAS_CATCH_UP_REQUEST_MARKER +
+    Buffer.from(JSON.stringify({ v: 1 }), 'utf8').toString('base64')
+  );
+}
+
+export function isCatchUpRequest(body: string | undefined | null): boolean {
+  return body?.startsWith(PERSONAS_CATCH_UP_REQUEST_MARKER) === true;
+}
+
+/** Split an exported history into the parts that carry it. */
+export function encodeCatchUpParts(
+  groupId: string,
+  copyId: string,
+  history: Uint8Array<ArrayBuffer>
+): Array<string> {
+  const data = Buffer.from(history).toString('base64');
+  const n = Math.max(1, Math.ceil(data.length / CATCH_UP_PART_DATA_CHARS));
+  const parts: Array<string> = [];
+  for (let i = 0; i < n; i += 1) {
+    const wire: PersonaCatchUpPartWire = {
+      g: groupId,
+      s: copyId,
+      i,
+      n,
+      d: data.slice(i * CATCH_UP_PART_DATA_CHARS, (i + 1) * CATCH_UP_PART_DATA_CHARS),
+    };
+    parts.push(
+      PERSONAS_CATCH_UP_PART_MARKER +
+        Buffer.from(JSON.stringify(wire), 'utf8').toString('base64')
+    );
+  }
+  return parts;
+}
+
+export function decodeCatchUpPart(
+  body: string | undefined | null
+): PersonaCatchUpPartWire | undefined {
+  if (!body?.startsWith(PERSONAS_CATCH_UP_PART_MARKER)) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(body.slice(PERSONAS_CATCH_UP_PART_MARKER.length), 'base64').toString(
+        'utf8'
+      )
+    ) as Partial<PersonaCatchUpPartWire>;
+    const { g, s, d, i, n } = parsed;
+    if (
+      typeof g !== 'string' ||
+      typeof s !== 'string' ||
+      typeof d !== 'string' ||
+      typeof i !== 'number' ||
+      typeof n !== 'number' ||
+      !Number.isInteger(i) ||
+      !Number.isInteger(n) ||
+      n < 1 ||
+      n > 10_000 ||
+      i < 0 ||
+      i >= n
+    ) {
+      return undefined;
+    }
+    return { g, s, i, n, d };
   } catch {
     return undefined;
   }

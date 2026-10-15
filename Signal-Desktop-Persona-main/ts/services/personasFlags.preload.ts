@@ -34,6 +34,7 @@ import {
 } from './personasEngine.preload.ts';
 import { sendPersonaScan } from './personasActions.preload.ts';
 import { maybeCompletePersonasReset } from './personasReset.preload.ts';
+import { maybeContinueCatchUp } from './personasCatchUp.preload.ts';
 import { hasJoinedPersonaGroup } from './personasMembership.preload.ts';
 import { getTrackedPersonaPosts } from './personasRegistry.std.ts';
 
@@ -141,6 +142,7 @@ export function startPersonaFlagLoops(
       );
       // An admin-approved reset completes itself once the approval has landed.
       drop(maybeCompletePersonasReset());
+      drop(maybeContinueCatchUp());
     }, REFRESH_INTERVAL_MS);
   }
 

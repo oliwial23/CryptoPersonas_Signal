@@ -196,8 +196,33 @@ export type ReceivedResetRequest = {
   name: string;
   proofOk: boolean;
   reason?: string;
+  // The proof as received (base64), kept so it can be checked again: see
+  // `checkResetProof`.
+  proof?: string;
   at: number;
 };
+
+const PROOF_NOT_YET =
+  'not verified yet \u2014 it was made against group state this device does not have. ' +
+  'Usually their latest scan has not arrived here yet (it is re-checked ' +
+  'automatically); if it stays like this, they are out of sync with the group.';
+
+// A proof is only accepted against a tree OUR replica produced. The requester's last
+// step before asking is a scan, which changes its tree, and that scan travels on the
+// phantom while the request travels under their own account: two senders, no ordering
+// between them. So the request often arrives first and cannot verify YET. Keep the
+// proof and try again whenever the list is read; once verified it stays verified.
+function checkResetProof(account: string, proof: string | undefined): boolean {
+  const engine = getPersonasEngine();
+  if (!proof || !engine) {
+    return false;
+  }
+  try {
+    return engine.verifyNotBanned(Buffer.from(proof, 'base64')) === account;
+  } catch {
+    return false;
+  }
+}
 
 const received = new Map<string, ReceivedResetRequest>();
 
@@ -214,6 +239,7 @@ registerPersistedExtra('resetRequestsReceived', {
           name: r.name,
           proofOk: r.proofOk === true,
           ...(typeof r.reason === 'string' ? { reason: r.reason } : {}),
+          ...(typeof r.proof === 'string' ? { proof: r.proof } : {}),
           at: typeof r.at === 'number' ? r.at : Date.now(),
         });
       }
@@ -233,16 +259,8 @@ export function ingestResetRequest(
     log.warn('ingestResetRequest: the request names another account than its sender; dropped');
     return;
   }
-  const engine = getPersonasEngine();
-  let proofOk = false;
-  if (wire.p && engine) {
-    try {
-      // Verifies the proof AND that it was made against our own tree.
-      proofOk = engine.verifyNotBanned(Buffer.from(wire.p, 'base64')) === wire.a;
-    } catch {
-      proofOk = false;
-    }
-  }
+  // Verifies the proof AND that it was made against our own tree.
+  const proofOk = checkResetProof(wire.a, wire.p ?? undefined);
   const name =
     (senderServiceId &&
       window.ConversationController.get(senderServiceId)?.getTitle()) ||
@@ -251,7 +269,8 @@ export function ingestResetRequest(
     account: wire.a,
     name,
     proofOk,
-    ...(proofOk ? {} : { reason: wire.p ? 'the proof did not verify' : (wire.r ?? 'no proof') }),
+    ...(proofOk ? {} : { reason: wire.p ? PROOF_NOT_YET : (wire.r ?? 'no proof') }),
+    ...(wire.p ? { proof: wire.p } : {}),
     at: Date.now(),
   });
   personasExtrasChanged();
@@ -260,6 +279,17 @@ export function ingestResetRequest(
 
 export function listResetRequests(): ReadonlyArray<ReceivedResetRequest> {
   const engine = getPersonasEngine();
+  let changed = false;
+  for (const r of received.values()) {
+    if (!r.proofOk && r.proof && checkResetProof(r.account, r.proof)) {
+      r.proofOk = true;
+      delete r.reason;
+      changed = true;
+    }
+  }
+  if (changed) {
+    personasExtrasChanged();
+  }
   return [...received.values()].filter(r => {
     // Drop requests that are already approved (the account may join again).
     if (!engine) {

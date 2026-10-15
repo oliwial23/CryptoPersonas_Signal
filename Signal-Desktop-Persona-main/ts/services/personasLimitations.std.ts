@@ -26,9 +26,9 @@ export const KNOWN_LIMITATIONS: ReadonlyArray<{
       'Claiming authorship is now a real zero-knowledge proof: authorship_pred binds both pseudonyms to one secret key, recipients verify the Groth16 proof before rendering, and a proof that fails verification is dropped rather than shown. The two names you see are derived from the proof\u2019s own public inputs, not from the message, so a valid proof cannot be displayed next to someone else\u2019s persona names. What remains is not a soundness gap but a consequence: a claim cannot be retracted, and it permanently links those two personas for everyone who saw it \u2014 including anyone who later learns something about either one.',
   },
   {
-    title: 'Badges are unverified claims, not credentials',
+    title: 'Badge approvals are not tied to an admin',
     detail:
-      'The badge shown beside a persona is a plain label the sender chose and attached to the message. Nothing checks it, nothing grants it, and any client can claim any badge. The real design proves badge possession in zero knowledge (the circuit exists in personas-core), but the grant flow lives only in the as-a-service client, so the serverless build this app uses has no way to issue or verify one. Treat every badge you see here as decoration.',
+      'Holding a badge is proved in zero knowledge (\u201cProve badge\u201d), and the proof is checked against this group\u2019s own state, so nobody can fake one. But the APPROVAL that grants it is anonymous: the app only shows Approve to admins, and a modified client could approve its own request. The admin also sees \u201canonymous\u201d rather than who asked. The badge label on an ordinary post is display metadata, not a proof.',
   },
   {
     title: 'Reputation only moves when YOU scan',
@@ -55,18 +55,23 @@ export const KNOWN_LIMITATIONS: ReadonlyArray<{
     detail:
       "Banning permanently and creating a context are limited to holders of Signal's GroupV2 admin role; REQUESTING a ban poll is open to every member, since it only asks the group. All of these are CLIENT-SIDE gates: persona records are ordinary message bodies the storage-service never inspects, so a modified client ignores them. The gate also costs a little anonymity by inference rather than by data \u2014 a ban poll rides the shared phantom, so no recipient learns who opened it, but if only admins ever ban then an observer who knows the admin set can narrow the opener to it, and with a single admin that identifies them. Real enforcement needs the admin key inside the accept rule (step 3b) or the moderator credential inside the proof, which is what badges are for.",},
   {
-    title: 'Joining is ungated at the protocol level',
+    title: 'A member added later trusts an admin\u2019s copy',
     detail:
-      'Signal group membership is genuinely server-enforced — a non-member cannot receive the group messages at all — but nothing in the ZK layer restricts who may join the persona group beyond that.',
+      'A member added after the group started gets the group\u2019s state from an admin\u2019s app (every record, without the text of old posts and polls) and takes it as it is. A dishonest admin could hand over a doctored copy: the newcomer\u2019s persona posts would then be refused by everyone else, and that admin could recognise them. Existing members are unaffected, since they check every post against their own state. Until a copy arrives the newcomer cannot send persona messages, so an admin\u2019s app has to be open.',
   },
   {
-    title: 'Protocol state is not persisted',
+    title: 'Two posts at the same moment can split the group',
     detail:
-      'The replica lives only in memory. Restarting the app forgets every record — joins, posts, polls and bans — while the Signal chat history survives.',
+      'Posts sent within the same few seconds can be built on different views of the group state. One of them is then held back by everyone else, and that member\u2019s later persona posts may stop getting through until they reset.',
   },
   {
-    title: 'Folded scans drop callbacks of other fold sizes',
+    title: 'Personas work in one group per app, for now',
     detail:
-      'The proving-key cache is single-size today, so a folded scan only absorbs callbacks matching that size.',
+      'Each group has its own personas: its own anonymous identity, state, pseudonyms, contexts, badges, reputation and bans, none of it shared with another group, so your personas in one group cannot be linked to another. For now an app takes part in ONE personas group, the first it was given personas in; in any other group the persona menu says so. Using several groups at once is planned.',
+  },
+  {
+    title: 'Scans are not folded',
+    detail:
+      'Each scan absorbs one waiting item (a rating, a badge, a ban) with one proof, so a backlog takes several proofs, each freezing the window for a few seconds.',
   },
 ];

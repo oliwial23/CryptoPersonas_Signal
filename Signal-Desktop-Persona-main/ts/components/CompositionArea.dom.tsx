@@ -243,6 +243,13 @@ export type OwnProps = Readonly<{
   openPersonasExtraMember?: (slot: 1 | 2) => unknown;
   // Personas demo: admin-approved reset (personasReset).
   requestPersonaReset: (conversationId: string) => unknown;
+  // Personas demo: whether this conversation is the app's personas group (one per app
+  // for now), and, for an admin of a group with none, turning them on here.
+  personaGroupStanding?:
+    | { kind: 'this' }
+    | { kind: 'none' }
+    | { kind: 'other'; name: string };
+  turnOnPersonas?: (conversationId: string) => unknown;
   approvePersonaReset: (conversationId: string, account: string) => unknown;
   dismissPersonaReset: (account: string) => unknown;
   // Personas demo: the instance's UNVERIFIED badge claim, and the setter for it.
@@ -377,6 +384,8 @@ export const CompositionArea = memo(function CompositionArea({
   scanPersonaCallbacksNow,
   openPersonasExtraMember,
   requestPersonaReset,
+  personaGroupStanding = { kind: 'this' },
+  turnOnPersonas,
   approvePersonaReset,
   dismissPersonaReset,
   selectedBadge,
@@ -590,7 +599,10 @@ export const CompositionArea = memo(function CompositionArea({
           message,
           timestamp,
           isViewOnce,
-          personaChoice: personaValueToChoice(personaValue, personaTopicContext),
+          personaChoice: personaValueToChoice(
+            personaValue,
+            personaTopicContext
+          ),
           // The selected CONTEXT travels on every persona send, not just a
           // rate-limited one. Context is a conversational thread in the UI — the
           // thing a reader follows — whereas in the protocol it only binds
@@ -1074,9 +1086,11 @@ export const CompositionArea = memo(function CompositionArea({
   // Personas demo: pick the persona (or normal message) the next post is sent
   // under, and the topic that scopes the rate-limited ones. Highlighted when a
   // persona is active.
-  const personaMenuButton = (
-    <div className="CompositionArea__button-cell">
-      {/* JOIN ON OPEN. Membership is a prerequisite for almost everything in this menu
+  // Personas work in groups only.
+  const personaMenuButton =
+    conversationType !== 'group' ? null : (
+      <div className="CompositionArea__button-cell">
+        {/* JOIN ON OPEN. Membership is a prerequisite for almost everything in this menu
           — a pseudonymous post, a badge request, a rating, a badge proof are all member
           records — and until now the only thing that joined was sending a message. That
           made the menu actively misleading: every option was visible and most of them
@@ -1090,303 +1104,340 @@ export const CompositionArea = memo(function CompositionArea({
 
           `ensurePersonaJoined` is idempotent and de-duplicates concurrent callers, so
           re-opening the menu costs nothing after the first time. */}
-      <AxoDropdownMenu.Root
-        onOpenChange={open => {
-          if (open) {
-            joinPersonaBulletin(conversationId);
-          }
-        }}
-      >
-        <div className={actionSlotClassName}>
-          <AxoDropdownMenu.Trigger>
-            <AxoIconButton.Root
-              variant={
-                personaValue === 'off' ? 'implied-secondary' : 'strong-primary'
-              }
-              size="md"
-              label="Persona"
-              tooltip={false}
-              symbol="person-circle"
-            />
-          </AxoDropdownMenu.Trigger>
-        </div>
-        <AxoDropdownMenu.Content>
-          {/* Membership, stated at the top rather than discovered through a failure.
+        <AxoDropdownMenu.Root
+          onOpenChange={open => {
+            if (open && personaGroupStanding.kind === 'this') {
+              joinPersonaBulletin(conversationId);
+            }
+          }}
+        >
+          <div className={actionSlotClassName}>
+            <AxoDropdownMenu.Trigger>
+              <AxoIconButton.Root
+                variant={
+                  personaValue === 'off'
+                    ? 'implied-secondary'
+                    : 'strong-primary'
+                }
+                size="md"
+                label="Persona"
+                tooltip={false}
+                symbol="person-circle"
+              />
+            </AxoDropdownMenu.Trigger>
+          </div>
+          <AxoDropdownMenu.Content>
+            {personaGroupStanding.kind === 'other' && (
+              <AxoDropdownMenu.Label>
+                {`Personas are on in \u201c${personaGroupStanding.name}\u201d. This app uses ` +
+                  'personas in one group for now.'}
+              </AxoDropdownMenu.Label>
+            )}
+            {personaGroupStanding.kind === 'none' && (
+              <>
+                <AxoDropdownMenu.Label>
+                  {areWeAdmin
+                    ? 'Personas are not on in this group yet. Turning them on gives the ' +
+                      'group its own anonymous identity; only one admin should do it.'
+                    : 'Personas are not on in this group yet. A group admin can turn them on.'}
+                </AxoDropdownMenu.Label>
+                {areWeAdmin && turnOnPersonas != null && (
+                  <AxoDropdownMenu.Item
+                    symbol="person-circle"
+                    onSelect={() => turnOnPersonas(conversationId)}
+                  >
+                    Turn on personas in this group
+                  </AxoDropdownMenu.Item>
+                )}
+              </>
+            )}
+            {personaGroupStanding.kind === 'this' && (
+              <>
+                {/* Membership, stated at the top rather than discovered through a failure.
               Shown only while NOT joined: a permanent "joined" banner would be noise,
               but its absence while joining explains why an option may refuse for a
               second or two. The join is kicked off by opening this menu. */}
-          {!personaJoined && (
-            <AxoDropdownMenu.Label>
-              Joining the bulletin… anonymous and pseudonymous options need this.
-            </AxoDropdownMenu.Label>
-          )}
-          <AxoDropdownMenu.RadioGroup
-            value={personaValue}
-            onValueChange={selectTopicFreePersona}
-          >
-            <AxoDropdownMenu.RadioItem value="off">
-              Normal message
-            </AxoDropdownMenu.RadioItem>
-            <AxoDropdownMenu.RadioItem value="anon">
-              Anonymous
-            </AxoDropdownMenu.RadioItem>
-          </AxoDropdownMenu.RadioGroup>
+                {!personaJoined && (
+                  <AxoDropdownMenu.Label>
+                    Joining the bulletin… anonymous and pseudonymous options
+                    need this.
+                  </AxoDropdownMenu.Label>
+                )}
+                <AxoDropdownMenu.RadioGroup
+                  value={personaValue}
+                  onValueChange={selectTopicFreePersona}
+                >
+                  <AxoDropdownMenu.RadioItem value="off">
+                    Normal message
+                  </AxoDropdownMenu.RadioItem>
+                  <AxoDropdownMenu.RadioItem value="anon">
+                    Anonymous
+                  </AxoDropdownMenu.RadioItem>
+                </AxoDropdownMenu.RadioGroup>
 
-          <AxoDropdownMenu.Separator />
+                <AxoDropdownMenu.Separator />
 
-          {/* Unlimited pseudonyms: topic-free, and a member may mint as many as they
+                {/* Unlimited pseudonyms: topic-free, and a member may mint as many as they
               like. Each is a stable identity (the nonce), so selecting one here posts
               AGAIN as that persona rather than as a new stranger. A pseudonym's
               petname is only known once it has posted — the engine reveals it on
               emit, there is no way to ask for it in advance. */}
-          <AxoDropdownMenu.Label>
-            Pseudonyms · unlimited, no context
-          </AxoDropdownMenu.Label>
-          <AxoDropdownMenu.RadioGroup
-            value={personaValue}
-            onValueChange={selectTopicFreePersona}
-          >
-            {personaPseudonyms.map(pseudonym => (
-              <AxoDropdownMenu.RadioItem
-                key={pseudonym.nonce}
-                value={`pseudo:${pseudonym.nonce}`}
-              >
-                {pseudonym.petname != null
-                  ? `~${pseudonym.petname}`
-                  : `Pseudonym ${pseudonym.index} · unused`}
-              </AxoDropdownMenu.RadioItem>
-            ))}
-          </AxoDropdownMenu.RadioGroup>
-          <AxoDropdownMenu.Item
-            symbol="plus"
-            onSelect={() => {
-              // SELECT WHAT WE JUST MADE. Minting a pseudonym and leaving the previous
-              // one selected meant the only way to use it was to close the menu, reopen
-              // it and pick it by hand — and the obvious reading of "New pseudonym" is
-              // that you are now posting as it.
-              //
-              // `createPersonaPseudonym` returns the new nonce (the nonce IS the
-              // identity). Guarded on `typeof` rather than assumed: this value comes
-              // back through redux's dispatch, so a non-number here means the action
-              // chain changed shape, and selecting `pseudo:undefined` would produce an
-              // unsatisfiable choice that silently sends a plain, attributable message.
-              const nonce = createPersonaPseudonym();
-              if (typeof nonce === 'number' && Number.isFinite(nonce)) {
-                setPersonaValue(`pseudo:${nonce}`);
-                // An unlimited pseudonym has no context, so leaving a context selected
-                // would re-coerce the next send back to a rate-limited persona and
-                // discard the pseudonym we just switched to.
-                setPersonaTopic(undefined);
-              }
-            }}
-          >
-            New pseudonym
-          </AxoDropdownMenu.Item>
+                <AxoDropdownMenu.Label>
+                  Pseudonyms · unlimited, no context
+                </AxoDropdownMenu.Label>
+                <AxoDropdownMenu.RadioGroup
+                  value={personaValue}
+                  onValueChange={selectTopicFreePersona}
+                >
+                  {personaPseudonyms.map(pseudonym => (
+                    <AxoDropdownMenu.RadioItem
+                      key={pseudonym.nonce}
+                      value={`pseudo:${pseudonym.nonce}`}
+                    >
+                      {pseudonym.petname != null
+                        ? `~${pseudonym.petname}`
+                        : `Pseudonym ${pseudonym.index} · unused`}
+                    </AxoDropdownMenu.RadioItem>
+                  ))}
+                </AxoDropdownMenu.RadioGroup>
+                <AxoDropdownMenu.Item
+                  symbol="plus"
+                  onSelect={() => {
+                    // SELECT WHAT WE JUST MADE. Minting a pseudonym and leaving the previous
+                    // one selected meant the only way to use it was to close the menu, reopen
+                    // it and pick it by hand — and the obvious reading of "New pseudonym" is
+                    // that you are now posting as it.
+                    //
+                    // `createPersonaPseudonym` returns the new nonce (the nonce IS the
+                    // identity). Guarded on `typeof` rather than assumed: this value comes
+                    // back through redux's dispatch, so a non-number here means the action
+                    // chain changed shape, and selecting `pseudo:undefined` would produce an
+                    // unsatisfiable choice that silently sends a plain, attributable message.
+                    const nonce = createPersonaPseudonym();
+                    if (typeof nonce === 'number' && Number.isFinite(nonce)) {
+                      setPersonaValue(`pseudo:${nonce}`);
+                      // An unlimited pseudonym has no context, so leaving a context selected
+                      // would re-coerce the next send back to a rate-limited persona and
+                      // discard the pseudonym we just switched to.
+                      setPersonaTopic(undefined);
+                    }
+                  }}
+                >
+                  New pseudonym
+                </AxoDropdownMenu.Item>
 
-          <AxoDropdownMenu.Separator />
+                <AxoDropdownMenu.Separator />
 
-          {/* Rate-limited personas are bound to a CONTEXT, so they are only selectable
+                {/* Rate-limited personas are bound to a CONTEXT, so they are only selectable
               once a context is chosen. At most MAX_PSEUDO of them per context, which is
               the whole point: an unlimited pseudonym costs a member nothing, while these
               are a scarce resource within a context, so a reputation attached to one
               actually means something. The label carries that distinction because the
               two kinds are otherwise indistinguishable in a menu. */}
-          <AxoDropdownMenu.Label>
-            {personaTopic != null
-              ? `Rate-limited · max ${MAX_PSEUDO} in “${personaTopic}”`
-              : `Rate-limited · max ${MAX_PSEUDO} per context — pick a context below`}
-          </AxoDropdownMenu.Label>
-          <AxoDropdownMenu.RadioGroup
-            value={personaValue}
-            onValueChange={setPersonaValue}
-          >
-            {Array.from({ length: MAX_PSEUDO }, (_unused, index) => (
-              <AxoDropdownMenu.RadioItem
-                // oxlint-disable-next-line react/no-array-index-key
-                key={`persona-rate-${index}`}
-                value={`rate:${index}`}
-                disabled={personaTopicContext == null}
-              >
-                {personaTopic != null
-                  ? `#${index + 1} in “${personaTopic}”`
-                  : `#${index + 1}`}
-              </AxoDropdownMenu.RadioItem>
-            ))}
-          </AxoDropdownMenu.RadioGroup>
+                <AxoDropdownMenu.Label>
+                  {personaTopic != null
+                    ? `Rate-limited · max ${MAX_PSEUDO} in “${personaTopic}”`
+                    : `Rate-limited · max ${MAX_PSEUDO} per context — pick a context below`}
+                </AxoDropdownMenu.Label>
+                <AxoDropdownMenu.RadioGroup
+                  value={personaValue}
+                  onValueChange={setPersonaValue}
+                >
+                  {Array.from({ length: MAX_PSEUDO }, (_unused, index) => (
+                    <AxoDropdownMenu.RadioItem
+                      // oxlint-disable-next-line react/no-array-index-key
+                      key={`persona-rate-${index}`}
+                      value={`rate:${index}`}
+                      disabled={personaTopicContext == null}
+                    >
+                      {personaTopic != null
+                        ? `#${index + 1} in “${personaTopic}”`
+                        : `#${index + 1}`}
+                    </AxoDropdownMenu.RadioItem>
+                  ))}
+                </AxoDropdownMenu.RadioGroup>
 
-          <AxoDropdownMenu.Separator />
+                <AxoDropdownMenu.Separator />
 
-          {/* Say out loud that choosing a context CHANGES the persona. Selecting one
+                {/* Say out loud that choosing a context CHANGES the persona. Selecting one
               forces a rate-limited pseudonym for that context (defaulting to #1),
               because a context only binds in-circuit for a rate-limited persona — an
               anonymous post carrying a context label is a claim nothing backs. Silent
               coercion of an identity choice would be unacceptable, so it is stated
               here rather than left to be discovered. */}
-          <AxoDropdownMenu.Label>
-            {personaTopic != null
-              ? `Context · posting as rate-limited #${
-                  personaValue.startsWith('rate:')
-                    ? Number(personaValue.slice('rate:'.length)) + 1
-                    : DEFAULT_RATE_INDEX + 1
-                } in “${personaTopic}”`
-              : 'Context — choosing one posts as a rate-limited pseudonym'}
-          </AxoDropdownMenu.Label>
-          <AxoDropdownMenu.RadioGroup
-            value={personaTopic ?? ''}
-            onValueChange={value => {
-              const name = value || undefined;
-              setPersonaTopic(name);
-              // MOVE THE RADIO SELECTION, not just the derived choice.
-              //
-              // `personaValueToChoice` already coerces to a rate-limited pseudonym when
-              // a context is set, so sends were correct — but the menu still showed the
-              // check mark next to whatever was picked before (often "Anonymous"), so
-              // the UI claimed one identity while the message used another. For an
-              // identity control that is not a cosmetic bug, and it is why this looked
-              // like the default "not working": there was no way to see that it had.
-              //
-              // Selecting the radio makes the check mark land on #1 and keeps the menu
-              // and the wire in agreement.
-              if (name != null && !personaValue.startsWith('rate:')) {
-                setPersonaValue(`rate:${DEFAULT_RATE_INDEX}`);
-              }
-              // Clearing the context leaves a `rate:` selection unsatisfiable — there
-              // is no context for the rate limit to bind to — and an unsatisfiable
-              // choice makes the duck send a PLAIN, attributable message. Fall back to
-              // anonymous rather than silently de-anonymizing the next post.
-              if (name == null && personaValue.startsWith('rate:')) {
-                setPersonaValue('anon');
-              }
-            }}
-          >
-            <AxoDropdownMenu.RadioItem value="">
-              No topic
-            </AxoDropdownMenu.RadioItem>
-            {personaTopics.map(topic => (
-              <AxoDropdownMenu.RadioItem key={topic.name} value={topic.name}>
-                {topic.name}
-              </AxoDropdownMenu.RadioItem>
-            ))}
-          </AxoDropdownMenu.RadioGroup>
-          {/* Topic creation is ATTRIBUTABLE (the announcement goes out under the
+                <AxoDropdownMenu.Label>
+                  {personaTopic != null
+                    ? `Context · posting as rate-limited #${
+                        personaValue.startsWith('rate:')
+                          ? Number(personaValue.slice('rate:'.length)) + 1
+                          : DEFAULT_RATE_INDEX + 1
+                      } in “${personaTopic}”`
+                    : 'Context — choosing one posts as a rate-limited pseudonym'}
+                </AxoDropdownMenu.Label>
+                <AxoDropdownMenu.RadioGroup
+                  value={personaTopic ?? ''}
+                  onValueChange={value => {
+                    const name = value || undefined;
+                    setPersonaTopic(name);
+                    // MOVE THE RADIO SELECTION, not just the derived choice.
+                    //
+                    // `personaValueToChoice` already coerces to a rate-limited pseudonym when
+                    // a context is set, so sends were correct — but the menu still showed the
+                    // check mark next to whatever was picked before (often "Anonymous"), so
+                    // the UI claimed one identity while the message used another. For an
+                    // identity control that is not a cosmetic bug, and it is why this looked
+                    // like the default "not working": there was no way to see that it had.
+                    //
+                    // Selecting the radio makes the check mark land on #1 and keeps the menu
+                    // and the wire in agreement.
+                    if (name != null && !personaValue.startsWith('rate:')) {
+                      setPersonaValue(`rate:${DEFAULT_RATE_INDEX}`);
+                    }
+                    // Clearing the context leaves a `rate:` selection unsatisfiable — there
+                    // is no context for the rate limit to bind to — and an unsatisfiable
+                    // choice makes the duck send a PLAIN, attributable message. Fall back to
+                    // anonymous rather than silently de-anonymizing the next post.
+                    if (name == null && personaValue.startsWith('rate:')) {
+                      setPersonaValue('anon');
+                    }
+                  }}
+                >
+                  <AxoDropdownMenu.RadioItem value="">
+                    No topic
+                  </AxoDropdownMenu.RadioItem>
+                  {personaTopics.map(topic => (
+                    <AxoDropdownMenu.RadioItem
+                      key={topic.name}
+                      value={topic.name}
+                    >
+                      {topic.name}
+                    </AxoDropdownMenu.RadioItem>
+                  ))}
+                </AxoDropdownMenu.RadioGroup>
+                {/* Topic creation is ATTRIBUTABLE (the announcement goes out under the
               real account), so gating it on Signal's admin role is meaningful in a
               way that gating an anonymous action could never be. Still a client-side
               convenience rather than enforcement — see the status panel. */}
-          <AxoDropdownMenu.Item
-            symbol="plus"
-            disabled={!areWeAdmin}
-            onSelect={() => {
-              setNewTopicName('');
-              setIsTopicDialogOpen(true);
-            }}
-          >
-            {areWeAdmin ? 'New context…' : 'New context… (admins only)'}
-          </AxoDropdownMenu.Item>
+                <AxoDropdownMenu.Item
+                  symbol="plus"
+                  disabled={!areWeAdmin}
+                  onSelect={() => {
+                    setNewTopicName('');
+                    setIsTopicDialogOpen(true);
+                  }}
+                >
+                  {areWeAdmin ? 'New context…' : 'New context… (admins only)'}
+                </AxoDropdownMenu.Item>
 
-          <AxoDropdownMenu.Separator />
+                <AxoDropdownMenu.Separator />
 
-          {/* BADGES, now credentials rather than labels.
+                {/* BADGES, now credentials rather than labels.
               The selector offers ONLY badges this member actually holds in their zk
               object — a badge you hold can be proved, and one you do not cannot be
               attached at all. That is the whole difference from the old behaviour,
               where any label could be typed on any message. */}
-          <AxoDropdownMenu.Sub>
-            <AxoDropdownMenu.SubTrigger symbol="person-circle">
-              {/* The label reflects what will actually be SENT, not what is stored.
+                <AxoDropdownMenu.Sub>
+                  <AxoDropdownMenu.SubTrigger symbol="person-circle">
+                    {/* The label reflects what will actually be SENT, not what is stored.
                   A selection the member no longer holds (or never held — the
                   preference file outlives a reset) is dropped by the send path, so
                   showing it here would promise a badge the post will not carry. */}
-              {heldBadges.length === 0
-                ? 'Badge: none held'
-                : `Badge: ${
-                    selectedBadge != null && heldBadges.includes(selectedBadge)
-                      ? selectedBadge
-                      : 'none'
-                  }`}
-            </AxoDropdownMenu.SubTrigger>
-            <AxoDropdownMenu.SubContent>
-              {heldBadges.length === 0 ? (
-                <AxoDropdownMenu.Label>
-                  You hold no approved badges yet — request one below.
-                </AxoDropdownMenu.Label>
-              ) : (
-                <AxoDropdownMenu.RadioGroup
-                  value={selectedBadge ?? ''}
-                  onValueChange={value =>
-                    setPersonaBadge(
-                      isPersonaBadge(value) ? value : undefined
-                    )
-                  }
-                >
-                  <AxoDropdownMenu.RadioItem value="">
-                    None
-                  </AxoDropdownMenu.RadioItem>
-                  {heldBadges.map(label => (
-                    <AxoDropdownMenu.RadioItem key={label} value={label}>
-                      {label}
-                    </AxoDropdownMenu.RadioItem>
-                  ))}
-                </AxoDropdownMenu.RadioGroup>
-              )}
-            </AxoDropdownMenu.SubContent>
-          </AxoDropdownMenu.Sub>
+                    {heldBadges.length === 0
+                      ? 'Badge: none held'
+                      : `Badge: ${
+                          selectedBadge != null &&
+                          heldBadges.includes(selectedBadge)
+                            ? selectedBadge
+                            : 'none'
+                        }`}
+                  </AxoDropdownMenu.SubTrigger>
+                  <AxoDropdownMenu.SubContent>
+                    {heldBadges.length === 0 ? (
+                      <AxoDropdownMenu.Label>
+                        You hold no approved badges yet — request one below.
+                      </AxoDropdownMenu.Label>
+                    ) : (
+                      <AxoDropdownMenu.RadioGroup
+                        value={selectedBadge ?? ''}
+                        onValueChange={value =>
+                          setPersonaBadge(
+                            isPersonaBadge(value) ? value : undefined
+                          )
+                        }
+                      >
+                        <AxoDropdownMenu.RadioItem value="">
+                          None
+                        </AxoDropdownMenu.RadioItem>
+                        {heldBadges.map(label => (
+                          <AxoDropdownMenu.RadioItem key={label} value={label}>
+                            {label}
+                          </AxoDropdownMenu.RadioItem>
+                        ))}
+                      </AxoDropdownMenu.RadioGroup>
+                    )}
+                  </AxoDropdownMenu.SubContent>
+                </AxoDropdownMenu.Sub>
 
-          {/* REQUEST a badge. The first thing a member without one sees, since the
+                {/* REQUEST a badge. The first thing a member without one sees, since the
               selector above is empty until an admin approves something.
               Blocked options stay VISIBLE but disabled with the reason: the circuit
               silently declines a conflicting assignment, so "why can I not ask for
               Faculty?" has to be answerable here rather than discovered after an
               approval that quietly did nothing. */}
-          <AxoDropdownMenu.Sub>
-            <AxoDropdownMenu.SubTrigger symbol="plus">
-              Request badge…
-            </AxoDropdownMenu.SubTrigger>
-            <AxoDropdownMenu.SubContent>
-              {/* NOT gated on membership. `requestBadge` joins first if it has to, the
+                <AxoDropdownMenu.Sub>
+                  <AxoDropdownMenu.SubTrigger symbol="plus">
+                    Request badge…
+                  </AxoDropdownMenu.SubTrigger>
+                  <AxoDropdownMenu.SubContent>
+                    {/* NOT gated on membership. `requestBadge` joins first if it has to, the
                   same way posting and rating always have, so there is nothing for the
                   member to do in the right order. An earlier version of this menu
                   disabled itself with "send one ordinary message first" — which was an
                   accurate description of a bug being presented as a requirement. */}
-              <AxoDropdownMenu.Label>
-                {personaJoined
-                  ? "Needs a group admin's approval"
-                  : "Needs a group admin's approval. Joins the bulletin first, so the request may take a moment."}
-              </AxoDropdownMenu.Label>
-              {requestableBadges(heldBadges).map(
-                ({ slot, name, blockedReason }) => (
-                  <AxoDropdownMenu.Item
-                    key={slot}
-                    disabled={blockedReason != null}
-                    onSelect={() => requestPersonaBadge(conversationId, slot)}
-                  >
-                    {blockedReason != null ? `${name} — ${blockedReason}` : name}
-                  </AxoDropdownMenu.Item>
-                )
-              )}
-            </AxoDropdownMenu.SubContent>
-          </AxoDropdownMenu.Sub>
+                    <AxoDropdownMenu.Label>
+                      {personaJoined
+                        ? "Needs a group admin's approval"
+                        : "Needs a group admin's approval. Joins the bulletin first, so the request may take a moment."}
+                    </AxoDropdownMenu.Label>
+                    {requestableBadges(heldBadges).map(
+                      ({ slot, name, blockedReason }) => (
+                        <AxoDropdownMenu.Item
+                          key={slot}
+                          disabled={blockedReason != null}
+                          onSelect={() =>
+                            requestPersonaBadge(conversationId, slot)
+                          }
+                        >
+                          {blockedReason != null
+                            ? `${name} — ${blockedReason}`
+                            : name}
+                        </AxoDropdownMenu.Item>
+                      )
+                    )}
+                  </AxoDropdownMenu.SubContent>
+                </AxoDropdownMenu.Sub>
 
-          <AxoDropdownMenu.Separator />
+                <AxoDropdownMenu.Separator />
 
-          {/* ZK-PROVED authorship claim. Needs two NAMED personas: the proof is built
+                {/* ZK-PROVED authorship claim. Needs two NAMED personas: the proof is built
               over each pseudonym's nonce, but the picker has to show something a human
               recognises, and a pseudonym has no petname until it has posted once (the
               engine reveals the name when it first emits under that nonce). So this
               stays disabled until two of this instance's pseudonyms have posted. */}
-          <AxoDropdownMenu.Item
-            symbol="link"
-            disabled={namedPseudonyms.length < 2}
-            onSelect={() => setIsAuthorshipDialogOpen(true)}
-          >
-            {/* No longer "(unverified)": the claim carries a Groth16 proof over
+                <AxoDropdownMenu.Item
+                  symbol="link"
+                  disabled={namedPseudonyms.length < 2}
+                  onSelect={() => setIsAuthorshipDialogOpen(true)}
+                >
+                  {/* No longer "(unverified)": the claim carries a Groth16 proof over
                 authorship_pred and recipients verify it before rendering. The label was
                 the last place in the UI still describing the old behaviour. */}
-            {namedPseudonyms.length < 2
-              ? 'Prove authorship… (needs 2 posted personas)'
-              : 'Prove authorship…'}
-          </AxoDropdownMenu.Item>
+                  {namedPseudonyms.length < 2
+                    ? 'Prove authorship… (needs 2 posted personas)'
+                    : 'Prove authorship…'}
+                </AxoDropdownMenu.Item>
 
-          {/* ZK-PROVED badge possession — the counterpart to "Prove authorship".
+                {/* ZK-PROVED badge possession — the counterpart to "Prove authorship".
               Offers only badges actually HELD, because the proof is unsatisfiable
               otherwise: there is no witness for a badge that is not in the object. So
               an empty list here is not a UI limitation, it is the security property,
@@ -1394,45 +1445,50 @@ export const CompositionArea = memo(function CompositionArea({
               Note this is a DIFFERENT action from the badge selector above. That
               attaches a decorative label to a post; this publishes a proof. Both exist
               because the gap between them is the thing worth demonstrating. */}
-          <AxoDropdownMenu.Sub>
-            <AxoDropdownMenu.SubTrigger symbol="check-circle">
-              {heldBadges.length === 0
-                ? 'Prove badge… (none held)'
-                : 'Prove badge…'}
-            </AxoDropdownMenu.SubTrigger>
-            <AxoDropdownMenu.SubContent>
-              {heldBadges.length === 0 ? (
-                <AxoDropdownMenu.Label>
-                  No approved badges yet — request one above, then Scan now.
-                </AxoDropdownMenu.Label>
-              ) : (
-                <>
-                  <AxoDropdownMenu.Label>
-                    Proves you hold it, without revealing who you are
-                  </AxoDropdownMenu.Label>
-                  {heldBadges.map(label => (
-                    <AxoDropdownMenu.Item
-                      key={label}
-                      onSelect={() => provePersonaBadge(conversationId, label)}
-                    >
-                      {label}
-                    </AxoDropdownMenu.Item>
-                  ))}
-                </>
-              )}
-            </AxoDropdownMenu.SubContent>
-          </AxoDropdownMenu.Sub>
+                <AxoDropdownMenu.Sub>
+                  <AxoDropdownMenu.SubTrigger symbol="check-circle">
+                    {heldBadges.length === 0
+                      ? 'Prove badge… (none held)'
+                      : 'Prove badge…'}
+                  </AxoDropdownMenu.SubTrigger>
+                  <AxoDropdownMenu.SubContent>
+                    {heldBadges.length === 0 ? (
+                      <AxoDropdownMenu.Label>
+                        No approved badges yet — request one above, then Scan
+                        now.
+                      </AxoDropdownMenu.Label>
+                    ) : (
+                      <>
+                        <AxoDropdownMenu.Label>
+                          Proves you hold it, without revealing who you are
+                        </AxoDropdownMenu.Label>
+                        {heldBadges.map(label => (
+                          <AxoDropdownMenu.Item
+                            key={label}
+                            onSelect={() =>
+                              provePersonaBadge(conversationId, label)
+                            }
+                          >
+                            {label}
+                          </AxoDropdownMenu.Item>
+                        ))}
+                      </>
+                    )}
+                  </AxoDropdownMenu.SubContent>
+                </AxoDropdownMenu.Sub>
 
-          <AxoDropdownMenu.Item
-            symbol="info"
-            onSelect={() => setIsStatusDialogOpen(true)}
-          >
-            Persona status…
-          </AxoDropdownMenu.Item>
-        </AxoDropdownMenu.Content>
-      </AxoDropdownMenu.Root>
-    </div>
-  );
+                <AxoDropdownMenu.Item
+                  symbol="info"
+                  onSelect={() => setIsStatusDialogOpen(true)}
+                >
+                  Persona status…
+                </AxoDropdownMenu.Item>
+              </>
+            )}
+          </AxoDropdownMenu.Content>
+        </AxoDropdownMenu.Root>
+      </div>
+    );
 
   // Creating a topic draws a random context and announces it to the group, so every
   // member binds the same context for this topic name.
@@ -1466,7 +1522,7 @@ export const CompositionArea = memo(function CompositionArea({
             value={newTopicName}
             onChange={event => setNewTopicName(event.target.value)}
             className={tw(
-              'w-full rounded-lg border border-border-primary bg-fill-secondary px-3 py-2 type-body-medium text-primary'
+              'border-border-primary bg-fill-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
             )}
           />
         </AxoDialog.Body>
@@ -1503,14 +1559,14 @@ export const CompositionArea = memo(function CompositionArea({
         </AxoDialog.Header>
         <AxoDialog.Body>
           <div className={tw('flex flex-col gap-3')}>
-            <div className={tw('type-body-small text-label-secondary')}>
+            <div className={tw('text-label-secondary type-body-small')}>
               {AUTHORSHIP_EXPLANATION}
             </div>
             <select
               value={authorshipFirst}
               onChange={event => setAuthorshipFirst(event.target.value)}
               className={tw(
-                'w-full rounded-lg border border-border-primary bg-fill-secondary px-3 py-2 type-body-medium text-primary'
+                'border-border-primary bg-fill-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
               )}
             >
               <option value="">First persona…</option>
@@ -1524,7 +1580,7 @@ export const CompositionArea = memo(function CompositionArea({
               value={authorshipSecond}
               onChange={event => setAuthorshipSecond(event.target.value)}
               className={tw(
-                'w-full rounded-lg border border-border-primary bg-fill-secondary px-3 py-2 type-body-medium text-primary'
+                'border-border-primary bg-fill-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
               )}
             >
               <option value="">Second persona…</option>
@@ -2064,7 +2120,9 @@ export const CompositionArea = memo(function CompositionArea({
           onDismissBadge={dismissPersonaBadgeRequest}
           onOpenExtraMember={openPersonasExtraMember}
           onRequestReset={() => requestPersonaReset(conversationId)}
-          onApproveReset={account => approvePersonaReset(conversationId, account)}
+          onApproveReset={account =>
+            approvePersonaReset(conversationId, account)
+          }
           onDismissReset={dismissPersonaReset}
           status={personaStatus}
           i18n={i18n}

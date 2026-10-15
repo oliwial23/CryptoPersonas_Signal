@@ -965,6 +965,80 @@ mod e2e {
 
     /// Proven joins, one per account, and the admin-approved re-join a reset needs.
     #[test]
+    fn e2e_a_late_joiner_catches_up_then_sends_and_receives() {
+        // Members who joined after the group started posting used to be stranded: their
+        // posts named a tree nobody else had, and everyone else's named trees they never
+        // built. With an admin's history (private text removed) they can take part.
+        let mut rng = StdRng::seed_from_u64(53);
+        let keys = keygen(&mut rng);
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let conv = ConversationId("late".into());
+        let new_member = |rng: &mut StdRng| {
+            Msg::new(
+                transport.clone(),
+                conv.clone(),
+                keys.replica.clone(),
+                config(),
+                Some(Member::create(keys.member.clone(), rng)),
+            )
+        };
+        let status = |m: &mut Msg, e: &Emitted| deliver(m, e).unwrap().unwrap();
+
+        let mut admin = new_member(&mut rng);
+        let mut alice = new_member(&mut rng);
+        let j = admin.emit_join(&mut rng, F::from(7001u64)).unwrap();
+        status(&mut alice, &j);
+        let j = alice.emit_join(&mut rng, F::from(7002u64)).unwrap();
+        status(&mut admin, &j);
+        let p = alice.emit_post_anon(&mut rng, "an old secret").unwrap();
+        assert_eq!(status(&mut admin, &p), Status::Applied);
+        let old_post = p.eh;
+        admin.barrier();
+        alice.barrier();
+
+        // A newcomer WITHOUT the history: its post is held back by everyone.
+        let mut stranded = new_member(&mut rng);
+        let j = stranded.emit_join(&mut rng, F::from(7003u64)).unwrap();
+        for m in [&mut admin, &mut alice] {
+            status(m, &j);
+        }
+        let p = stranded.emit_post_anon(&mut rng, "hello?").unwrap();
+        assert_eq!(status(&mut admin, &p), Status::Buffered, "the old failure");
+        assert_eq!(status(&mut alice, &p), Status::Buffered);
+
+        // A newcomer WITH it.
+        let mut bob = new_member(&mut rng);
+        let history = admin.catch_up_records();
+        assert!(
+            history
+                .iter()
+                .all(|(_, _, b)| !String::from_utf8_lossy(b).contains("an old secret")),
+            "the history carries no message text"
+        );
+        let at = admin.replica().current_barrier();
+        assert!(bob.import_records(history, at) > 0);
+        assert_eq!(bob.replica().obj_root(), admin.replica().obj_root());
+        assert_eq!(
+            bob.replica().log().iter().find(|e| e.eh == old_post).map(|e| e.body.clone()),
+            Some(String::new()),
+            "old posts are known to the replica, but not their text"
+        );
+
+        let j = bob.emit_join(&mut rng, F::from(7004u64)).unwrap();
+        for m in [&mut admin, &mut alice] {
+            assert_eq!(status(m, &j), Status::Applied);
+        }
+        let p = bob.emit_post_anon(&mut rng, "hi all").unwrap();
+        for m in [&mut admin, &mut alice] {
+            assert_eq!(status(m, &p), Status::Applied, "bob can send");
+        }
+        let p = alice.emit_post_anon(&mut rng, "welcome").unwrap();
+        status(&mut admin, &p);
+        assert_eq!(status(&mut bob, &p), Status::Applied, "bob can receive");
+        assert_eq!(bob.replica().obj_root(), admin.replica().obj_root());
+    }
+
+    #[test]
     #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
     fn e2e_proven_joins_one_per_account_and_admin_rejoin() {
         use personas_core::circuits::{FACULTY_F, join_pred};

@@ -54,6 +54,8 @@ import {
   isPersonasEngineEnabled,
   type PersonaChoice,
 } from '../../services/personasEngine.preload.ts';
+import { turnOnPersonasInGroup } from '../../services/personasPhantom.preload.ts';
+import { catchUpBlockReason } from '../../services/personasCatchUp.preload.ts';
 import { ensurePersonaJoined } from '../../services/personasMembership.preload.ts';
 import {
   createTopic,
@@ -570,6 +572,27 @@ function requestPersonaReset(
   };
 }
 
+// As an admin: turn personas on in a group that has none (mints its phantom bundle).
+function turnOnPersonas(
+  conversationId: string
+): ThunkAction<void, RootStateType, unknown, NoopActionType | ShowToastActionType> {
+  return async dispatch => {
+    const conversation = window.ConversationController.get(conversationId);
+    if (conversation) {
+      const result = await turnOnPersonasInGroup(conversation);
+      if (!result.ok) {
+        dispatch(
+          showToast({
+            toastType: ToastType.PersonaActionFailed,
+            parameters: { reason: result.reason },
+          })
+        );
+      }
+    }
+    dispatch(noopAction('turnOnPersonas'));
+  };
+}
+
 // As an admin: allow a member to join once more.
 function approvePersonaReset(
   conversationId: string,
@@ -686,6 +709,7 @@ export const actions = {
   approvePersonaBadge,
   dismissPersonaBadgeRequest,
   requestPersonaReset,
+  turnOnPersonas,
   approvePersonaReset,
   dismissPersonaReset,
   provePersonaBadge,
@@ -1192,6 +1216,18 @@ function sendMultiMediaMessage(
         }
 
         const joined = await ensurePersonaJoined(conversation);
+        const catchUpReason = joined ? undefined : catchUpBlockReason();
+        if (catchUpReason) {
+          log.warn('sendMultiMediaMessage: persona post waits for the group state');
+          dispatch({
+            type: SHOW_TOAST,
+            payload: {
+              toastType: ToastType.PersonaActionFailed,
+              parameters: { reason: catchUpReason },
+            },
+          });
+          return;
+        }
         if (!joined) {
           log.error(
             'sendMultiMediaMessage: persona post requested but join failed; refusing to send attributably'

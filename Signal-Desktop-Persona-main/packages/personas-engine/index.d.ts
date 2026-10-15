@@ -77,6 +77,16 @@ export class Engine {
    * member's object is fresh. Accepted once per account, plus once per admin approval.
    */
   emitJoin(account: string): Emitted;
+  /**
+   * This replica's history for a member who joined late, with the text of past posts
+   * and polls removed. A group admin sends it; the newcomer passes it to importCatchUp.
+   */
+  exportCatchUp(): Buffer;
+  /**
+   * Take in a history from exportCatchUp, trusting its sender (accept one only from a
+   * group admin). Journalled; returns how many records were new.
+   */
+  importCatchUp(history: Buffer): number;
   /** As a group admin: allow `account` one more join. Send it under your own account. */
   emitRejoinApprove(account: string): Emitted;
   /** A reset request's proof: not banned and just swept, as `account`. */

@@ -398,6 +398,29 @@ pub fn decode(bytes: &[u8]) -> Result<(Record, Eh), CodecError> {
     Ok((envelope.record, Eh::of_bytes(bytes)))
 }
 
+/// The record re-encoded WITHOUT its private text — a post's body, a poll's question
+/// and option labels (the number of options stays: a vote names one by index) — for
+/// handing to a late joiner who should not read the group's past messages.
+///
+/// The bytes no longer hash to the record's [`Eh`], so whoever stores them must keep
+/// the original `Eh` beside them ([`super::Replica::import_records`]). Nothing the
+/// replica derives depends on the removed text: no proof covers it, and ratings and
+/// polls refer to records by their original `Eh`.
+pub fn strip_private_text(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let (mut record, _) = decode(bytes)?;
+    match &mut record {
+        Record::Post { body, .. } => body.clear(),
+        Record::PollOpen {
+            question, options, ..
+        } => {
+            question.clear();
+            options.iter_mut().for_each(String::clear);
+        }
+        _ => {}
+    }
+    Ok(encode(&record)?.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

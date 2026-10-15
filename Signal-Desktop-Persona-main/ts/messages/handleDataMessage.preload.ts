@@ -18,12 +18,20 @@ import {
   decodeBadgeProof,
   decodeRecordBody,
   decodeResetRequest,
+  decodeCatchUpPart,
+  isCatchUpRequest,
+  isPersonasCarriage,
 } from '../services/personasCarriage.std.ts';
 import {
   ingestResetRequest,
   recordSenderProblem,
 } from '../services/personasReset.preload.ts';
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
+import {
+  answerCatchUpRequest,
+  holdRecordForCatchUp,
+  ingestCatchUpPart,
+} from '../services/personasCatchUp.preload.ts';
 import { recordTimestamp } from '../services/personasBarrier.preload.ts';
 import {
   decodePhantomBundle,
@@ -33,6 +41,7 @@ import {
   adoptPhantomBundle,
   holdPendingBundle,
   isFellowGroupMember,
+  isPersonasGroup,
 } from '../services/personasPhantom.preload.ts';
 import { ingestTopicAnnouncement } from '../services/personasTopics.preload.ts';
 import { getPhantomAci } from '../services/personasPhantom.preload.ts';
@@ -59,6 +68,7 @@ import {
   isDirectConversation,
   isGroup,
   isGroupV1,
+  isGroupV2,
 } from '../util/whatTypeOfConversation.dom.ts';
 import {
   respondToGroupV2Migration,
@@ -182,10 +192,23 @@ export async function handleDataMessage(
     // A PHANTOM BUNDLE (1:1, key material): adopt it if it comes from a fellow member of
     // one of our groups, then drop the message before anything saves its body. First
     // checked, so no other path ever sees the key material.
+    // ONE PERSONAS GROUP PER APP (for now). Personas traffic in any other group — its
+    // records, topics, proofs, requests — belongs to an engine this app does not run, so
+    // it is dropped rather than ingested here or shown as raw text.
+    if (
+      isGroupV2(conversation.attributes) &&
+      isPersonasCarriage(initialMessage.body) &&
+      !isPersonasGroup(conversation)
+    ) {
+      log.info(`${idLog}: personas traffic outside this app's personas group; dropped`);
+      confirm();
+      return;
+    }
+
     const phantomBundle = decodePhantomBundle(initialMessage.body);
     if (phantomBundle) {
       const from = sourceServiceId ?? source ?? 'unknown';
-      if (isFellowGroupMember(conversationId)) {
+      if (isFellowGroupMember(conversationId, phantomBundle.groupId)) {
         const result = await adoptPhantomBundle(phantomBundle, from);
         log.info(`${idLog}: phantom bundle from ${from}: ${result}`);
       } else {
@@ -257,6 +280,23 @@ export async function handleDataMessage(
       return;
     }
 
+    // LATE-JOIN CATCH-UP (personasCatchUp): a member's request for the group state, to
+    // the group (an admin's app answers it), and the parts of an admin's answer, 1:1.
+    // Coordination only, never rendered.
+    if (isCatchUpRequest(initialMessage.body)) {
+      await waitForPersonasEngineIfStarting();
+      await answerCatchUpRequest(conversation, sourceServiceId);
+      confirm();
+      return;
+    }
+    const catchUpPart = decodeCatchUpPart(initialMessage.body);
+    if (catchUpPart) {
+      await waitForPersonasEngineIfStarting();
+      ingestCatchUpPart(catchUpPart, sourceServiceId);
+      confirm();
+      return;
+    }
+
     // A RESET REQUEST (personasReset): coordination for admins, never rendered.
     const resetRequest = decodeResetRequest(initialMessage.body);
     if (resetRequest) {
@@ -270,6 +310,8 @@ export async function handleDataMessage(
     // than being dropped (a dropped record forks this member off the group).
     if (decodeRecordBody(initialMessage.body)) {
       await waitForPersonasEngineIfStarting();
+      // A member added late waits for the group state, so this record can be shown.
+      await holdRecordForCatchUp(conversation);
       // A join must come from the account it names, and a re-join approval from a
       // group admin. Dropped otherwise, before the engine sees it (personasReset).
       const senderProblem = recordSenderProblem(

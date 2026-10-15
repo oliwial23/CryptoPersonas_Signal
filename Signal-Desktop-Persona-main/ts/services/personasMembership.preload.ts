@@ -31,6 +31,8 @@ import {
   isPersonasEngineEnabled,
 } from './personasEngine.preload.ts';
 import { ensureSealedSenderWarmedUp } from './personasSealedSender.preload.ts';
+import { ensureCaughtUp } from './personasCatchUp.preload.ts';
+import { isPersonasGroup } from './personasPhantom.preload.ts';
 
 const log = createLogger('personasMembership');
 
@@ -97,6 +99,16 @@ export async function ensurePersonaJoined(
   conversation: ConversationModel
 ): Promise<boolean> {
   if (!isPersonasEngineEnabled()) {
+    return false;
+  }
+  // One personas group per app: nothing persona-related happens anywhere else.
+  if (!isPersonasGroup(conversation)) {
+    log.warn('ensurePersonaJoined: not this app\u2019s personas group; refusing');
+    return false;
+  }
+  // A member added late has an empty replica: anything it built now would be
+  // stranded, so it waits for an admin's copy of the group state (personasCatchUp).
+  if (!(await ensureCaughtUp(conversation))) {
     return false;
   }
   if (isRestoredMember()) {

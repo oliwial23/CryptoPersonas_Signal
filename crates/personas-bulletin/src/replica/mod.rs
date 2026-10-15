@@ -324,6 +324,59 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             .collect()
     }
 
+    /// Every seen record for a LATE JOINER, as `(first_barrier, eh, bytes)` with the
+    /// private text removed ([`record::strip_private_text`]). The `eh` is the record's
+    /// real one: the stripped bytes no longer hash to it.
+    pub fn catch_up_records(&self) -> Vec<(u64, Eh, Vec<u8>)> {
+        self.seen
+            .iter()
+            .filter_map(|(eh, s)| {
+                let bytes = record::strip_private_text(&s.bytes).ok()?;
+                Some((s.first_barrier, *eh, bytes))
+            })
+            .collect()
+    }
+
+    /// Add many records at once, each under the `eh` given rather than one computed
+    /// from its bytes (so a stripped record keeps its identity), with ONE rebuild —
+    /// ingesting a whole history one record at a time would replay it once per
+    /// record. Already-seen records are skipped, malformed ones ignored. Returns how
+    /// many were new.
+    pub fn import_records(&mut self, items: Vec<(u64, Eh, Vec<u8>)>) -> usize {
+        let built = self.current_barrier;
+        let mut from: Option<u64> = None;
+        let mut added = 0;
+        for (first_barrier, eh, bytes) in items {
+            if self.seen.contains_key(&eh) {
+                continue;
+            }
+            let Ok((record, _)) = record::decode(&bytes) else {
+                continue;
+            };
+            self.seen.insert(
+                eh,
+                Seen {
+                    bytes,
+                    record,
+                    first_barrier,
+                },
+            );
+            self.current_barrier = self.current_barrier.max(first_barrier);
+            from = Some(from.map_or(first_barrier, |f| f.min(first_barrier)));
+            added += 1;
+        }
+        if let Some(from) = from {
+            self.rebuild_from(from.min(built + 1));
+        }
+        added
+    }
+
+    /// The stored bytes of a seen record (stripped, for one imported by
+    /// [`import_records`](Self::import_records)).
+    pub fn seen_bytes(&self, eh: &Eh) -> Option<&[u8]> {
+        self.seen.get(eh).map(|s| s.bytes.as_slice())
+    }
+
     /// Ingest one encoded record, assigning it the replica's current barrier as its
     /// first-seen barrier. Returns its [`Status`] after re-deriving state.
     ///

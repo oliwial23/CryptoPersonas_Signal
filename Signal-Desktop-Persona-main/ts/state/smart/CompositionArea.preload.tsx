@@ -1,6 +1,7 @@
 // Copyright 2019 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { personasGroupStanding } from '../../services/personasPhantom.preload.ts';
 import { useCallback, useMemo, useState, memo } from 'react';
 import { ipcRenderer } from 'electron';
 import { useSelector } from 'react-redux';
@@ -245,6 +246,7 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
     requestPersonaBadge,
     dismissPersonaBadgeRequest,
     requestPersonaReset,
+    turnOnPersonas,
     approvePersonaReset,
     dismissPersonaReset,
     provePersonaBadge,
@@ -455,6 +457,12 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
       requestPersonaBadge={requestPersonaBadge}
       dismissPersonaBadgeRequest={dismissPersonaBadgeRequest}
       requestPersonaReset={requestPersonaReset}
+      // Personas are per group, and on in ONE group per app for now: this says whether
+      // this is that group. Read on every render (the bundle can arrive at any time).
+      personaGroupStanding={personasGroupStanding(
+        window.ConversationController.get(id)
+      )}
+      turnOnPersonas={turnOnPersonas}
       approvePersonaReset={approvePersonaReset}
       dismissPersonaReset={dismissPersonaReset}
       provePersonaBadge={provePersonaBadge}

@@ -2089,11 +2089,12 @@ export async function createGroupV2(
     });
   }
 
-  // Personas demo: the group's creator mints the shared phantom bundle (unless it already
-  // holds one) and hands it 1:1 to the members. No-op outside demo mode.
+  // Personas demo: the group's creator mints THIS group's phantom bundle (unless personas
+  // are already on in another group in this app) and hands it 1:1 to the members. No-op
+  // outside demo mode.
   drop(
     (async () => {
-      await mintPhantomBundle();
+      await mintPhantomBundle(groupId);
       await distributePhantomBundle();
     })()
   );

@@ -40,6 +40,12 @@ import {
   isPersonaPhantomBody,
   encodeResetRequest,
   decodeResetRequest,
+  encodeCatchUpRequest,
+  isCatchUpRequest,
+  encodeCatchUpParts,
+  decodeCatchUpPart,
+  CATCH_UP_PART_DATA_CHARS,
+  PERSONAS_CATCH_UP_PART_MARKER,
   PERSONAS_RESET_REQUEST_MARKER,
   encodeAuthorshipProof,
   decodeAuthorshipProof,
@@ -406,7 +412,8 @@ describe('badge possession proof carriage', () => {
 
 describe('personasCarriage phantom bundle', () => {
   const bundle: PersonaPhantomBundleWire = {
-    v: 1,
+    v: 2,
+    groupId: 'Z3JvdXAtaWQ=',
     trustRootPublic: 'dHJ1c3Q=',
     phantomIdentityKeyPair: 'aWQ=',
     phantomCert: 'Y2VydA==',
@@ -440,7 +447,11 @@ describe('personasCarriage phantom bundle', () => {
     assert.isUndefined(
       decodePhantomBundle(encode({ ...bundle, schedule: { anchorMs: 1, periodMs: 0 } }))
     );
-    assert.isUndefined(decodePhantomBundle(encode({ ...bundle, v: 2 })));
+    assert.isUndefined(decodePhantomBundle(encode({ ...bundle, v: 1 })));
+    // A bundle must name its group: version 1 bundles were shared across groups.
+    assert.isUndefined(decodePhantomBundle(encode({ ...bundle, groupId: '' })));
+    const { groupId: _groupId, ...noGroup } = bundle;
+    assert.isUndefined(decodePhantomBundle(encode({ ...noGroup, v: 2 })));
     assert.isUndefined(decodePhantomBundle(`${PERSONAS_PHANTOM_BUNDLE_MARKER}not base64 json`));
     assert.isUndefined(decodePhantomBundle('just a message'));
     assert.isUndefined(decodePhantomBundle(undefined));
@@ -471,5 +482,45 @@ describe('personas reset request carriage', () => {
 
   it('is never routed through the anonymous phantom', () => {
     assert.isFalse(isPersonaPhantomBody(encodeResetRequest({ a: account, p: null })));
+  });
+});
+
+describe('personas catch-up carriage', () => {
+  it('recognises a request', () => {
+    assert.isTrue(isCatchUpRequest(encodeCatchUpRequest()));
+    assert.isFalse(isCatchUpRequest('hello'));
+    assert.isFalse(isCatchUpRequest(undefined));
+  });
+
+  it('splits a history into parts that each fit inline, and reassembles it', () => {
+    const history = Buffer.alloc(5000);
+    for (let i = 0; i < history.length; i += 1) {
+      history[i] = (i * 31) % 256;
+    }
+    const parts = encodeCatchUpParts('group-id', 'copy-1', history);
+    assert.isAbove(parts.length, 1);
+    for (const part of parts) {
+      assert.isAtMost(Buffer.byteLength(part), 2048);
+    }
+    const decoded = parts.map(p => decodeCatchUpPart(p));
+    decoded.forEach((d, i) => {
+      assert.equal(d?.i, i);
+      assert.equal(d?.n, parts.length);
+      assert.equal(d?.g, 'group-id');
+      assert.equal(d?.s, 'copy-1');
+    });
+    const joined = Buffer.from(decoded.map(d => d?.d ?? '').join(''), 'base64');
+    assert.isTrue(joined.equals(history));
+    assert.isAtMost(decoded[0]?.d.length ?? 0, CATCH_UP_PART_DATA_CHARS);
+  });
+
+  it('refuses malformed parts', () => {
+    const bad = (wire: unknown) =>
+      PERSONAS_CATCH_UP_PART_MARKER +
+      Buffer.from(JSON.stringify(wire)).toString('base64');
+    assert.isUndefined(decodeCatchUpPart('hello'));
+    assert.isUndefined(decodeCatchUpPart(bad({ g: 'g', s: 's', i: 2, n: 2, d: '' })));
+    assert.isUndefined(decodeCatchUpPart(bad({ g: 'g', s: 's', i: 0, n: 0, d: '' })));
+    assert.isUndefined(decodeCatchUpPart(bad({ g: 1, s: 's', i: 0, n: 1, d: '' })));
   });
 });

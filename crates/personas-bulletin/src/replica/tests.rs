@@ -273,3 +273,48 @@ fn checkpointed_rebuilds_match_a_full_replay_across_a_long_schedule() {
         fresh.poll(&poll_eh).map(|p| (p.opened_barrier, p.closed))
     );
 }
+
+#[test]
+fn a_late_joiner_catches_up_from_stripped_records() {
+    // An existing replica hands its history to a newcomer with the private text
+    // removed. The newcomer must end up byte-identical (same roots, same polls, keyed
+    // by the same envelope hashes), and stay identical as new records arrive.
+    let mut old = replica();
+    old.ingest_at(join(41).0, 0).unwrap();
+    let (poll, poll_eh) = encode(&Record::PollOpen {
+        question: "a private question".into(),
+        options: vec!["ban".into(), "keep".into()],
+        kind: super::record::PollKind::Ban,
+        target: None,
+    })
+    .unwrap();
+    old.ingest_at(poll, 2).unwrap();
+    old.advance_to(5);
+    old.ingest_at(join(42).0, 5).unwrap();
+
+    let history = old.catch_up_records();
+    assert!(
+        history
+            .iter()
+            .all(|(_, _, bytes)| !String::from_utf8_lossy(bytes).contains("private question")),
+        "no private text is handed over"
+    );
+
+    let mut newcomer = replica();
+    assert_eq!(newcomer.import_records(history.clone()), 3);
+    assert_eq!(newcomer.import_records(history), 0, "a second copy adds nothing");
+    newcomer.advance_to(5);
+    assert_eq!(newcomer.obj_root(), old.obj_root());
+    assert_eq!(
+        newcomer.poll(&poll_eh).map(|p| (p.opened_barrier, p.closed)),
+        old.poll(&poll_eh).map(|p| (p.opened_barrier, p.closed)),
+        "the poll keeps its identity, so later votes still find it"
+    );
+
+    // Going forward they receive the same records and stay in step.
+    let (next, next_eh) = join(43);
+    old.ingest_at(next.clone(), 6).unwrap();
+    newcomer.ingest_at(next, 6).unwrap();
+    assert_eq!(newcomer.obj_root(), old.obj_root());
+    assert_eq!(newcomer.status(&next_eh), Some(Status::Applied));
+}
