@@ -19,6 +19,8 @@
   .download { display: block; padding: 18px 20px; border-radius: 12px; background: var(--accent); color: #fff;
               text-decoration: none; font-weight: 600; text-align: center; font-size: 1.05rem; }
   .download small { display: block; font-weight: 400; opacity: .85; margin-top: 4px; }
+  .download + .download { margin-top: 10px; }
+  .download.secondary { background: var(--card); color: var(--fg); }
   .card { background: var(--card); border-radius: 12px; padding: 14px 18px; margin: 12px 0; }
   .warn { background: var(--warn); color: var(--warn-fg); border-radius: 12px; padding: 12px 16px; margin: 12px 0; }
   ol, ul { padding-left: 22px; }
@@ -35,8 +37,12 @@
     including the server, learning who wrote what. It runs on a private test server, separate
     from the real Signal.</p>
 
-  <a class="download" id="dl" href="Signal-Personas.dmg">Download Signal Personas for Mac
-    <small>Apple Silicon (M1 or later) · macOS 12 or later · about 140 MB</small></a>
+  <a class="download" href="Signal-Personas-arm64.dmg">Download for Mac with Apple Silicon
+    <small>M1, M2, M3, M4 or later · macOS 12 or later · about 140 MB</small></a>
+  <a class="download secondary" href="Signal-Personas-x64.dmg">Download for Mac with Intel
+    <small>macOS 12 or later · about 150 MB</small></a>
+  <p class="lede">Not sure which Mac you have? Apple menu → <strong>About This Mac</strong>: it says
+    <em>Chip: Apple M…</em> (Apple Silicon) or <em>Processor: … Intel</em> (Intel).</p>
 
   <h2>1. Install</h2>
   <ol>

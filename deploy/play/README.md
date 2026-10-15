@@ -114,15 +114,20 @@ deleted. All three are configurable (`DIRECTORY_*_MS`, see the file).
 
 ## Publishing the app
 
-Build on an Apple Silicon Mac (`scripts/personas-package.mjs`, pin from `./keys.sh`), then
-put it on the download page:
+Build on an Apple Silicon Mac — once per architecture, with the pin from `./keys.sh` — then
+put both on the download page:
 
 ```sh
-./publish-dmg.sh ../../Signal-Desktop-Persona-main/release-personas/Signal-Personas-*-arm64.dmg
+cd ../../Signal-Desktop-Persona-main
+node scripts/personas-package.mjs --keys-sha256 <pin>              # Apple Silicon
+node scripts/personas-package.mjs --keys-sha256 <pin> --arch x64   # Intel (engine cross-compiled)
+cd ../deploy/play
+./publish-dmg.sh ../../Signal-Desktop-Persona-main/release-personas/Signal-Personas-*.dmg
 ```
 
-Testers get it, with the tester guide, at `https://signalserver.umiacs.umd.edu/download/`
-(same password as `/play`).
+Testers get them, with the tester guide, at `https://signalserver.umiacs.umd.edu/download/`
+(same password as `/play`). Every build carries its own version (`…+personas.<UTC stamp>`),
+shown in the file name and the About window.
 
 ## Resetting the members
 
