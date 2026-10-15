@@ -39,6 +39,9 @@ if (config.has('storagePath')) {
     app.getPath('appData'),
     profile ? `Signal-Personas-${profile}` : 'Signal-Personas'
   );
+  // For the window frame (personasWindowFrame.dom.ts): which member this window is. Always
+  // assigned, so an extra member never inherits its parent's value.
+  process.env.PERSONAS_PROFILE = profile ?? '';
 } else if (OS.isAppImage()) {
   userData = join(app.getPath('appData'), `${app.getName()} AppImage`);
 }

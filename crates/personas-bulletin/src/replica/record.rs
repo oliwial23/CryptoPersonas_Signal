@@ -159,7 +159,7 @@ pub enum Flavour {
     Anon,
     /// A pseudonym, scoped to a member-chosen context.
     Pseudo,
-    /// A pseudonym plus an index `i`, holding a member to `MAX_PSEUDO` pseudonyms
+    /// A pseudonym plus an index `i`, holding a member to `RATE_LIMITED_PERSONAS_PER_CONTEXT` (3) pseudonyms
     /// per context.
     PseudoRate,
 }

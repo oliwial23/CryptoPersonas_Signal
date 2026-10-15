@@ -256,6 +256,10 @@ export type MessageAttributesType = {
   // marker so the phantom splice picks it up); a poll's body is pre-encoded because
   // it carries the display descriptor too.
   personaCarriageBody?: string;
+  // Personas demo: a protocol message (join, scan, vote, rating, bundle, topic, silent
+  // poll) sent hidden from the timeline. Deleted once it has fully sent — see
+  // sendNormalMessage — so it does not reappear as raw marker text after a restart.
+  personaHidden?: boolean;
   callId?: string;
   canReplyToStory?: boolean;
   changedId?: string;

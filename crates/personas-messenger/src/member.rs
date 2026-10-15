@@ -55,6 +55,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use zk_callbacks::generic::user::User;
 use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
+/// How far below `NUM_INTS_BEFORE_SCAN` a member starts scanning even with nothing to
+/// absorb, so it never reaches the cap.
+const SCAN_CAP_MARGIN: usize = 20;
+
 /// A member could not build a record.
 #[derive(Debug, thiserror::Error)]
 pub enum MemberError {
@@ -170,6 +174,43 @@ impl Member {
             ark_serialize::Validate::Yes,
         )?;
         Ok(Self { user, keys })
+    }
+
+    /// Whether a scan would accomplish anything right now — a sweep is unfinished, one
+    /// of this member's callbacks has been invoked on `cbs` (a ban, a badge approval or a
+    /// settled reputation is waiting to be absorbed), or the member is close to the
+    /// circuit's cap on interactions between scans (`NUM_INTS_BEFORE_SCAN`, after which
+    /// it could not post at all). Otherwise a scan would prove that nothing happened.
+    pub fn scan_needed<const MH: usize, const NH: usize>(
+        &self,
+        cbs: &MerkleCallbackStore<F, MH, NH>,
+    ) -> bool {
+        use ark_ff::PrimeField;
+        use zk_callbacks::generic::bulletin::PublicCallbackBul;
+        if self.user.is_scanning() {
+            return true;
+        }
+        let have = self.user.num_outstanding_callbacks();
+        if have < NUM_SCANS_PER_FOLD {
+            return false;
+        }
+        let cap = F::from((personas_core::circuits::NUM_INTS_BEFORE_SCAN - SCAN_CAP_MARGIN) as u64);
+        if self.user.data.num_interactions_since_last_scan.into_bigint() >= cap.into_bigint() {
+            return true;
+        }
+        (0..have).any(|i| {
+            let cb = self.user.get_cb::<Args, Cr>(i);
+            cbs.verify_in(cb.get_ticket()).is_some()
+        })
+    }
+
+    /// Scans still needed to finish the sweep in progress (0 when none is): a sweep
+    /// visits every callback, one per scan, and only shrinks the list when it completes.
+    pub fn sweep_remaining(&self) -> usize {
+        self.user
+            .get_scan_index()
+            .map(|i| self.user.num_outstanding_callbacks().saturating_sub(i))
+            .unwrap_or(0)
     }
 
     /// Whether this member's current object is in `obj` — i.e. it has joined and its
@@ -307,7 +348,7 @@ impl Member {
     }
 
     /// A rate-limited pseudonymous post under the `i`-th pseudonym for `context`
-    /// (`claimed = H(sk, context, i)`), capping personas per context at `MAX_PSEUDO`.
+    /// (`claimed = H(sk, context, i)`), capping personas per context at `RATE_LIMITED_PERSONAS_PER_CONTEXT` (3).
     pub fn post_pseudo_rate<const OH: usize>(
         &mut self,
         rng: &mut (impl CryptoRng + RngCore),

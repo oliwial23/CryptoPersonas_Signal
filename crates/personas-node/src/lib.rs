@@ -361,6 +361,21 @@ impl Engine {
         }
     }
 
+    /// Whether a scan would absorb anything now: a sweep is unfinished, a callback of
+    /// ours was invoked (ban, badge, settled reputation), or we near the interaction cap.
+    /// When false, a scan before posting proves nothing and can be skipped.
+    #[napi]
+    pub fn scan_needed(&self) -> bool {
+        self.inner.scan_needed()
+    }
+
+    /// Scans left to finish the sweep in progress (0 when not scanning). A sweep visits
+    /// every callback, one per scan; `outstanding_callbacks` only drops when it ends.
+    #[napi]
+    pub fn sweep_remaining(&self) -> u32 {
+        self.inner.sweep_remaining() as u32
+    }
+
     /// Whether this member's current object is on the bulletin — it has joined and its
     /// records are part of this replica. After a restore, `true` means no new join.
     #[napi]

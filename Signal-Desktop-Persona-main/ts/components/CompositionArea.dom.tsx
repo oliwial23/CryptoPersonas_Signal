@@ -239,6 +239,8 @@ export type OwnProps = Readonly<{
   createPersonaPseudonym: () => unknown;
   // Personas demo: emit a scan on demand rather than waiting for the timer.
   scanPersonaCallbacksNow: (conversationId: string) => unknown;
+  // Personas demo: open extra member 1 or 2 (installable build only).
+  openPersonasExtraMember?: (slot: 1 | 2) => unknown;
   // Personas demo: the instance's UNVERIFIED badge claim, and the setter for it.
   selectedBadge: string | undefined;
   setPersonaBadge: (badge: PersonaBadge | undefined) => unknown;
@@ -369,6 +371,7 @@ export const CompositionArea = memo(function CompositionArea({
   personaPseudonyms,
   createPersonaPseudonym,
   scanPersonaCallbacksNow,
+  openPersonasExtraMember,
   selectedBadge,
   setPersonaBadge,
   sendPersonaAuthorshipClaim,
@@ -2052,6 +2055,7 @@ export const CompositionArea = memo(function CompositionArea({
             approvePersonaBadge(conversationId, requestEh, slot)
           }
           onDismissBadge={dismissPersonaBadgeRequest}
+          onOpenExtraMember={openPersonasExtraMember}
           status={personaStatus}
           i18n={i18n}
           onClose={() => setIsStatusDialogOpen(false)}

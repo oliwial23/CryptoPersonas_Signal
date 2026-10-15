@@ -165,6 +165,13 @@ export class Engine {
    * pre-scan state.
    */
   exportMemberState(): Buffer | null;
+  /**
+   * Whether a scan would absorb anything now: a sweep is unfinished, a callback of ours
+   * was invoked (ban, badge, settled reputation), or we near the interaction cap.
+   */
+  scanNeeded(): boolean;
+  /** Scans left to finish the sweep in progress (0 when not scanning). */
+  sweepRemaining(): number;
   /** Whether this member's current object is on the bulletin (joined, in sync). */
   memberOnBulletin(): boolean;
   /** Prove a scan without releasing it; returns its eh. Blocks every other emit. */

@@ -120,7 +120,11 @@ import { signalProtocolStore } from '../SignalProtocolStore.preload.ts';
 import { shouldSaveNotificationAvatarToDisk } from '../services/notifications.preload.ts';
 import { storageServiceUploadJob } from '../services/storage.preload.ts';
 import { challengeHandler } from '../services/challengeHandler.preload.ts';
-import { trackPersonaPost } from '../services/personasRegistry.std.ts';
+import {
+  takeOwnRecordSentAt,
+  trackPersonaPost,
+} from '../services/personasRegistry.std.ts';
+import { decodeRecordBody } from '../services/personasCarriage.std.ts';
 import { sendUsernameChangeSyncMessage } from '../services/username.preload.ts';
 import { getSendOptions } from '../util/getSendOptions.preload.ts';
 import type { IsConversationAcceptedOptionsType } from '../util/isConversationAccepted.preload.ts';
@@ -4322,7 +4326,14 @@ export class ConversationModel {
       return;
     }
 
-    const now = timestamp || Date.now();
+    // Personas: a record is sent with the timestamp its sender already placed it by
+    // (personasRegistry), so every replica buckets it onto the same barrier.
+    const now =
+      timestamp ||
+      takeOwnRecordSentAt(
+        personaRecordBase64 ?? decodeRecordBody(body)?.toString('base64')
+      ) ||
+      Date.now();
 
     log.info(
       'Sending message to conversation',
@@ -4444,6 +4455,7 @@ export class ConversationModel {
       personaBadgeProof,
       personaRecordBase64,
       personaCarriageBody,
+      ...(hideFromTimeline ? { personaHidden: true } : {}),
       sendHQImages,
       sendStateByConversationId: zipObject(
         recipientConversationIds,

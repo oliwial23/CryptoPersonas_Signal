@@ -1067,6 +1067,11 @@ $message-padding-horizontal: 12px;
   margin-bottom: 3px;
 }
 
+// Personas demo: a persona name on our own outgoing bubble (see Message#renderAuthor).
+.module-message__author--outgoing {
+  color: variables.$color-white;
+}
+
 .module-message__text {
   @include mixins.font-body-1;
 

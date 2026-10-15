@@ -229,6 +229,27 @@ function isSharedBarrierScheduleActive(): boolean {
 // A missing/zero service timestamp (e.g. our own just-emitted record, which never
 // went to the server) falls back to local wall-clock: close enough to the service
 // clock in a loopback demo to land in the same bucket.
+// The timestamp a RECEIVED record is placed by: the sender's own (the message's sent
+// timestamp, which the sender also placed its copy by — personasRegistry), unless it is
+// implausibly far from the server's receive time, in which case the server's. Every
+// recipient sees the same two values, so they all agree either way.
+const MAX_SENT_AT_SKEW_MS = 60_000;
+export function recordTimestamp(
+  sentAtMs: number | null | undefined,
+  serverTimestampMs: number | null | undefined
+): number {
+  if (sentAtMs != null && sentAtMs > 0) {
+    if (
+      serverTimestampMs == null ||
+      serverTimestampMs <= 0 ||
+      Math.abs(sentAtMs - serverTimestampMs) <= MAX_SENT_AT_SKEW_MS
+    ) {
+      return sentAtMs;
+    }
+  }
+  return serverTimestampMs ?? 0;
+}
+
 export function ingestTimestampFor(serviceTimestampMs?: number | null): number {
   if (!isSharedBarrierScheduleActive()) {
     return 0;

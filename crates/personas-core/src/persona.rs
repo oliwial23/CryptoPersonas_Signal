@@ -27,7 +27,7 @@ pub fn pseudonym(sk: &F, context: &F) -> F {
 
 /// The `i`-th rate-limited pseudonym for `context` under secret key `sk`: `H(sk, context, i)`.
 ///
-/// Matches `standard_pseudo_rate_predicate`, which caps `i` at `MAX_PSEUDO`.
+/// Matches `standard_pseudo_rate_predicate`; the replica allows `i < RATE_LIMITED_PERSONAS_PER_CONTEXT` (3).
 pub fn pseudonym_rate(sk: &F, context: &F, i: &F) -> F {
     H::hash(&[*sk, *context, *i])
 }

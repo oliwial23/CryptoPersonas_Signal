@@ -1193,6 +1193,7 @@ export class Message extends PureComponent<Props, State> {
       author,
       contactLabel,
       contactNameColor,
+      direction,
       i18n,
       isSticker,
       persona,
@@ -1213,11 +1214,16 @@ export class Message extends PureComponent<Props, State> {
       <div
         className={classNames(
           moduleName,
-          quote ? 'module-message__author--with-quote' : undefined
+          quote ? 'module-message__author--with-quote' : undefined,
+          direction === 'outgoing' ? 'module-message__author--outgoing' : undefined
         )}
       >
         <ContactName
-          contactNameColor={contactNameColor}
+          // Personas demo: our own persona posts show the persona name inside our own
+          // (colored) bubble, where Signal never shows an author. The per-contact name
+          // colors are chosen for the incoming bubble's background and are often
+          // unreadable on ours, so there the name takes the bubble's own text color.
+          contactNameColor={direction === 'outgoing' ? undefined : contactNameColor}
           contactLabel={contactLabel}
           // Personas demo: a persona post is labelled with its persona even when
           // it is our own outgoing message (never "you").

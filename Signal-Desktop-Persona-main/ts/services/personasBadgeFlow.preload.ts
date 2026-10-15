@@ -44,7 +44,7 @@ import type { ConversationModel } from '../models/conversations.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
-import { ensurePersonaJoined } from './personasMembership.preload.ts';
+import { ensureReadyForPersonaAction } from './personasActions.preload.ts';
 import {
   BADGE_SLOTS,
   composeBadgeApprove,
@@ -118,7 +118,7 @@ export async function requestBadge(
     // why it failed with "this member is not on the bulletin yet" and why sending an
     // ordinary message first appeared to be a prerequisite. It never was: the post was
     // simply doing the join that this function should have done.
-    if (!(await ensurePersonaJoined(conversation))) {
+    if (!(await ensureReadyForPersonaAction(conversation))) {
       log.warn('requestBadge: could not join; refusing to request');
       return {
         ok: false,
@@ -199,7 +199,7 @@ export async function approveBadge(
     // The approving ADMIN has to be on the bulletin too — an approval is a record like
     // any other. An admin who had not posted yet could not approve anything, which is
     // the same missing join seen from the other side.
-    if (!(await ensurePersonaJoined(conversation))) {
+    if (!(await ensureReadyForPersonaAction(conversation))) {
       log.warn('approveBadge: could not join; refusing to approve');
       return {
         ok: false,

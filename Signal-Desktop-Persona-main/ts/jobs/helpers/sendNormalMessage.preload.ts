@@ -78,7 +78,11 @@ import {
 import { getMessageIdForLogging } from '../../util/idForLogging.preload.ts';
 import { send, sendSyncMessageOnly } from '../../messages/send.preload.ts';
 import type { SignalService } from '../../protobuf/index.std.ts';
-import { eraseMessageContents } from '../../util/cleanup.preload.ts';
+import {
+  cleanupMessages,
+  eraseMessageContents,
+} from '../../util/cleanup.preload.ts';
+import { DataWriter } from '../../sql/Client.preload.ts';
 import { shouldSendToDirectConversation } from './shouldSendToConversation.preload.ts';
 import { encodePostBody } from '../../services/personasCarriage.std.ts';
 
@@ -482,6 +486,13 @@ export async function sendNormalMessage(
 
     if (isViewOnce) {
       await eraseMessageContents(message, 'view-once-sent');
+    }
+
+    // Personas demo: a protocol message was sent hidden from the timeline, but it had to
+    // be saved for this job to deliver it, and a saved message is loaded back after a
+    // restart and shown as a wall of marker text. It has done its job now: delete it.
+    if (message.get('personaHidden')) {
+      await DataWriter.removeMessageById(message.id, { cleanupMessages });
     }
   } catch (thrownError: unknown) {
     const errors = [thrownError, ...messageSendErrors];

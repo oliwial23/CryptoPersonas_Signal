@@ -80,6 +80,47 @@ try {
 check('a committed scan cannot be discarded', discardRefused);
 check('converged after the scan', alice2.fingerprint() === bob.fingerprint());
 
+console.log('(2b) a badge arrives through the scans a post runs (no manual scan)');
+// The send path's drain: scan until nothing is left to absorb, progress measured by the
+// sweep (never by the outstanding count, which only moves when a sweep ends).
+function drain(m) {
+  let scans = 0;
+  let ok = true;
+  while (m.scanNeeded() && scans < 20) {
+    const before = m.isScanning() ? m.sweepRemaining() : Infinity;
+    m.prepareScan();
+    deliver(m.commitScan(), [bob]);
+    scans += 1;
+    const after = m.isScanning() ? m.sweepRemaining() : 0;
+    ok &&= after < before;
+  }
+  return { scans, ok };
+}
+// Section (2)'s single scan left a sweep half done, which blocks every other action.
+const finished = drain(alice2);
+check(`the half-done sweep is finished (${finished.scans} scans)`, finished.ok && !alice2.isScanning());
+// alice2 asks for a badge, bob approves it.
+const request = alice2.emitBadgeRequest(2);
+deliver(request, [alice2, bob]);
+check('no scan needed before anything is invoked', !alice2.scanNeeded());
+const approve = bob.emitBadgeApprove(request.eh, 2);
+deliver(approve, [alice2, bob]);
+for (const m of [alice2, bob]) {
+  m.barrier(); // the approval settles at the next barrier
+}
+check('the approval makes a scan needed', alice2.scanNeeded());
+const { scans, ok: progressOk } = drain(alice2);
+check(`every scan advanced the sweep (${scans} scans)`, progressOk && scans > 1);
+check('the badge is in the object', alice2.getBadges().includes('Student'));
+let posted = true;
+try {
+  deliver(alice2.emitPostAnon('with my badge'), [bob]);
+} catch {
+  posted = false;
+}
+check('and she can post right after', posted);
+check('converged', alice2.fingerprint() === bob.fingerprint());
+
 console.log('(3) journals restore on their own, torn tail included');
 const bob2 = new Engine({ ...opts, seed: 4, member: false, journalPath: journalB });
 check('peer journal restores the same replica', bob2.fingerprint() === bob.fingerprint());

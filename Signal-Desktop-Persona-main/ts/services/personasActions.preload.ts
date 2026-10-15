@@ -74,7 +74,7 @@ export async function sendPersonaRate(
     return false;
   }
   try {
-    if (!(await ensurePersonaJoined(conversation))) {
+    if (!(await ensureReadyForPersonaAction(conversation))) {
       log.warn('sendPersonaRate: not joined; refusing to rate');
       return false;
     }
@@ -120,7 +120,7 @@ export async function sendPersonaPoll(
     return undefined;
   }
   try {
-    if (!(await ensurePersonaJoined(conversation))) {
+    if (!(await ensureReadyForPersonaAction(conversation))) {
       log.warn('sendPersonaPoll: not joined; refusing to open a poll');
       return undefined;
     }
@@ -254,7 +254,7 @@ export async function sendPersonaVote(
     return false;
   }
   try {
-    if (!(await ensurePersonaJoined(conversation))) {
+    if (!(await ensureReadyForPersonaAction(conversation))) {
       log.warn('sendPersonaVote: not joined; refusing to vote');
       return false;
     }
@@ -475,6 +475,7 @@ export async function maybeSendPersonaRateForReaction({
 // IT RUNS, which means a request arriving while one is in flight would have been
 // redundant anyway — dropping it loses nothing.
 let scanInFlight = false;
+let scanFinished: Promise<void> = Promise.resolve();
 
 // SCAN TIMING. A scan pins the callback roots of the barrier it was proved in, and every
 // replica rejects it if a settlement re-pinned them before the barrier its SERVICE
@@ -484,6 +485,10 @@ let scanInFlight = false;
 // scan is discarded before it is sent — never undone after — so it reveals nothing
 // (see Messenger::prepare_scan).
 const SEND_MARGIN_MS = 2_500;
+// And never start proving in the first moments of a barrier: a record stamped just before
+// the boundary may still be in flight, and its arrival can change this barrier's
+// settlement (a badge approval, say). The validity check before sending is the backstop.
+const SETTLE_MS = 1_500;
 const MAX_SCAN_ATTEMPTS = 3;
 let lastScanProofMs = 4_000;
 
@@ -498,12 +503,20 @@ function msToNextBarrier(): number | undefined {
 
 // If a barrier boundary is less than `needMs` away, wait until just past it and bring the
 // replica onto the new barrier (settling whatever falls due there).
-async function clearOfBarrier(needMs: number): Promise<void> {
+async function clearOfBarrier(needMs: number, settleMs = 0): Promise<void> {
+  const schedule = getBarrierSchedule();
   const left = msToNextBarrier();
-  if (left == null || left >= needMs) {
+  if (left == null || !schedule) {
     return;
   }
-  await sleep(left + 300);
+  const into = schedule.periodMs - left;
+  if (left < needMs) {
+    await sleep(left + settleMs + 300);
+  } else if (into < settleMs) {
+    await sleep(settleMs - into);
+  } else {
+    return;
+  }
   getPersonasEngine()?.tick(Date.now());
 }
 
@@ -512,7 +525,7 @@ async function clearOfBarrier(needMs: number): Promise<void> {
 async function produceValidScan(): Promise<{ eh: string; body: string } | undefined> {
   for (let attempt = 1; attempt <= MAX_SCAN_ATTEMPTS; attempt += 1) {
     // oxlint-disable-next-line no-await-in-loop
-    await clearOfBarrier(lastScanProofMs + SEND_MARGIN_MS);
+    await clearOfBarrier(lastScanProofMs + SEND_MARGIN_MS, SETTLE_MS);
     const started = Date.now();
     if (preparePersonaScan() === undefined) {
       return undefined;
@@ -573,61 +586,76 @@ export function isPersonaBanned(): boolean | undefined {
  * Bounded, and the bound matters. An unbounded loop here would be a hang in the send
  * path if the engine ever reported scanning without making progress; a bound turns that
  * into a refused send with a reason, which is recoverable. Progress is also checked
- * directly — if a round does not reduce the outstanding count, stop rather than spin.
+ * directly — if a round does not shorten the sweep, stop rather than spin.
  */
+/**
+ * Joined, and not in the middle of a sweep. The engine refuses every proving action while
+ * a sweep is unfinished (a single "Scan now", or an interrupted drain, can leave one), so
+ * ratings, votes, polls and badge actions finish it first instead of failing. Unlike a
+ * post, they do not scan when nothing is under way — that stays the post's job.
+ */
+export async function ensureReadyForPersonaAction(
+  conversation: ConversationModel
+): Promise<boolean> {
+  if (!(await ensurePersonaJoined(conversation))) {
+    return false;
+  }
+  if (getPersonasEngine()?.isScanning()) {
+    return drainPersonaScans(conversation);
+  }
+  return true;
+}
+
 export async function drainPersonaScans(
   conversation: ConversationModel,
-  { maxRounds = 8 }: { maxRounds?: number } = {}
+  { maxRounds }: { maxRounds?: number } = {}
 ): Promise<boolean> {
   if (!isPersonasEngineEnabled()) {
     return true;
   }
   const engine = getPersonasEngine();
-  if (!engine || typeof engine.isScanning !== 'function') {
+  if (!engine || typeof engine.scanNeeded !== 'function') {
     // An older addon cannot tell us; fall back to the single speculative scan, which is
     // what the behaviour was before this existed.
     await sendPersonaScan(conversation, { quiet: true });
     return true;
   }
 
-  const outstanding = () =>
-    typeof engine.outstandingCallbacks === 'function'
-      ? engine.outstandingCallbacks()
-      : 0;
-
-  for (let round = 0; round < maxRounds; round += 1) {
-    const before = outstanding();
-    // eslint-disable-next-line no-await-in-loop
-    await sendPersonaScan(conversation, { quiet: true });
-
-    if (!engine.isScanning()) {
+  // A sweep visits EVERY callback, one per scan, and `outstandingCallbacks` only drops
+  // when the sweep ends — so progress is measured by `sweepRemaining`, never by the
+  // outstanding count. (Measuring the count was the "no progress (3 -> 3)" refusal: any
+  // member with more than one callback could not post until it pressed Scan now enough
+  // times by hand, and that is also why badges seemed to need a manual scan.) The bound
+  // allows a full sweep plus the one an absorbed callback can make necessary again.
+  const limit = maxRounds ?? Math.min(2 * engine.outstandingCallbacks() + 2, 40);
+  for (let round = 0; round < limit; round += 1) {
+    // Nothing invoked, no sweep under way, not near the interaction cap: a scan would
+    // prove that nothing happened. Skip it — this is the common case before a post.
+    if (!engine.scanNeeded()) {
       if (round > 0) {
-        log.info(
-          `drainPersonaScans: sweep completed after ${round + 1} scan(s)`
-        );
+        log.info(`drainPersonaScans: absorbed everything in ${round} scan(s)`);
       }
       return true;
     }
-
-    const after = outstanding();
+    const before = engine.isScanning()
+      ? engine.sweepRemaining()
+      : Number.POSITIVE_INFINITY;
+    // eslint-disable-next-line no-await-in-loop
+    const sent = await sendPersonaScan(conversation, { quiet: true });
+    if (!sent) {
+      log.error('drainPersonaScans: a scan could not be made; refusing the send');
+      return false;
+    }
+    const after = engine.isScanning() ? engine.sweepRemaining() : 0;
     if (after >= before) {
-      // Scanning, but not getting anywhere. Stop: another round would not help, and
-      // reporting this is far better than looping in the send path.
       log.error(
-        `drainPersonaScans: still scanning with no progress (${before} -> ${after} ` +
-        'outstanding); giving up so the caller can refuse the send with a reason'
+        `drainPersonaScans: sweep made no progress (${before} -> ${after} left); refusing the send`
       );
       return false;
     }
-    log.info(
-      `drainPersonaScans: sweep in progress (${before} -> ${after} outstanding)`
-    );
   }
 
-  log.error(
-    `drainPersonaScans: sweep still unfinished after ${maxRounds} scans ` +
-    `(${outstanding()} outstanding)`
-  );
+  log.error(`drainPersonaScans: still needed a scan after ${limit} rounds`);
   return false;
 }
 
@@ -639,8 +667,11 @@ export async function sendPersonaScan(
     return false;
   }
   if (scanInFlight) {
-    log.info('sendPersonaScan: a scan is already in flight; skipping');
-    return false;
+    // One scan at a time. Wait for the one under way (a "Scan now" press, say) and let
+    // the caller re-check what is still needed, rather than fail the send.
+    log.info('sendPersonaScan: a scan is already in flight; waiting for it');
+    await scanFinished;
+    return true;
   }
   // `quiet` is for the SPECULATIVE scan attempted before each send. The engine refuses a
   // scan with fewer than NUM_SCANS_PER_FOLD (=1) outstanding callbacks — `NothingToScan`
@@ -648,6 +679,10 @@ export async function sendPersonaScan(
   // error in any sense. Logging it at error level on every message would bury real
   // failures in noise.
   scanInFlight = true;
+  let markFinished = (): void => undefined;
+  scanFinished = new Promise<void>(resolve => {
+    markFinished = resolve;
+  });
   // Read BEFORE the scan: this is what makes the notification fire on the transition.
   const bannedBefore = isPersonaBanned();
   try {
@@ -689,5 +724,6 @@ export async function sendPersonaScan(
     // stops silently and bans quietly never settle again — the worst failure mode this
     // integration has, because everything still LOOKS fine.
     scanInFlight = false;
+    markFinished();
   }
 }

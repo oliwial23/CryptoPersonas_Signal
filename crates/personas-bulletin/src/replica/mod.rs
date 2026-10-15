@@ -75,6 +75,7 @@ mod tests;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
+use ark_ff::PrimeField;
 use ark_snark::SNARK;
 use zk_callbacks::crypto::enc::AECipherSigZK;
 use zk_callbacks::generic::bulletin::{CallbackBul, UserBul};
@@ -82,7 +83,7 @@ use zk_callbacks::generic::object::Time;
 use zk_callbacks::impls::centralized::crypto::FakeSigPrivkey;
 
 use personas_core::circuits::{
-    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, MsgUser, NUM_SCANS_PER_FOLD,
+    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, MsgUser, RATE_LIMITED_PERSONAS_PER_CONTEXT, NUM_SCANS_PER_FOLD,
     BadgesArgs, PseudonymArgs, PseudonymArgsRate, arg_rep,
 };
 use personas_core::params::ServerKeys;
@@ -702,6 +703,17 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                         )
                     }
                     Flavour::PseudoRate => {
+                        // THE RATE LIMIT. `standard_pseudo_rate_predicate` only proves
+                        // `i != MAX_PSEUDO`, so i = MAX_PSEUDO + 1, + 2, ... satisfy it and
+                        // a member could mint unlimited "rate-limited" personas in a
+                        // context. `i` is a public input carried in the record, so the
+                        // accept rule enforces the group's limit here — three per context
+                        // (`RATE_LIMITED_PERSONAS_PER_CONTEXT`) — with no circuit change
+                        // and no new keys.
+                        let limit = F::from(RATE_LIMITED_PERSONAS_PER_CONTEXT as u64);
+                        if extra.0[2].into_bigint() >= limit.into_bigint() {
+                            return Status::Rejected("persona index out of range");
+                        }
                         let a = PseudonymArgsRate {
                             context: extra.0[0],
                             claimed: extra.0[1],

@@ -19,6 +19,7 @@ import {
   decodeRecordBody,
 } from '../services/personasCarriage.std.ts';
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
+import { recordTimestamp } from '../services/personasBarrier.preload.ts';
 import {
   decodePhantomBundle,
   decodeTopicAnnouncement,
@@ -258,7 +259,7 @@ export async function handleDataMessage(
     }
     const personasRecord = ingestRecordForTimeline(
       initialMessage.body,
-      message.get('serverTimestamp') ?? 0
+      recordTimestamp(message.get('sent_at'), message.get('serverTimestamp'))
     );
     if (personasRecord.kind === 'ingested') {
       log.info(`${idLog}: personas protocol record ingested (no timeline entry)`);

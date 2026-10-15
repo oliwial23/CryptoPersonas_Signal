@@ -144,14 +144,14 @@ export type PersonaChoice =
   // No linkable persona at all.
   | { kind: 'anon' };
 
-// The rate-limit bound. MUST match `personas_core::circuits::MAX_PSEUDO`, which is
-// 4 — offering more slots than the circuit accepts produces a proof that every replica
-// rejects, and offering fewer just hides capacity.
+// Rate-limited personas per context: three. MUST match
+// `personas_core::circuits::RATE_LIMITED_PERSONAS_PER_CONTEXT` — every replica rejects a
+// rate-limited post whose index is at or above it, so offering more slots would produce
+// posts nobody accepts. Each context has its own three (persona = H(sk, context, index)).
 //
-// Note the circuit's check is `i != MAX_PSEUDO` (circuits.rs x9), not `i < MAX_PSEUDO`,
-// so it only excludes exactly 4 — i = 5 would pass. The UI never offers out-of-range
-// slots, but the bound is weaker in-circuit than the paper's `assert(i < k)`.
-export const MAX_PSEUDO = 4;
+// (The circuit's own bound, `MAX_PSEUDO` = 4 there, only checks `i != 4`; the replica's
+// accept rule is what actually enforces the limit.)
+export const MAX_PSEUDO = 3;
 
 // Wrap raw record bytes for carriage as a message body. Default marker is the
 // ATTRIBUTABLE one (join / scan); posts, polls, ballots and ratings have their own.

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { useCallback, useMemo, useState, memo } from 'react';
+import { ipcRenderer } from 'electron';
 import { useSelector } from 'react-redux';
 import type { StateType } from '../reducer.preload.ts';
 import { CompositionArea } from '../../components/CompositionArea.dom.tsx';
@@ -77,6 +78,13 @@ function renderSmartCompositionRecordingDraft(
   draftProps: SmartCompositionRecordingDraftProps
 ) {
   return <SmartCompositionRecordingDraft {...draftProps} />;
+}
+
+
+// Personas demo: File > Open Extra Member, from the status panel. The main process only
+// honors this in the installable build (app/personas.main.ts).
+function openPersonasExtraMember(slot: 1 | 2): void {
+  void ipcRenderer.invoke('personas:open-extra-member', slot);
 }
 
 export const SmartCompositionArea = memo(function SmartCompositionArea({
@@ -450,6 +458,7 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
       personaPseudonyms={personaPseudonyms}
       createPersonaPseudonym={createPersonaPseudonym}
       scanPersonaCallbacksNow={scanPersonaCallbacksNow}
+      openPersonasExtraMember={openPersonasExtraMember}
       sendPersonaAuthorshipClaim={sendPersonaAuthorshipClaim}
       selectedBadge={selectedBadge}
       setPersonaBadge={setPersonaBadge}

@@ -22,6 +22,7 @@ import type { IngestStatus, Emitted } from '@signalapp/personas-engine';
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
 import { badgeSlotFromLogBody } from './personasBadgeRules.std.ts';
+import { stampOwnRecord } from './personasRegistry.std.ts';
 import {
   encodeRecordBody,
   encodeBadgeBody,
@@ -321,6 +322,13 @@ export function ingestRecordForTimeline(
   }
 }
 
+// Fold our own record into our replica at the timestamp it will be SENT with, so every
+// replica — ours included — places it on the same barrier (personasRegistry).
+function selfIngest(currentEngine: Engine, emitted: Emitted): void {
+  const sentAt = stampOwnRecord(Buffer.from(emitted.bytes).toString('base64'));
+  currentEngine.ingest(emitted.bytes, ingestTimestampFor(sentAt));
+}
+
 // THE ORDERING RULE (personasPersistence): the member state an emit produced is saved,
 // durably, before the record is sent — never after. Throws if it cannot be saved; every
 // caller treats that as "do not send".
@@ -346,7 +354,7 @@ export function emitAndSelfIngest(
   // Our own record never went to the server, so there is no service timestamp;
   // ingestTimestampFor falls back to local wall-clock on the shared schedule (and to
   // the local-barrier 0 when there is no schedule).
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  selfIngest(currentEngine, emitted);
   return { emitted, body: encodeRecordBody(emitted.bytes) };
 }
 
@@ -398,7 +406,7 @@ export function composePersonaPost(
     return undefined;
   }
   // Our own record; no service timestamp exists yet (see emitAndSelfIngest).
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  selfIngest(currentEngine, emitted);
   return {
     body: text,
     persona: emitted.persona ?? undefined,
@@ -438,7 +446,7 @@ export function composePersonaRate(
     log.error(`composePersonaRate: emit failed: ${toLogFormat(error)}`);
     return undefined;
   }
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  selfIngest(currentEngine, emitted);
   return { eh: emitted.eh, body: encodeRateBody(emitted.bytes) };
 }
 
@@ -467,7 +475,7 @@ export function composePersonaPoll(
     log.error(`composePersonaPoll: emit failed: ${toLogFormat(error)}`);
     return undefined;
   }
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  selfIngest(currentEngine, emitted);
   return {
     eh: emitted.eh,
     body: encodePollBody(emitted.bytes, descriptor),
@@ -506,7 +514,7 @@ export function composePersonaVote(
     log.error(`composePersonaVote: emit failed: ${toLogFormat(error)}`);
     return undefined;
   }
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  selfIngest(currentEngine, emitted);
   return { eh: emitted.eh, body: encodeVoteBody(emitted.bytes) };
 }
 
@@ -537,7 +545,7 @@ export function commitPersonaScan(): { eh: string; body: string } | undefined {
   }
   const emitted = currentEngine.commitScan();
   persistAfterEmit(currentEngine);
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  selfIngest(currentEngine, emitted);
   return { eh: emitted.eh, body: encodeRecordBody(emitted.bytes) };
 }
 
@@ -587,7 +595,7 @@ function emitBadgeRecord(
   }
   const emitted = produce(currentEngine);
   persistAfterEmit(currentEngine);
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  selfIngest(currentEngine, emitted);
   return { eh: emitted.eh, body: encodeBadgeBody(emitted.bytes) };
 }
 

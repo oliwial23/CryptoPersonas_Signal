@@ -31,3 +31,35 @@ export function trackPersonaPost(eh: string, messageId: string): void {
 export function getTrackedPersonaPosts(): ReadonlyMap<string, string> {
   return messageIdByEh;
 }
+
+// --- the timestamp an own record is placed by ------------------------------------------
+//
+// Every replica must place a record on the SAME barrier, or replicas disagree about when
+// a settlement happened, scans are rejected as stale, and members fork. Recipients used
+// to bucket a record by the server's receive time, which its SENDER never learns — the
+// sender bucketed its own copy by its local clock at emit time instead, and near a barrier
+// boundary (or with a second of clock skew) the two disagreed.
+//
+// So the sender now decides: it places its own record at `stampOwnRecord`'s timestamp
+// and sends the Signal message with exactly that timestamp (enqueueMessageForSend reads
+// it back with `takeOwnRecordSentAt`), and recipients bucket by the message's sent
+// timestamp (personasBarrier `recordTimestamp`). Strictly increasing per process, so two
+// records never share a Signal timestamp.
+const ownRecordSentAt = new Map<string, number>();
+let lastOwnSentAt = 0;
+
+export function stampOwnRecord(recordBase64: string): number {
+  const sentAt = Math.max(Date.now(), lastOwnSentAt + 1);
+  lastOwnSentAt = sentAt;
+  ownRecordSentAt.set(recordBase64, sentAt);
+  return sentAt;
+}
+
+export function takeOwnRecordSentAt(recordBase64: string | undefined): number | undefined {
+  if (!recordBase64) {
+    return undefined;
+  }
+  const sentAt = ownRecordSentAt.get(recordBase64);
+  ownRecordSentAt.delete(recordBase64);
+  return sentAt;
+}

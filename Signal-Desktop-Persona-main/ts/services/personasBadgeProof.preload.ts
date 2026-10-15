@@ -35,7 +35,7 @@ import {
   isPersonasEngineEnabled,
   verifyPersonaBadgeProof,
 } from './personasEngine.preload.ts';
-import { ensurePersonaJoined } from './personasMembership.preload.ts';
+import { ensureReadyForPersonaAction } from './personasActions.preload.ts';
 
 const log = createLogger('personasBadgeProof');
 
@@ -58,7 +58,7 @@ export async function sendBadgeProof(
     return { ok: false, reason: 'the personas engine is not enabled' };
   }
   try {
-    if (!(await ensurePersonaJoined(conversation))) {
+    if (!(await ensureReadyForPersonaAction(conversation))) {
       return {
         ok: false,
         reason: 'could not join the bulletin — try again in a moment',

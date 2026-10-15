@@ -42,6 +42,7 @@ import {
   composePersonaPost,
 } from '../../services/personasEngine.preload.ts';
 import { ensurePersonaJoined } from '../../services/personasMembership.preload.ts';
+import { installPersonasWindowFrame } from '../../services/personasWindowFrame.dom.ts';
 import {
   sendPersonaBanPoll,
   sendPersonaRate,
@@ -309,4 +310,12 @@ if (window.SignalContext.config.ciMode === 'full') {
 if (getEnvironment() !== Environment.Test) {
   contextBridge.exposeInMainWorld('showDebugLog', window.IPC.showDebugLog);
   contextBridge.exposeInMainWorld('startApp', window.startApp);
+}
+
+// Personas demo: frame the window in the member's color, with its name at the top.
+if (process.env.PERSONAS_AUTO_REGISTER && process.env.PERSONAS_DISPLAY_NAME?.trim()) {
+  installPersonasWindowFrame({
+    name: process.env.PERSONAS_DISPLAY_NAME.trim(),
+    profile: process.env.PERSONAS_PROFILE ?? '',
+  });
 }

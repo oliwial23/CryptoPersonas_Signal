@@ -86,6 +86,7 @@ const messageAttributesEraseBehavior: Record<
   personaMyVote: 'erase',
   personaRecordBase64: 'erase',
   personaCarriageBody: 'erase',
+  personaHidden: 'erase',
   callId: 'erase',
   changedId: 'erase',
   contact: 'erase',

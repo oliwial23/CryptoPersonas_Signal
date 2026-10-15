@@ -42,7 +42,16 @@ use blake2::{Blake2s256, Digest};
 use crate::{Args, ArgsVar, CStore, Cr, H, OStore, PK, Snark};
 
 pub const NUM_INTS_BEFORE_SCAN: usize = 200;
+/// The bound inside `standard_pseudo_rate_predicate`. Part of the circuit, so changing it
+/// changes the proving keys every member downloads — leave it, and set the group's actual
+/// limit with [`RATE_LIMITED_PERSONAS_PER_CONTEXT`].
 pub const MAX_PSEUDO: usize = 4;
+/// How many rate-limited personas a member has in each context: persona `i` of context
+/// `c` is `H(sk, c, i)` for `i < 3`, so every context has its own three, unlinkable to any
+/// other context's. Enforced by the replica's accept rule (the index is a public input of
+/// every rate-limited post), which is why it can be lower than the circuit's `MAX_PSEUDO`.
+pub const RATE_LIMITED_PERSONAS_PER_CONTEXT: usize = 3;
+const _: () = assert!(RATE_LIMITED_PERSONAS_PER_CONTEXT < MAX_PSEUDO);
 pub const BAN_FLAG: u64 = 999999999;
 pub const BADGE1_FLAG: u64 = 111111111;
 pub const BADGE2_FLAG: u64 = 222222222;
@@ -610,9 +619,20 @@ fn standard_callback_method(user: &User<F, MsgUser>, argument: F) -> User<F, Msg
     if argument == F::from(BAN_FLAG) {
         u.data.banned = F::from(1);
     } else if argument == F::from(BADGE1_FLAG) {
-        u.data.badge1 = *FACULTY_F;
+        // MUST MATCH `standard_callback_predicate` EXACTLY: Faculty and Student exclude
+        // each other, and the circuit declines the second one rather than assigning it.
+        // This native step used to assign it anyway, so a member approved for Student
+        // while holding Faculty (or the reverse) computed an object no proof can reach:
+        // its scan was rejected everywhere ("scan proof failed") and the member was cut
+        // off the bulletin — no posts, no badge or authorship proofs — while its own
+        // status panel showed both badges.
+        if user.data.badge2 != *STUDENT_F {
+            u.data.badge1 = *FACULTY_F;
+        }
     } else if argument == F::from(BADGE2_FLAG) {
-        u.data.badge2 = *STUDENT_F;
+        if user.data.badge1 != *FACULTY_F {
+            u.data.badge2 = *STUDENT_F;
+        }
     } else if argument == F::from(BADGE3_FLAG) {
         u.data.badge3 = *INDUSTRY_F;
     } else {
@@ -1004,5 +1024,64 @@ mod fold_size_tests {
     {
         let _get_int = get_scan_interaction::<CBul, N>;
         let _pubdata = get_extra_pubdata_for_scan::<CBul, N>;
+    }
+}
+/// The callback's native method and its in-circuit predicate must compute the same
+/// object for every input. When they disagree, the native side produces an object no
+/// proof can reach, the scan that absorbs the callback is rejected by every replica, and
+/// the member is silently cut off the bulletin (the Faculty + Student bug).
+#[cfg(test)]
+mod callback_consistency_tests {
+    use super::*;
+    use ark_r1cs_std::R1CSVar;
+    use ark_relations::r1cs::ConstraintSystem;
+
+    #[test]
+    fn native_and_circuit_callbacks_agree() {
+        let none = F::from(0u64);
+        let held = [
+            (none, none, none),
+            (*FACULTY_F, none, none),
+            (none, *STUDENT_F, none),
+            (none, none, *INDUSTRY_F),
+            (*FACULTY_F, none, *INDUSTRY_F),
+            (none, *STUDENT_F, *INDUSTRY_F),
+        ];
+        let arguments = [
+            F::from(BAN_FLAG),
+            F::from(BADGE1_FLAG),
+            F::from(BADGE2_FLAG),
+            F::from(BADGE3_FLAG),
+            arg_rep(5),
+            arg_rep(-3),
+        ];
+        for (b1, b2, b3) in held {
+            for argument in arguments {
+                let mut user = User::<F, MsgUser>::default();
+                user.data.badge1 = b1;
+                user.data.badge2 = b2;
+                user.data.badge3 = b3;
+                user.data.reputation = F::from(7u64);
+
+                let native = standard_callback_method(&user, argument);
+
+                let cs = ConstraintSystem::<F>::new_ref();
+                let user_var = UserVar::new_witness(cs.clone(), || Ok(user.clone())).unwrap();
+                let arg_var = FpVar::new_witness(cs.clone(), || Ok(argument)).unwrap();
+                let circuit = standard_callback_predicate(&user_var, arg_var).unwrap();
+
+                let label = format!("held ({b1}, {b2}, {b3}), argument {argument}");
+                assert_eq!(circuit.data.badge1.value().unwrap(), native.data.badge1, "badge1: {label}");
+                assert_eq!(circuit.data.badge2.value().unwrap(), native.data.badge2, "badge2: {label}");
+                assert_eq!(circuit.data.badge3.value().unwrap(), native.data.badge3, "badge3: {label}");
+                assert_eq!(circuit.data.banned.value().unwrap(), native.data.banned, "banned: {label}");
+                assert_eq!(
+                    circuit.data.reputation.value().unwrap(),
+                    native.data.reputation,
+                    "reputation: {label}"
+                );
+                assert!(cs.is_satisfied().unwrap(), "constraints: {label}");
+            }
+        }
     }
 }

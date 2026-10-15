@@ -60,6 +60,8 @@ export type PersonaStatusDialogProps = {
   onApproveBadge?: (requestEh: string, slot: number) => void;
   /** Hide a request from this admin's queue. LOCAL — no record, nothing broadcast. */
   onDismissBadge?: (requestEh: string) => void;
+  /** Open (or bring forward) extra member 1 or 2. Only in the installable build. */
+  onOpenExtraMember?: (slot: 1 | 2) => void;
 };
 
 function Row({
@@ -101,6 +103,7 @@ export function PersonaStatusDialog({
   onScanNow,
   onApproveBadge,
   onDismissBadge,
+  onOpenExtraMember,
 }: PersonaStatusDialogProps): JSX.Element {
   return (
     <AxoDialog.Root open onOpenChange={onClose}>
@@ -412,6 +415,24 @@ export function PersonaStatusDialog({
                 is a demo affordance rather than something a user needs. Kept because it
                 is still the only way to make a settled ban bite on a keystroke in front
                 of an audience. */}
+            {/* Playing several members from one Mac: the same as File > Open Extra
+                Member, here because a menu is easy to miss. */}
+            {onOpenExtraMember != null && (
+              <>
+                <AxoDialog.Action
+                  variant="subtle-secondary"
+                  onClick={() => onOpenExtraMember(1)}
+                >
+                  Open extra member 1
+                </AxoDialog.Action>
+                <AxoDialog.Action
+                  variant="subtle-secondary"
+                  onClick={() => onOpenExtraMember(2)}
+                >
+                  Open extra member 2
+                </AxoDialog.Action>
+              </>
+            )}
             <AxoDialog.Action variant="strong-secondary" onClick={onScanNow}>
               Scan now
             </AxoDialog.Action>

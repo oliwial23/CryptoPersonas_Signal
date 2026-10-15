@@ -811,6 +811,57 @@ mod e2e {
         );
     }
 
+    /// Scanning only when it absorbs something, and measuring a sweep by its own
+    /// progress. Three posts file three callbacks; nothing is invoked yet, so no scan is
+    /// needed. Once settlement invokes them, a scan is needed, the sweep takes one scan
+    /// per callback (the outstanding count does NOT move until it ends), and afterwards
+    /// nothing is left to absorb.
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_scan_needed_and_sweep_progress() {
+        let mut rng = StdRng::seed_from_u64(41);
+        let keys = keygen(&mut rng);
+        let conv = ConversationId("sweep".into());
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let mut m = Msg::new(
+            transport,
+            conv,
+            keys.replica.clone(),
+            config(),
+            Some(Member::create(keys.member.clone(), &mut rng)),
+        );
+        let join = m.emit_join().unwrap();
+        deliver(&mut m, &join);
+        for i in 0..3u64 {
+            let e = m.emit_post_pseudo(&mut rng, "post", F::from(100 + i)).unwrap();
+            deliver(&mut m, &e);
+        }
+        assert_eq!(m.member().unwrap().user.num_outstanding_callbacks(), 3);
+        assert!(!m.scan_needed(), "nothing invoked yet: a scan would absorb nothing");
+
+        // Cross the settlement window: every post's ticket is invoked.
+        for _ in 0..=config().settlement_barriers {
+            m.barrier();
+        }
+        assert!(m.scan_needed(), "invoked callbacks are waiting to be absorbed");
+
+        let mut remaining = Vec::new();
+        for _ in 0..3 {
+            m.prepare_scan(&mut rng).unwrap();
+            let scan = m.commit_scan().unwrap();
+            deliver(&mut m, &scan);
+            remaining.push(m.sweep_remaining());
+        }
+        assert_eq!(remaining, vec![2, 1, 0], "one scan per callback");
+        assert!(!m.member().unwrap().user.is_scanning(), "the sweep finished");
+        assert_eq!(
+            m.member().unwrap().user.num_outstanding_callbacks(),
+            0,
+            "absorbed callbacks leave the list only when the sweep ends"
+        );
+        assert!(!m.scan_needed());
+    }
+
     /// A late joiner adopts a snapshot from an inviter, TOFU-pinned (§12): with the
     /// right pin it re-derives identical roots; a wrong pin is refused.
     #[test]

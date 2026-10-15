@@ -1072,6 +1072,11 @@ async function createWindow() {
 
 // Renderer asks if we are done with the database
 ipc.handle('personas:state-storage', () => getPersonasStateStorage());
+ipc.handle('personas:open-extra-member', (_event, slot: unknown) => {
+  if (isPersonasBuild() && (slot === 1 || slot === 2)) {
+    openPersonasExtraMember(slot);
+  }
+});
 
 ipc.handle('database-ready', async () => {
   if (!sqlInitPromise) {

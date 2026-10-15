@@ -68,6 +68,11 @@ pub enum SendError {
     /// `Messenger::prove_authorship`).
     #[error("could not encode an authorship proof: {0}")]
     ProofCodec(#[from] ark_serialize::SerializationError),
+    /// A rate-limited persona index at or above the per-context limit. Refused before
+    /// anything is proved: every replica (ours included) would reject the post, and by
+    /// then the member's object would already have moved past it.
+    #[error("rate-limited persona #{number} does not exist: each context has {limit}")]
+    PersonaIndexOutOfRange { number: u64, limit: usize },
     /// A prepared scan is waiting to be committed or discarded; nothing else may be
     /// produced until it is (see [`Messenger::prepare_scan`]).
     #[error("a prepared scan is pending; commit or discard it first")]
@@ -241,6 +246,18 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         })
     }
 
+    /// Whether a scan would absorb anything now ([`Member::scan_needed`]).
+    pub fn scan_needed(&self) -> bool {
+        self.member
+            .as_ref()
+            .is_some_and(|m| m.scan_needed(self.replica.callback_store()))
+    }
+
+    /// Scans left in the sweep in progress ([`Member::sweep_remaining`]).
+    pub fn sweep_remaining(&self) -> usize {
+        self.member.as_ref().map_or(0, Member::sweep_remaining)
+    }
+
     /// Whether this member's current object is on the replica's object tree.
     pub fn member_on_bulletin(&self) -> bool {
         self.member
@@ -391,6 +408,15 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         context: F,
         i: F,
     ) -> Result<Emitted, SendError> {
+        use ark_ff::PrimeField;
+        let limit = personas_core::circuits::RATE_LIMITED_PERSONAS_PER_CONTEXT;
+        if i.into_bigint() >= F::from(limit as u64).into_bigint() {
+            return Err(SendError::PersonaIndexOutOfRange {
+                // As the UI numbers them: index 0 is persona #1.
+                number: i.into_bigint().0[0].saturating_add(1),
+                limit,
+            });
+        }
         let record = {
             let (replica, member) = self.parts_mut()?;
             member.post_pseudo_rate(rng, replica.obj_store(), body, context, i)?
