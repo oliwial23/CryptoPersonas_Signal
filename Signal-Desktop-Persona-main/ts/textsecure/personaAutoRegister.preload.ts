@@ -9,6 +9,8 @@
 // verify.sh and docs/RUNNING_E2_LOCALLY.md). Gated on the PERSONAS_AUTO_REGISTER
 // env var so it is inert in any normal build.
 
+import { request } from 'node:https';
+
 import { createLogger } from '../logging/log.std.ts';
 import { accountManager } from './AccountManager.preload.ts';
 import {
@@ -23,6 +25,8 @@ import { DataWriter } from '../sql/Client.preload.ts';
 import { getConversation } from '../util/getConversation.preload.ts';
 import { writeProfile } from '../services/writeProfile.preload.ts';
 import { toLogFormat } from '../types/errors.std.ts';
+import type { ServiceIdString } from '../types/ServiceId.std.ts';
+import { drop } from '../util/drop.std.ts';
 
 const log = createLogger('personaAutoRegister');
 
@@ -120,4 +124,96 @@ export async function ensureDemoProfileUploaded(): Promise<void> {
   } catch (error) {
     log.error(`failed to upload demo profile: ${toLogFormat(error)}`);
   }
+}
+
+// --- noticing a server reset ------------------------------------------------------------
+//
+// The test server forgets every account when it restarts. Real Signal servers then refuse
+// the authenticated socket (SocketManager emits 'authError' and we unlink), but the test
+// server still accepts it and only answers individual requests with 401, which Desktop
+// treats as "might be unlinked: reconnect" — forever. So in personas mode we ask the
+// server directly, unauthenticated, whether our own account still exists: after a 401,
+// and every few minutes so an idle member notices too. Only a definite "no such account"
+// unlinks; network errors and a server that is still booting are ignored.
+//
+// The check is a plain HTTPS request (HEAD /v1/accounts/account/<aci>, the same lookup
+// as WebAPI's checkAccountExistence) rather than a request on the chat socket: the 401
+// that prompts it also makes Desktop tear down and reconnect its sockets, which would
+// abort a socket request.
+
+const ACCOUNT_CHECK_INTERVAL_MS = 3 * 60_000;
+const ACCOUNT_CHECK_MIN_GAP_MS = 20_000;
+
+let accountWatch:
+  | { getAci: () => ServiceIdString | undefined; onGone: () => void }
+  | undefined;
+let lastAccountCheck = 0;
+let accountCheckRunning = false;
+let accountGone = false;
+
+function accountExists(aci: ServiceIdString): Promise<boolean> {
+  const { serverUrl, certificateAuthority } = window.SignalContext.config;
+  const url = new URL(`/v1/accounts/account/${encodeURIComponent(aci)}`, serverUrl);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      url,
+      { method: 'HEAD', ca: certificateAuthority, timeout: 15_000 },
+      res => {
+        res.resume();
+        if (res.statusCode === 200) {
+          resolve(true);
+        } else if (res.statusCode === 404) {
+          resolve(false);
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}`));
+        }
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('timed out')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function checkOurAccount(reason: string): Promise<void> {
+  if (!accountWatch || accountCheckRunning || accountGone) {
+    return;
+  }
+  if (Date.now() - lastAccountCheck < ACCOUNT_CHECK_MIN_GAP_MS) {
+    return;
+  }
+  const aci = accountWatch.getAci();
+  if (!aci) {
+    return;
+  }
+  accountCheckRunning = true;
+  lastAccountCheck = Date.now();
+  try {
+    if (!(await accountExists(aci))) {
+      accountGone = true;
+      log.warn(`our account no longer exists on the server (${reason}); registering again`);
+      accountWatch.onGone();
+    }
+  } catch (error) {
+    log.info(`account check (${reason}) failed, will retry: ${toLogFormat(error)}`);
+  } finally {
+    accountCheckRunning = false;
+  }
+}
+
+// Call once after registration. `onGone` should unlink (which restarts personas members).
+export function startPersonasAccountWatch(options: {
+  getAci: () => ServiceIdString | undefined;
+  onGone: () => void;
+}): void {
+  if (!getAutoRegisterNumber() || accountWatch) {
+    return;
+  }
+  accountWatch = options;
+  setInterval(() => drop(checkOurAccount('periodic')), ACCOUNT_CHECK_INTERVAL_MS);
+}
+
+// Call on 'mightBeUnlinked' (an authenticated request got 401).
+export function personasMightBeUnlinked(): void {
+  drop(checkOurAccount('401'));
 }

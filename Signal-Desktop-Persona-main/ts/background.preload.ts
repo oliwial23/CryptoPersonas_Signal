@@ -11,6 +11,8 @@ import * as Registration from './util/registration.preload.ts';
 import {
   getAutoRegisterNumber,
   personaAutoRegister,
+  personasMightBeUnlinked,
+  startPersonasAccountWatch,
 } from './textsecure/personaAutoRegister.preload.ts';
 import { startPersonaRosterSync } from './textsecure/personaRoster.preload.ts';
 import { ensureDemoProfileUploaded } from './textsecure/personaAutoRegister.preload.ts';
@@ -1392,6 +1394,8 @@ async function startApp(): Promise<void> {
   );
 
   window.Whisper.events.on('mightBeUnlinked', () => {
+    // Personas: the test server answers 401 instead of refusing the socket after a reset.
+    personasMightBeUnlinked();
     if (Registration.everDone()) {
       throttledEnqueueReconnectToWebSocket();
     }
@@ -1630,6 +1634,11 @@ async function startApp(): Promise<void> {
       startPhantomDistribution();
 
       startPersonaRosterSync();
+      // Notice when a test-server reset has wiped our account, and register again.
+      startPersonasAccountWatch({
+        getAci: () => itemStorage.user.getAci(),
+        onGone: () => drop(unlinkAndDisconnect()),
+      });
 
       // Personas demo: construct the ZK engine now so the first send/receive is
       // instant and any load/keygen failure is visible at boot. No-op when the
