@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal Personas — tester guide</title>
+<style>
+  :root { --bg: #fff; --fg: #1b1b1b; --muted: #5f6368; --card: #f4f5f7; --accent: #2c6bed; --warn: #fff4e5; --warn-fg: #6b4300; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121212; --fg: #ececec; --muted: #a8a8a8; --card: #1f2023; --accent: #6b9bff; --warn: #3a2a10; --warn-fg: #ffd59a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 1.8rem; margin: 0 0 6px; }
+  h2 { font-size: 1.2rem; margin: 36px 0 10px; }
+  p, li { color: var(--fg); }
+  .lede { color: var(--muted); margin: 0 0 24px; }
+  .download { display: block; padding: 18px 20px; border-radius: 12px; background: var(--accent); color: #fff;
+              text-decoration: none; font-weight: 600; text-align: center; font-size: 1.05rem; }
+  .download small { display: block; font-weight: 400; opacity: .85; margin-top: 4px; }
+  .card { background: var(--card); border-radius: 12px; padding: 14px 18px; margin: 12px 0; }
+  .warn { background: var(--warn); color: var(--warn-fg); border-radius: 12px; padding: 12px 16px; margin: 12px 0; }
+  ol, ul { padding-left: 22px; }
+  li { margin: 6px 0; }
+  code { background: var(--card); padding: 1px 6px; border-radius: 4px; font-size: .92em; word-break: break-all; }
+  footer { margin-top: 44px; color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Signal Personas</h1>
+  <p class="lede">A research prototype of <em>Cryptographic Personas</em>: a group chat where members can post
+    anonymously or under personas, rate posts, and vote to ban someone — all without anyone,
+    including the server, learning who wrote what. It runs on a private test server, separate
+    from the real Signal.</p>
+
+  <a class="download" id="dl" href="Signal-Personas.dmg">Download Signal Personas for Mac
+    <small>Apple Silicon (M1 or later) · macOS 12 or later · about 140 MB</small></a>
+
+  <h2>1. Install</h2>
+  <ol>
+    <li>Open the downloaded <code>.dmg</code> and drag <strong>Signal Personas</strong> into <strong>Applications</strong>.</li>
+    <li>Open it from Applications. macOS will refuse the first time, because the app is not
+      registered with Apple:
+      <div class="card">
+        <strong>macOS 15 (Sequoia) or later:</strong> click <em>Done</em>, then open
+        <strong>System Settings → Privacy &amp; Security</strong>, scroll down to the message about
+        Signal Personas, click <strong>Open Anyway</strong>, and confirm.<br><br>
+        <strong>macOS 14 or earlier:</strong> right-click the app, choose <strong>Open</strong>, then <strong>Open</strong> again.
+      </div>
+      You only need to do this once.</li>
+    <li>Choose a <strong>display name</strong>. Other testers see it next to your account. It does not
+      need to be your real name.</li>
+    <li>Give it a minute: the app creates a test account (with a made-up phone number — no SMS, no
+      real number needed) and downloads the shared cryptographic keys (about 50 MB).</li>
+  </ol>
+  <p>It installs alongside the real Signal without touching it: separate app, separate data, separate server.</p>
+
+  <h2>2. Things to try</h2>
+  <ul>
+    <li><strong>Find people.</strong> Other testers who have the app open appear in your contacts automatically.</li>
+    <li><strong>Make a group.</strong> Create a new group and add two or more people. The app sets up the shared
+      anonymous identity for everyone in it; give it about 30 seconds after creating the group.</li>
+    <li><strong>Post anonymously.</strong> Nobody in the group can tell who sent it — not even from the
+      message metadata.</li>
+    <li><strong>Post as a persona.</strong> A persona is a pseudonym. Posts under the same persona are linked to
+      each other but not to you, and you can use several personas that nobody can link together.</li>
+    <li><strong>React and rate.</strong> Reputation attaches to personas, not to people.</li>
+    <li><strong>Run a ban poll</strong> (needs at least three members). A banned persona's author can no longer
+      post — enforced by zero-knowledge proofs, not by trusting the server.</li>
+  </ul>
+  <h2>Playing several members yourself</h2>
+  <p>A ban poll needs three members, and some things are easiest to see from both sides. You can run
+    up to two extra members on the same Mac: choose <strong>File → Open Extra Member 1</strong> (or
+    <strong>2</strong>). Each opens in its own window, asks for its own display name the first time, and
+    appears to everyone else as a separate person. The member's name is shown in each window's title.
+    Choosing an extra member that is already open just brings its window to the front.</p>
+  <p>You can also ask whoever invited you about the <strong>browser members</strong> (alice, bob, carol)
+    you can control from a web page.</p>
+
+  <h2>3. Good to know</h2>
+  <div class="warn">This is a test system. Do not share anything sensitive. Accounts and messages may be wiped
+    whenever the test server is reset.</div>
+  <ul>
+    <li><strong>Who sees what.</strong> Your display name is visible to other testers. What you post
+      anonymously or under a persona is not linked to it. The test server delivers messages but
+      cannot read them or tell who wrote a persona post.</li>
+    <li><strong>Posting at the exact same moment</strong> as someone else can occasionally drop one of the two
+      posts. If a post does not show up for others, send it again.</li>
+    <li><strong>Slow first post.</strong> Each persona post includes a zero-knowledge proof made on your Mac,
+      which can take a few seconds.</li>
+    <li><strong>If the test server is reset</strong>, everyone's account is wiped. The app notices,
+      restarts, and registers again with the same name; your contacts come back within a minute or two,
+      but groups have to be created again.</li>
+    <li>Contacts only list people whose app has been open in the last hour.</li>
+    <li>The app never updates itself; you will be sent a new download when there is a new version.</li>
+  </ul>
+
+  <h2>4. Reporting a problem</h2>
+  <ol>
+    <li>Note what you did and roughly when.</li>
+    <li>In the app, open <strong>View → Debug Log</strong> and choose <strong>Save</strong> to keep it as a
+      file. (Uploading the log is turned off in this build, so nothing is sent anywhere.)</li>
+    <li>Send the file and your notes to the person who invited you.</li>
+  </ol>
+
+  <h2>5. Uninstalling</h2>
+  <p>Quit the app, delete <strong>Signal Personas</strong> from Applications, and delete the folder
+    <code>~/Library/Application Support/Signal-Personas</code> (plus
+    <code>Signal-Personas-extra-1</code> and <code>-extra-2</code> if you opened extra members).</p>
+
+  <footer>Cryptographic Personas — research prototype. Questions? Ask the person who invited you.</footer>
+</main>
+</body>
+</html>

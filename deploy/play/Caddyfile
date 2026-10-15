@@ -11,7 +11,9 @@
 	# The whole /play tree is behind one shared password: anyone who reaches a member's
 	# noVNC page IS that member, so this is the only thing standing between the public
 	# internet and the demo accounts.
-	@play path /play /play/*
+	# The same password guards the app download (/download/), so only invited testers get
+	# it. The installed app itself never needs it.
+	@play path /play /play/* /download /download/*
 	basic_auth @play {
 		{$PLAY_USER:demo} {$PLAY_PASSWORD_HASH}
 	}
@@ -35,6 +37,16 @@
 		}
 		handle /play/* {
 			respond "no such member" 404
+		}
+
+		# --- tester guide + the installable app (download/) -----------------------------
+		redir /download /download/
+		handle_path /download/* {
+			root * /srv/download
+			header /*.dmg Content-Type application/x-apple-diskimage
+			file_server {
+				hide .*
+			}
 		}
 
 		# --- member directory (directory.js): how clients find each other -----------

@@ -143,7 +143,12 @@ import { getAppRootDir } from '../ts/util/appRootDir.main.ts';
 import { trackHeapSize } from '../ts/util/oomNotifier.node.ts';
 import { sendDummyKeystroke } from './WindowsNotifications.main.ts';
 import { maybeMigrateSafeStorageBackend } from '../ts/util/linuxPasswordStoreMigration.main.ts';
-import { startPersonasRuntime } from './personas.main.ts';
+import {
+  isPersonasBuild,
+  labelPersonasWindow,
+  openPersonasExtraMember,
+  startPersonasRuntime,
+} from './personas.main.ts';
 
 const { chmod, realpath, writeFile } = fsExtra;
 const { get, pick, isNumber, isBoolean, some, debounce, noop } = lodash;
@@ -778,6 +783,8 @@ async function createWindow() {
 
   // Create the browser window.
   mainWindow = new BrowserWindow(windowOptions);
+  // Personas build: name the member in the window title (several can be open at once).
+  labelPersonasWindow(mainWindow);
   if (settingsChannel) {
     settingsChannel.setMainWindow(mainWindow);
   }
@@ -2472,6 +2479,7 @@ function setupMenu(options?: Partial<CreateTemplateOptionsType>) {
     zoomIn,
     zoomOut,
     zoomReset,
+    ...(isPersonasBuild() ? { openPersonasExtraMember } : {}),
 
     // overrides
     ...options,
@@ -3023,6 +3031,14 @@ ipc.handle(
 );
 
 ipc.handle('DebugLogs.upload', async (_event, content: string) => {
+  // A personas build must not send logs (account ids, server details) to Signal's
+  // debuglogs.org; testers save the log to a file instead (tester guide).
+  if (isPersonasBuild()) {
+    throw new Error(
+      'Uploading debug logs is disabled in Signal Personas. Use "Save" to keep the log ' +
+        'as a file and send it to whoever invited you.'
+    );
+  }
   return uploadDebugLog.upload({
     content,
     appVersion: app.getVersion(),

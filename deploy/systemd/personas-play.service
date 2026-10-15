@@ -1,0 +1,16 @@
+[Unit]
+Description=Personas: gateway (:8443), member directory, browser members
+After=podman.socket personas-chat.service personas-storage.service
+Wants=podman.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=%h/.config/personas/env
+WorkingDirectory=@REPO@/deploy/play
+# Rootless podman does not restart containers after a reboot by itself; this does.
+ExecStart=@WORK@/tools/docker compose up -d gateway directory $PERSONAS_PLAY_MEMBERS
+ExecStop=@WORK@/tools/docker compose stop
+
+[Install]
+WantedBy=default.target

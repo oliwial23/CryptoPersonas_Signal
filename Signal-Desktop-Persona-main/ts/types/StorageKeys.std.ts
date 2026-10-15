@@ -341,6 +341,9 @@ export type StorageAccessType = {
 };
 
 export const STORAGE_KEYS_TO_PRESERVE_AFTER_UNLINK = [
+  // Personas demo: kept across an unlink so the same install can move its directory
+  // entry to the account it re-registers (deploy/play/directory.js).
+  'personasDirectorySecret',
   // UI & user-setting-related keys
   'always-relay-calls',
   'audio-notification',
@@ -453,7 +456,6 @@ const STORAGE_KEYS_TO_REMOVE_AFTER_UNLINK = [
   'personasPhantomChain',
   'personasPhantomBundle',
   'personasPhantomSentTo',
-  'personasDirectorySecret',
   'lastCallQualitySurveyTime',
   'lastCallQualityFailureSurveyTime',
   'cqsTestMode',

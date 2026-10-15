@@ -12,6 +12,14 @@
 // and later PUTs for that aci must present the same secret. That stops one member from
 // renaming or redirecting another; it is not authentication of the Signal account.
 //
+// ACTIVITY. Clients re-publish every few minutes while running, so `updatedAt` doubles as
+// a heartbeat:
+//   - entries silent for ACTIVE_WINDOW (default 1 h) are left out of the list, so closed
+//     or uninstalled apps stop showing up as contacts for new members;
+//   - an entry silent for TAKEOVER_AFTER (default 24 h) may be claimed by a new install of
+//     the same account (a reset or reinstall that kept its number);
+//   - entries silent for PRUNE_AFTER (default 30 days) are deleted.
+//
 // PRIVACY TRADE-OFF: profile keys are published so the group creator can add members as
 // full members (the server only issues their profile-key credentials to holders of
 // their profile key). Anyone who can read this list can decrypt members' profiles and
@@ -33,6 +41,14 @@ const PORT = Number(process.argv[2] || 8080);
 const DATA_DIR = process.argv[3] || '/data';
 const FILE = path.join(DATA_DIR, 'directory.json');
 const MAX_ENTRIES = 2000;
+const HOUR = 60 * 60 * 1000;
+const durationEnv = (name, fallback) => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+const ACTIVE_WINDOW = durationEnv('DIRECTORY_ACTIVE_WINDOW_MS', HOUR);
+const TAKEOVER_AFTER = durationEnv('DIRECTORY_TAKEOVER_AFTER_MS', 24 * HOUR);
+const PRUNE_AFTER = durationEnv('DIRECTORY_PRUNE_AFTER_MS', 30 * 24 * HOUR);
 const MAX_BODY = 4096;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -62,7 +78,25 @@ function send(res, status, body) {
 }
 
 function publicView() {
-  return Object.values(entries).map(({ secretHash, ...rest }) => rest);
+  const activeSince = Date.now() - ACTIVE_WINDOW;
+  return Object.values(entries)
+    .filter(entry => entry.updatedAt >= activeSince)
+    .map(({ secretHash, ...rest }) => rest);
+}
+
+function prune() {
+  const cutoff = Date.now() - PRUNE_AFTER;
+  let removed = 0;
+  for (const [aci, entry] of Object.entries(entries)) {
+    if (entry.updatedAt < cutoff) {
+      delete entries[aci];
+      removed += 1;
+    }
+  }
+  if (removed) {
+    save();
+    console.log(`directory: pruned ${removed} entries silent for over ${PRUNE_AFTER}ms`);
+  }
 }
 
 function validate(aci, body) {
@@ -126,15 +160,24 @@ const server = http.createServer((req, res) => {
     if (problem) return send(res, 400, { error: problem });
 
     const existing = entries[aci];
-    if (existing && existing.secretHash !== hash(secret)) {
+    const stale = existing && Date.now() - existing.updatedAt > TAKEOVER_AFTER;
+    if (existing && existing.secretHash !== hash(secret) && !stale) {
       return send(res, 403, { error: 'this entry belongs to another install' });
     }
     if (!existing && Object.keys(entries).length >= MAX_ENTRIES) {
       return send(res, 507, { error: 'directory full' });
     }
-    const takenNumber = Object.values(entries).find(e => e.e164 === body.e164 && e.aci !== aci);
+    const takenNumber = Object.values(entries).find(
+      e => e.e164 === body.e164 && e.aci !== aci && Date.now() - e.updatedAt <= TAKEOVER_AFTER
+    );
     if (takenNumber) {
-      return send(res, 409, { error: 'number already listed for another account' });
+      if (takenNumber.secretHash !== hash(secret)) {
+        return send(res, 409, { error: 'number already listed for another account' });
+      }
+      // The same install re-registered its number as a new account (the test server
+      // forgot the old one when it restarted): move the listing to the new account id.
+      delete entries[takenNumber.aci];
+      console.log(`directory: moved ${body.e164} from ${takenNumber.aci} to ${aci}`);
     }
 
     entries[aci] = {
@@ -151,9 +194,18 @@ const server = http.createServer((req, res) => {
     } catch (error) {
       return send(res, 500, { error: `could not save: ${error.message}` });
     }
-    console.log(`directory: ${existing ? 'updated' : 'added'} ${aci} (${body.name.trim()})`);
+    const verb = !existing ? 'added' : existing.secretHash === hash(secret) ? 'updated' : 'claimed (stale)';
+    console.log(`directory: ${verb} ${aci} (${body.name.trim()})`);
     return send(res, 200, { ok: true });
   });
 });
 
-server.listen(PORT, () => console.log(`directory: listening on :${PORT}, data in ${FILE}`));
+prune();
+setInterval(prune, HOUR).unref();
+
+server.listen(PORT, () =>
+  console.log(
+    `directory: listening on :${PORT}, data in ${FILE} ` +
+      `(active ${ACTIVE_WINDOW}ms, takeover ${TAKEOVER_AFTER}ms, prune ${PRUNE_AFTER}ms)`
+  )
+);

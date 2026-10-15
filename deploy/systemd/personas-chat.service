@@ -1,0 +1,18 @@
+[Unit]
+Description=Personas: Signal chat test-server (:8080/:8081)
+After=personas-minio.service podman.socket
+Requires=personas-minio.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/personas/env
+ExecStart=@REPO@/deploy/signal-test-server/boot.sh
+# SIGTERM to the JVM only, so its shutdown hooks stop the test containers it started.
+KillMode=mixed
+TimeoutStopSec=90
+# Every restart wipes all accounts; installed clients re-register on their own.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

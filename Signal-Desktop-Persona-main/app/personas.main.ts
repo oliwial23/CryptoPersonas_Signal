@@ -13,21 +13,25 @@
 //   1. mints a per-install CA + localhost certificate (once, kept in userData),
 //   2. starts the localhost relay to the real server (personasRelay.node.ts),
 //   3. picks this install's demo identity: a fake phone number not yet in the directory,
-//      and a display name (kept in userData),
+//      and a display name the tester chooses on first launch (kept in userData),
 //   4. sets the PERSONAS_* environment the renderer's personas code reads, and
 //   5. supplies the server settings (relay URL, CA, the test server's zkgroup params and
 //      trust root) that replace the production values in the renderer config.
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomInt } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request } from 'node:https';
 import { join } from 'node:path';
 
+import { app } from 'electron';
+import type { BrowserWindow } from 'electron';
+
 import { createLogger } from '../ts/logging/log.std.ts';
 import { toLogFormat } from '../ts/types/errors.std.ts';
 import { getAppRootDir } from '../ts/util/appRootDir.main.ts';
 import { startPersonasRelay } from './personasRelay.node.ts';
+import { promptForDisplayName } from './personasSetup.main.ts';
 
 const log = createLogger('personas');
 
@@ -182,7 +186,10 @@ async function ensureIdentity(path: string, port: number, ca: string): Promise<I
   if (!number) {
     throw new Error('could not find a free demo number');
   }
-  const identity: Identity = { number, name: `member-${number.slice(-4)}` };
+  // Asked once, before the main window: the name becomes the Signal profile name at
+  // registration and the directory entry. Closing the prompt keeps the suggestion.
+  const name = await promptForDisplayName(`member-${number.slice(-4)}`);
+  const identity: Identity = { number, name };
   writeFileSync(path, JSON.stringify(identity, null, 2), { mode: 0o600 });
   log.info(`chose demo identity ${identity.name}`);
   return identity;
@@ -226,4 +233,40 @@ export function startPersonasRuntime(userDataPath: string): Promise<PersonasServ
     };
   })();
   return runtime;
+}
+
+// --- extra members (File menu) ----------------------------------------------------------
+
+// How many extra members one tester can open from the menu, besides their main one.
+export const PERSONAS_EXTRA_MEMBER_SLOTS = [1, 2] as const;
+export type PersonasExtraMemberSlot = (typeof PERSONAS_EXTRA_MEMBER_SLOTS)[number];
+
+// Launch extra member `slot` as a separate app process with its own data folder
+// (user_config.main.ts, --personas-profile). If that member is already running, the new
+// process loses Electron's per-folder single-instance lock and quits, and the running
+// one brings its window forward (main.main.ts `second-instance`), so the menu item works
+// as "open or show" and there can never be more than the fixed slots.
+export function openPersonasExtraMember(slot: PersonasExtraMemberSlot): void {
+  const args = [
+    // A development run is `electron <app dir>`; a packaged app is its own executable.
+    ...(app.isPackaged ? [] : [app.getAppPath()]),
+    `--personas-profile=extra-${slot}`,
+  ];
+  log.info(`opening extra member ${slot}`);
+  spawn(process.execPath, args, { detached: true, stdio: 'ignore' }).unref();
+}
+
+// Show which member a window belongs to: with several members open, every window is
+// otherwise just "Signal". Keeps the page's own title (unread counts and all).
+export function labelPersonasWindow(window: BrowserWindow): void {
+  const name = process.env.PERSONAS_DISPLAY_NAME;
+  if (!isPersonasBuild() || !name) {
+    return;
+  }
+  const label = (title: string) => `${title} · ${name}`;
+  window.setTitle(label(window.getTitle()));
+  window.on('page-title-updated', (event, title) => {
+    event.preventDefault();
+    window.setTitle(label(title));
+  });
 }

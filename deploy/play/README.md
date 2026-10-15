@@ -86,17 +86,64 @@ Open `https://signalserver.umiacs.umd.edu/play/`, log in, pick a member. The fir
 on fresh volumes generates the ~51 MB proving keys (minutes) and registers the account.
 Then follow `Signal-Desktop-Persona-main/PERSONAS_DEMO.md` from "Create the group".
 
-## After a backend restart
+## Keeping it running (systemd)
 
-The test server forgets accounts and groups on restart, while each member's userData
-still thinks it is registered. Reset the members:
+Nothing restarts by itself after a reboot unless installed as services. Once everything
+works by hand, stop it and install user units (no root needed; requires lingering):
 
 ```sh
-PERSONAS_RESET=1 docker compose up -d --force-recreate alice bob
-docker compose up -d --force-recreate alice bob      # then drop the flag again
+pkill -f 'Ptest-server|StorageService|EmulatorMain'; ../signal-test-server/minio.sh down
+docker compose down
+source ~/.bashrc && ../systemd/install.sh                 # gateway + directory
+# or: PERSONAS_PLAY_MEMBERS="alice bob carol" ../systemd/install.sh
+systemctl --user start personas-minio personas-chat personas-storage personas-play
+systemctl --user status 'personas-*'
+journalctl --user -u personas-chat -f
 ```
 
-`docker compose down -v` wipes everything, including the shared phantom bundle and keys.
+A restart of the chat server wipes every account. Installed clients notice (their
+credentials are refused), restart, and register again with the same number and name;
+the directory moves their listing to the new account. Groups must be re-created.
+
+## The member directory
+
+`directory.js` lists members whose app checked in during the last hour (apps check in
+every five minutes), so closed or uninstalled apps stop appearing. An entry silent for a
+day can be claimed by a new install of the same account; one silent for 30 days is
+deleted. All three are configurable (`DIRECTORY_*_MS`, see the file).
+
+## Publishing the app
+
+Build on an Apple Silicon Mac (`scripts/personas-package.mjs`, pin from `./keys.sh`), then
+put it on the download page:
+
+```sh
+./publish-dmg.sh ../../Signal-Desktop-Persona-main/release-personas/Signal-Personas-*-arm64.dmg
+```
+
+Testers get it, with the tester guide, at `https://signalserver.umiacs.umd.edu/download/`
+(same password as `/play`).
+
+## Resetting the members
+
+After a backend restart (the test server forgets accounts and groups, while each member's
+data still thinks it is registered), or whenever you want a clean slate, reset the
+members **and the directory together**:
+
+```sh
+docker compose rm -sf alice bob carol directory
+for v in play_alice play_bob play_carol play_directory; do podman volume rm "$v"; done
+docker compose up -d directory alice bob carol
+```
+
+Why the directory too: each member owns its directory entry through a secret kept in its
+own data. A reset member re-registers the same number, and the test server hands it the
+same account id, so the directory sees a new install claiming an existing entry and
+refuses it (HTTP 403). Its contacts then keep stale profile keys and do not appear.
+Installed clients do not hit this: each install picks a fresh number.
+
+`docker compose down -v` wipes everything, including the proving keys (then re-run
+`./keys.sh`, which mints a new set and a new pin every client must be rebuilt with).
 
 ## How a member reaches the backend (and why not the public URL)
 

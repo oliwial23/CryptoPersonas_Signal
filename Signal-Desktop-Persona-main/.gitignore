@@ -51,3 +51,7 @@ ts/protobuf/*.d.ts
 /.zed
 *.sublime*
 *.map
+# Personas .dmg builds (scripts/personas-package.mjs)
+/release-personas/
+# Built by scripts/personas-package.mjs --arch x64 (the arm64 addon is committed).
+packages/personas-engine/personas-engine.darwin-x64.node

@@ -1,0 +1,15 @@
+[Unit]
+Description=Personas: storage-service, GroupV2 backend (:8090)
+After=personas-chat.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/personas/env
+ExecStart=@REPO@/deploy/storage-service/boot.sh
+# The default KillMode also stops the Bigtable emulator boot.sh started.
+ExecStopPost=@REPO@/deploy/storage-service/bigtable.sh down
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

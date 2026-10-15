@@ -1583,17 +1583,19 @@ async function startApp(): Promise<void> {
     // boot so we transition straight to the inbox rather than the installer; (2) that
     // a re-launch (env still set, everDone() now true) correctly skips this and boots
     // to the inbox. If (1) fails, add a window.SignalContext.restartApp() here.
-    if (!Registration.everDone()) {
-      const autoRegisterNumber = getAutoRegisterNumber();
-      if (autoRegisterNumber) {
-        try {
-          await personaAutoRegister(autoRegisterNumber);
-        } catch (error) {
-          log.error(
-            'personaAutoRegister failed; falling back to the installer: ',
-            Errors.toLogFormat(error)
-          );
-        }
+    //
+    // isDone(), not everDone(): unlinking (below) clears "registered" but never "was ever
+    // registered", and a personas member that the test server has forgotten must
+    // register again on the next boot rather than stop at the installer.
+    const autoRegisterNumber = getAutoRegisterNumber();
+    if (autoRegisterNumber && !Registration.isDone()) {
+      try {
+        await personaAutoRegister(autoRegisterNumber);
+      } catch (error) {
+        log.error(
+          'personaAutoRegister failed; falling back to the installer: ',
+          Errors.toLogFormat(error)
+        );
       }
     }
 
@@ -3618,6 +3620,15 @@ async function startApp(): Promise<void> {
       await itemStorage.fetch();
 
       log.info('unlinkAndDisconnect: Successfully cleared local configuration');
+
+      // Personas demo: the test server forgets every account when it restarts, and that
+      // is what lands here. Instead of leaving the member at the device-link screen,
+      // restart; the next boot registers the same number again. Contacts come back
+      // through the directory; groups must be created again (the server lost them too).
+      if (getAutoRegisterNumber()) {
+        log.warn('unlinkAndDisconnect: personas member; restarting to register again');
+        window.SignalContext.restartApp();
+      }
     } catch (eraseError) {
       log.error(
         'unlinkAndDisconnect: Something went wrong clearing ' +

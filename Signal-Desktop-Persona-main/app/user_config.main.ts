@@ -24,7 +24,21 @@ if (config.has('storagePath')) {
 } else if (isPersonasBuild()) {
   // Its own data folder, so a personas build can never open (or damage) a real Signal
   // Desktop installation's account on the same machine.
-  userData = join(app.getPath('appData'), 'Signal-Personas');
+  //
+  // `--personas-profile=<name>` picks a separate folder, i.e. a separate member: a
+  // tester can run several members on one Mac, each launched with its own name
+  //   open -n -a "Signal Personas" --args --personas-profile=second
+  // Electron's one-instance lock is per data folder, so the copies run side by side.
+  const profileArg = process.argv.find(arg => arg.startsWith('--personas-profile='));
+  const profile = profileArg
+    ?.slice('--personas-profile='.length)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .slice(0, 24);
+  userData = join(
+    app.getPath('appData'),
+    profile ? `Signal-Personas-${profile}` : 'Signal-Personas'
+  );
 } else if (OS.isAppImage()) {
   userData = join(app.getPath('appData'), `${app.getName()} AppImage`);
 }

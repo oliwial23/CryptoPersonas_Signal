@@ -40,6 +40,8 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./index.html:/srv/play/index.html:ro
+      # Tester guide + Signal-Personas.dmg (publish-dmg.sh puts the .dmg here).
+      - ./download:/srv/download:ro
       # The canonical proving keys (keys.sh), served at /personas/keys/.
       - keys:/srv/keys:ro
 

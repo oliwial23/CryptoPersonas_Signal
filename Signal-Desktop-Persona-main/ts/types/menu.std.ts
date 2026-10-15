@@ -16,6 +16,8 @@ export type MenuOptionsType = Readonly<{
 
 export type MenuActionsType = Readonly<{
   forceUpdate: () => unknown;
+  // Personas builds only: open (or show) extra member 1 or 2 (app/personas.main.ts).
+  openPersonasExtraMember?: (slot: 1 | 2) => unknown;
   openArtCreator: () => unknown;
   openContactUs: () => unknown;
   openForums: () => unknown;

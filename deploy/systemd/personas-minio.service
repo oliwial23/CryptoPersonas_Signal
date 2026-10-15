@@ -1,0 +1,14 @@
+[Unit]
+Description=Personas: MinIO (the chat server's prekey store)
+After=podman.socket
+Wants=podman.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=%h/.config/personas/env
+ExecStart=@REPO@/deploy/signal-test-server/minio.sh up
+ExecStop=@REPO@/deploy/signal-test-server/minio.sh down
+
+[Install]
+WantedBy=default.target

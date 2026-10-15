@@ -42,6 +42,7 @@ export const createTemplate = (
     showKeyboardShortcuts,
     showSettings,
     openArtCreator,
+    openPersonasExtraMember,
     zoomIn,
     zoomOut,
     zoomReset,
@@ -60,6 +61,21 @@ export const createTemplate = (
           accelerator: 'CommandOrControl+,',
           click: showSettings,
         },
+        // Personas builds: run up to two more members side by side, to try group
+        // features (a ban poll needs three) as one person. Not translated: research-only.
+        ...(openPersonasExtraMember
+          ? [
+              { type: 'separator' as const },
+              {
+                label: 'Open Extra Member 1',
+                click: () => openPersonasExtraMember(1),
+              },
+              {
+                label: 'Open Extra Member 2',
+                click: () => openPersonasExtraMember(2),
+              },
+            ]
+          : []),
         {
           type: 'separator',
         },
