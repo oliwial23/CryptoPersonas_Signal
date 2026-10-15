@@ -1,8 +1,8 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Personas demo: an out-of-band contact roster so demo instances running on one
-// machine can discover each other WITHOUT CDSI. libsignal-net's localTestServer
+// Personas demo: an out-of-band contact roster so demo instances can discover each
+// other WITHOUT CDSI. libsignal-net's localTestServer
 // mode DISCARDs the CDSI port (see preconnect.preload.ts), so Signal's normal
 // "find by phone number" flow — which resolves E.164 -> ACI through CDSI — is
 // unavailable. Instead, each instance publishes its own identity
@@ -11,6 +11,14 @@
 // so sealed sender works (the access key derives from it). This is the same
 // discovery mechanism the group fan-out will reuse in Phase 3.
 //
+// Two backends for the same entries:
+//   DIRECTORY (default)  the member directory on our server (deploy/play/directory.js),
+//                        reached through the same localhost relay as the chat server.
+//                        Works across machines, so it is what installed clients use.
+//   FOLDER               a shared local directory, when PERSONAS_ROSTER_DIR is set
+//                        explicitly — the original one-machine mechanism, kept for
+//                        laptop runs against a local backend (personas-run.sh sets it).
+//
 // Gated on PERSONAS_AUTO_REGISTER / PERSONAS_ROSTER_DIR so normal builds are
 // unaffected. The directory is re-polled so instances find each other regardless
 // of launch order (and so late joiners appear); every step is idempotent.
@@ -18,6 +26,8 @@
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { request } from 'node:https';
+import { randomBytes } from 'node:crypto';
 
 import { createLogger } from '../logging/log.std.ts';
 import { itemStorage } from './Storage.preload.ts';
@@ -26,17 +36,24 @@ import { DataWriter } from '../sql/Client.preload.ts';
 import * as Bytes from '../Bytes.std.ts';
 import { drop } from '../util/drop.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
+import { isAciString } from '../util/isAciString.std.ts';
 import { isPniString } from '../types/ServiceId.std.ts';
 
 const log = createLogger('personaRoster');
 
 const DEFAULT_ROSTER_DIR = join(tmpdir(), 'personas-demo-roster');
 const POLL_INTERVAL_MS = 5000;
+// Re-publish our own entry this often, so a restarted directory relearns us.
+const REPUBLISH_INTERVAL_MS = 5 * 60_000;
+const DIRECTORY_PATH = '/personas/directory';
+const DIRECTORY_TIMEOUT_MS = 10_000;
 
 type RosterEntry = {
   aci: string;
   pni?: string;
   e164: string;
+  // Display name (directory only). The folder entries predate it.
+  name?: string;
   profileKey?: string; // base64
 };
 
@@ -53,49 +70,170 @@ export function getRosterDir(): string | undefined {
 const seededAcis = new Set<string>();
 let hasAutoOpened = false;
 
-async function writeMyRosterEntry(dir: string): Promise<void> {
+async function myEntry(): Promise<RosterEntry | undefined> {
   const aci = itemStorage.user.getAci();
   const e164 = itemStorage.user.getNumber();
   if (!aci || !e164) {
-    log.warn('writeMyRosterEntry: not registered yet; skipping');
-    return;
+    log.warn('myEntry: not registered yet');
+    return undefined;
   }
-
   const pni = itemStorage.user.getPni();
   const profileKeyBytes = await ourProfileKeyService.get();
-  const entry: RosterEntry = {
+  return {
     aci,
     pni: pni ?? undefined,
     e164,
+    name: process.env.NODE_APP_INSTANCE?.trim() || e164,
     profileKey: profileKeyBytes ? Bytes.toBase64(profileKeyBytes) : undefined,
   };
+}
 
+// --- folder backend -----------------------------------------------------------------
+
+async function writeMyRosterEntry(dir: string): Promise<void> {
+  const entry = await myEntry();
+  if (!entry) {
+    return;
+  }
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${e164.replace(/[^0-9+]/g, '')}.json`);
+  const file = join(dir, `${entry.e164.replace(/[^0-9+]/g, '')}.json`);
   writeFileSync(file, JSON.stringify(entry, null, 2), 'utf8');
   log.info(`writeMyRosterEntry: published ${file}`);
 }
 
-async function seedPeersFromRoster(dir: string): Promise<void> {
-  const myAci = itemStorage.user.getAci();
-
+function readFolderEntries(dir: string): Array<RosterEntry> {
   let files: Array<string>;
   try {
     files = readdirSync(dir).filter(name => name.endsWith('.json'));
   } catch {
     // Directory may not exist yet (no peer, including us, has published).
+    return [];
+  }
+  const entries: Array<RosterEntry> = [];
+  for (const name of files) {
+    try {
+      entries.push(JSON.parse(readFileSync(join(dir, name), 'utf8')) as RosterEntry);
+    } catch (error) {
+      log.warn(`readFolderEntries: bad entry ${name}: ${toLogFormat(error)}`);
+    }
+  }
+  return entries;
+}
+
+// --- directory backend --------------------------------------------------------------
+
+// The per-install secret that owns our directory entry (the directory refuses updates
+// to an entry from anyone presenting a different one).
+async function directorySecret(): Promise<string> {
+  const existing = itemStorage.get('personasDirectorySecret');
+  if (existing) {
+    return existing;
+  }
+  const secret = randomBytes(32).toString('hex');
+  await itemStorage.put('personasDirectorySecret', secret);
+  return secret;
+}
+
+// One HTTPS call to the directory on our server. Same host, port and private CA as the
+// chat server: the request goes through the localhost relay to the gateway.
+function directoryRequest(
+  method: 'GET' | 'PUT',
+  path: string,
+  body?: unknown,
+  secret?: string
+): Promise<unknown> {
+  const { serverUrl, certificateAuthority } = window.SignalContext.config;
+  const url = new URL(`${DIRECTORY_PATH}${path}`, serverUrl);
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      url,
+      {
+        method,
+        ca: certificateAuthority,
+        timeout: DIRECTORY_TIMEOUT_MS,
+        headers: {
+          ...(payload ? { 'content-type': 'application/json' } : {}),
+          ...(secret ? { 'x-personas-directory-secret': secret } : {}),
+        },
+      },
+      res => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          let parsed: unknown;
+          let failure: Error | undefined;
+          if (status >= 400) {
+            failure = new Error(`directory ${method} ${path || '/'}: HTTP ${status} ${raw}`);
+          } else {
+            try {
+              parsed = raw ? JSON.parse(raw) : undefined;
+            } catch (error) {
+              failure = error as Error;
+            }
+          }
+          if (failure) {
+            reject(failure);
+          } else {
+            resolve(parsed);
+          }
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('directory request timed out')));
+    req.on('error', reject);
+    if (payload) {
+      req.write(payload);
+    }
+    req.end();
+  });
+}
+
+async function publishToDirectory(): Promise<void> {
+  const entry = await myEntry();
+  if (!entry) {
     return;
   }
+  try {
+    const { aci, ...rest } = entry;
+    await directoryRequest('PUT', `/${aci}`, rest, await directorySecret());
+    log.info(`publishToDirectory: published ${entry.name} (${aci})`);
+  } catch (error) {
+    log.warn(`publishToDirectory: ${toLogFormat(error)}`);
+  }
+}
 
-  for (const name of files) {
-    let entry: RosterEntry | undefined;
-    try {
-      entry = JSON.parse(readFileSync(join(dir, name), 'utf8')) as RosterEntry;
-    } catch (error) {
-      log.warn(`seedPeersFromRoster: bad entry ${name}: ${toLogFormat(error)}`);
-      continue;
+async function readDirectoryEntries(): Promise<Array<RosterEntry>> {
+  try {
+    const list = await directoryRequest('GET', '');
+    if (!Array.isArray(list)) {
+      return [];
     }
+    // Untrusted input: keep only well-formed entries.
+    return list.filter(
+      (entry): entry is RosterEntry =>
+        typeof entry?.aci === 'string' &&
+        isAciString(entry.aci) &&
+        typeof entry.e164 === 'string' &&
+        (entry.profileKey === undefined || typeof entry.profileKey === 'string') &&
+        (entry.name === undefined || typeof entry.name === 'string')
+    );
+  } catch (error) {
+    log.warn(`readDirectoryEntries: ${toLogFormat(error)}`);
+    return [];
+  }
+}
 
+// --- seeding (both backends) --------------------------------------------------------
+
+async function seedPeers(entries: Array<RosterEntry>): Promise<void> {
+  const myAci = itemStorage.user.getAci();
+
+  for (const entry of entries) {
     if (!entry?.aci || entry.aci === myAci || seededAcis.has(entry.aci)) {
       continue;
     }
@@ -128,7 +266,7 @@ async function seedPeersFromRoster(dir: string): Promise<void> {
     conversation.set({ active_at: Date.now() });
     drop(DataWriter.updateConversation(conversation.attributes));
     drop(conversation.getProfiles());
-    log.info(`seedPeersFromRoster: seeded ${entry.e164} (${entry.aci})`);
+    log.info(`seedPeers: seeded ${entry.name ?? entry.e164} (${entry.aci})`);
 
     if (!hasAutoOpened) {
       hasAutoOpened = true;
@@ -148,8 +286,19 @@ export function startPersonaRosterSync(): void {
     return;
   }
 
-  log.info(`startPersonaRosterSync: using roster dir ${dir}`);
-  drop(writeMyRosterEntry(dir));
-  drop(seedPeersFromRoster(dir));
-  setInterval(() => drop(seedPeersFromRoster(dir)), POLL_INTERVAL_MS);
+  if (process.env.PERSONAS_ROSTER_DIR) {
+    log.info(`startPersonaRosterSync: using roster dir ${dir}`);
+    drop(writeMyRosterEntry(dir));
+    const poll = () => drop(seedPeers(readFolderEntries(dir)));
+    poll();
+    setInterval(poll, POLL_INTERVAL_MS);
+    return;
+  }
+
+  log.info('startPersonaRosterSync: using the member directory');
+  drop(publishToDirectory());
+  const poll = async () => seedPeers(await readDirectoryEntries());
+  drop(poll());
+  setInterval(() => drop(poll()), POLL_INTERVAL_MS);
+  setInterval(() => drop(publishToDirectory()), REPUBLISH_INTERVAL_MS);
 }

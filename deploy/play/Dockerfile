@@ -84,12 +84,11 @@ COPY deploy/play/tls-relay.js /usr/local/lib/personas/tls-relay.js
 # running as an unprivileged user plus --no-sandbox is the usual container compromise.
 RUN useradd -m -u 1000 -s /bin/bash member 2>/dev/null || useradd -m -s /bin/bash member; \
     chmod +x /usr/local/bin/personas-play \
- && mkdir -p /shared/roster /shared/keys && chown -R member /shared /app/config \
+ && mkdir -p /shared/keys && chown -R member /shared /app/config \
  && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 USER member
 ENV HOME=/home/member \
     DISPLAY=:1 \
-    PERSONAS_ROSTER_DIR=/shared/roster \
     PERSONAS_KEYS_DIR=/shared/keys
 EXPOSE 6080
 ENTRYPOINT ["/usr/local/bin/personas-play"]

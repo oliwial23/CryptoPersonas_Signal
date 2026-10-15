@@ -5,11 +5,11 @@ in its own container on a virtual display, and people play through their browser
 
     https://signalserver.umiacs.umd.edu/play/
 
-Nobody installs anything. Because all members run on one host, the shared
-`PERSONAS_ROSTER_DIR` design (phantom bundle, barrier anchor, sender-key send state) works
-unchanged — it is just a Docker volume. Stage 2 (installable clients on people's own
-machines) needs that coordination moved into a server first; see
-`PERSONAS_SERVER_DEPLOY.md` §8.
+Nobody installs anything. The members run exactly the code an installed client runs, so
+this is also the test bed for the downloadable client: nothing is shared between them
+through the filesystem except the proving keys. The phantom bundle and chain travel over
+Signal (`ts/services/personasPhantom.preload.ts`), and members find each other through
+the directory service (`directory.js`).
 
 ```
  browser ──https──▶ signalserver.umiacs.umd.edu:443   (UMIACS LB, terminates TLS)
@@ -18,9 +18,10 @@ machines) needs that coordination moved into a server first; see
                 VM :8443  gateway (Caddy)
                  ├─ /play/            landing page          ┐ basic auth
                  ├─ /play/<member>/   member's noVNC :6080   ┘
+                 ├─ /personas/directory  → directory.js        (member discovery)
                  ├─ /v1|v2/groups, /v1/storage → storage-service :8090
                  └─ everything else            → chat server     :8080
-   members: alice bob carol dave erin  — Electron on Xvfb, sharing roster+keys volumes,
+   members: alice bob carol dave erin  — Electron on Xvfb, sharing only the keys volume,
             each reaching the gateway through a TLS relay on its own 127.0.0.1
 ```
 

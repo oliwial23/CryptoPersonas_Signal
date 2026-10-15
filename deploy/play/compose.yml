@@ -13,9 +13,9 @@ x-member: &member
   shm_size: 1g          # Chromium renders through /dev/shm; Docker's 64 MB default crashes tabs
   mem_limit: 1600m
   volumes:
-    # ONE roster dir and ONE keys dir for every member: the phantom bundle, barrier anchor
-    # and send state are coordinated through these files (see PERSONAS_SERVER_DEPLOY.md §8).
-    - roster:/shared/roster
+    # ONE keys dir for every member: all must prove against an identical key set. Nothing
+    # else is shared through the filesystem: the phantom bundle and chain travel over
+    # Signal, and members find each other through the directory service.
     - keys:/shared/keys
   # Members reach the backend through the gateway on the compose network, via a TLS relay
   # on their own 127.0.0.1 (entrypoint.sh) -- never through the public URL, which would
@@ -38,35 +38,44 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./index.html:/srv/play/index.html:ro
 
+  # Member directory (directory.js): clients publish themselves and poll for each other.
+  directory:
+    image: node:24.17.0-bookworm-slim
+    restart: unless-stopped
+    command: ["node", "/srv/directory.js", "8080", "/data"]
+    volumes:
+      - ./directory.js:/srv/directory.js:ro
+      - directory:/data
+
   alice:
     <<: *member
     hostname: alice
-    volumes: [roster:/shared/roster, keys:/shared/keys, alice:/home/member]
+    volumes: [keys:/shared/keys, alice:/home/member]
     # alice generates the shared proving keys; the others wait for them (entrypoint.sh).
     environment: { <<: *member-env, PERSONAS_INSTANCE: alice, PERSONAS_NUMBER: "+12025550001", PERSONAS_KEYGEN_LEADER: "1" }
   bob:
     <<: *member
     hostname: bob
-    volumes: [roster:/shared/roster, keys:/shared/keys, bob:/home/member]
+    volumes: [keys:/shared/keys, bob:/home/member]
     environment: { <<: *member-env, PERSONAS_INSTANCE: bob, PERSONAS_NUMBER: "+12025550002" }
   carol:
     <<: *member
     hostname: carol
-    volumes: [roster:/shared/roster, keys:/shared/keys, carol:/home/member]
+    volumes: [keys:/shared/keys, carol:/home/member]
     environment: { <<: *member-env, PERSONAS_INSTANCE: carol, PERSONAS_NUMBER: "+12025550003" }
   dave:
     <<: *member
     hostname: dave
-    volumes: [roster:/shared/roster, keys:/shared/keys, dave:/home/member]
+    volumes: [keys:/shared/keys, dave:/home/member]
     environment: { <<: *member-env, PERSONAS_INSTANCE: dave, PERSONAS_NUMBER: "+12025550004" }
   erin:
     <<: *member
     hostname: erin
-    volumes: [roster:/shared/roster, keys:/shared/keys, erin:/home/member]
+    volumes: [keys:/shared/keys, erin:/home/member]
     environment: { <<: *member-env, PERSONAS_INSTANCE: erin, PERSONAS_NUMBER: "+12025550005" }
 
 volumes:
-  roster:
+  directory:
   keys:
   alice:
   bob:

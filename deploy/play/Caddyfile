@@ -37,6 +37,13 @@
 			respond "no such member" 404
 		}
 
+		# --- member directory (directory.js): how clients find each other -----------
+		# Not behind the /play password: installed clients call it. Writes are guarded
+		# per entry by the secret its owner sent first.
+		handle /personas/directory* {
+			reverse_proxy directory:8080
+		}
+
 		# --- Signal backend (same routing as plain-proxy.sh / tls-proxy.sh) -------------
 		handle @storage {
 			reverse_proxy {$STORAGE_UPSTREAM:host.docker.internal:8090}

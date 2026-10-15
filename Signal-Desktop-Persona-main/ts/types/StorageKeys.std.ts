@@ -64,6 +64,8 @@ export type StorageAccessType = {
   personasPhantomBundle: string;
   // Personas demo: `${bundleFingerprint}:${serviceId}` for each member already sent it.
   personasPhantomSentTo: Array<string>;
+  // Personas demo: owns our entry in the member directory (personaRoster).
+  personasDirectorySecret: string;
   'always-relay-calls': boolean;
   'audio-notification': boolean;
   'auto-download-update': boolean;
@@ -451,6 +453,7 @@ const STORAGE_KEYS_TO_REMOVE_AFTER_UNLINK = [
   'personasPhantomChain',
   'personasPhantomBundle',
   'personasPhantomSentTo',
+  'personasDirectorySecret',
   'lastCallQualitySurveyTime',
   'lastCallQualityFailureSurveyTime',
   'cqsTestMode',
