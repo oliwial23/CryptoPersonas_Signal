@@ -37,6 +37,10 @@
 import { randomBytes } from 'node:crypto';
 
 import type { ConversationModel } from '../models/conversations.preload.ts';
+import {
+  personasExtrasChanged,
+  registerPersistedExtra,
+} from './personasPersistence.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
@@ -55,6 +59,26 @@ const CONTEXT_BYTES = 6; // 48 bits
 
 // name -> context, for this process. Rebuilt from announcements as they arrive.
 const contextByTopic = new Map<string, number>();
+
+// Saved with the member state (personasPersistence): a topic's context is announced once,
+// so a restart would otherwise lose every topic (and its rate-limited personas).
+registerPersistedExtra('topics', {
+  snapshot: () => listTopics(),
+  restore: value => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+    for (const topic of value) {
+      if (
+        typeof topic?.name === 'string' &&
+        typeof topic?.context === 'number' &&
+        Number.isSafeInteger(topic.context)
+      ) {
+        rememberTopic({ name: topic.name, context: topic.context });
+      }
+    }
+  },
+});
 
 export function drawRandomContext(): number {
   // Cryptographically random, not Math.random: the context should be unguessable, so
@@ -109,10 +133,12 @@ function rememberTopic(announcement: PersonaTopicAnnouncement): void {
         `rememberTopic: conflicting contexts for "${name}" (${existing} vs ${announcement.context}); keeping ${winner}`
       );
       contextByTopic.set(name, winner);
+      personasExtrasChanged();
     }
     return;
   }
   contextByTopic.set(name, announcement.context);
+  personasExtrasChanged();
   log.info(`rememberTopic: "${name}" -> context ${announcement.context}`);
   // Surface it to the composer's picker. The renderer cannot import this module
   // (preload), so redux is the bridge.

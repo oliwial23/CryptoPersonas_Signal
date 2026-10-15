@@ -50,6 +50,7 @@ fn placeholder_keys() -> personas_bulletin::replica::ReplicaKeys {
         pseudo: vk.clone(),
         pseudo_rate: vk.clone(),
         scan: vk.clone(),
+        badge_request: vk.clone(),
         pseudonym_pred: vk,
     }
 }
@@ -183,6 +184,7 @@ mod e2e {
                 standard: std_vk,
                 pseudo: pseudo_vk,
                 pseudo_rate: scan_vk.clone(), // unused by this suite
+                badge_request: scan_vk.clone(), // unused by this suite
                 scan: scan_vk,
                 pseudonym_pred: pred_vk,
             },
@@ -190,6 +192,9 @@ mod e2e {
                 standard: std_pk,
                 pseudo: pseudo_pk,
                 pseudo_rate: scan_pk.clone(), // unused by this suite
+                badge_request: scan_pk.clone(), // unused by this suite
+                authorship_pred: pred_pk.clone(), // unused by this suite
+                badge_pred: pred_pk.clone(), // unused by this suite
                 scan: scan_pk,
                 pseudonym_pred: pred_pk,
             },
@@ -630,6 +635,179 @@ mod e2e {
         assert_eq!(
             v1.ingest_incoming(&stale_incoming).unwrap().unwrap(),
             Status::Rejected("scan names a superseded barrier"),
+        );
+    }
+
+    /// A member that restarts comes back as itself: its saved object and its journalled
+    /// records restore a replica identical to its peers', it is still on the bulletin,
+    /// a pseudonym keeps its petname, and its next post is accepted by everyone.
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_restart_restores_member_and_replica() {
+        let mut rng = StdRng::seed_from_u64(31);
+        let keys = keygen(&mut rng);
+        let conv = ConversationId("restart".into());
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+
+        let mut poster = Msg::new(
+            transport.clone(),
+            conv.clone(),
+            keys.replica.clone(),
+            config(),
+            Some(Member::create(keys.member.clone(), &mut rng)),
+        );
+        let mut peer = Msg::new(
+            transport.clone(),
+            conv.clone(),
+            keys.replica.clone(),
+            config(),
+            Some(Member::create(keys.member.clone(), &mut rng)),
+        );
+        for e in [poster.emit_join().unwrap(), peer.emit_join().unwrap()] {
+            deliver(&mut poster, &e);
+            deliver(&mut peer, &e);
+        }
+        let first = poster
+            .emit_post_pseudo(&mut rng, "before the restart", F::from(9))
+            .unwrap();
+        deliver(&mut peer, &first);
+
+        // What a client persists: the member's object (saved BEFORE the post went out)
+        // and every record with the barrier it sits at.
+        let state = poster.export_member_state().unwrap().unwrap();
+        let records = poster.replica().seen_with_barriers();
+        let barrier = poster.replica().current_barrier();
+        drop(poster);
+
+        let mut restored = Msg::restore(
+            transport,
+            conv,
+            keys.replica.clone(),
+            config(),
+            Some(Member::from_state(&state, keys.member.clone()).unwrap()),
+            records,
+            barrier,
+        );
+        assert_eq!(fingerprint(&restored), fingerprint(&peer));
+        assert!(restored.member_on_bulletin(), "the restored object is on the tree");
+
+        let second = restored
+            .emit_post_pseudo(&mut rng, "after the restart", F::from(9))
+            .unwrap();
+        assert_eq!(
+            second.persona, first.persona,
+            "the same secret key and context give the same pseudonym"
+        );
+        assert_eq!(
+            deliver(&mut peer, &second).unwrap().unwrap(),
+            Status::Applied,
+            "a peer accepts the restored member's post"
+        );
+        assert_eq!(fingerprint(&restored), fingerprint(&peer));
+    }
+
+    /// The two-step scan. A prepared scan blocks every other emit, is not reflected in
+    /// the saved state, goes stale when a settlement re-pins the callback roots, and can
+    /// then be discarded — restoring the exact pre-scan object — and redone. The redone
+    /// scan is accepted everywhere and absorbs the ban. A committed scan cannot be
+    /// discarded.
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_prepared_scan_is_checked_before_release() {
+        let mut rng = StdRng::seed_from_u64(37);
+        let keys = keygen(&mut rng);
+        let conv = ConversationId("prepared-scan".into());
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let new_member = |rng: &mut StdRng| {
+            Msg::new(
+                transport.clone(),
+                conv.clone(),
+                keys.replica.clone(),
+                config(),
+                Some(Member::create(keys.member.clone(), rng)),
+            )
+        };
+        let mut poster = new_member(&mut rng);
+        let mut v1 = new_member(&mut rng);
+        let mut v2 = new_member(&mut rng);
+
+        let joins = [
+            poster.emit_join().unwrap(),
+            v1.emit_join().unwrap(),
+            v2.emit_join().unwrap(),
+        ];
+        for e in &joins {
+            for m in [&mut poster, &mut v1, &mut v2] {
+                deliver(m, e);
+            }
+        }
+        let post = poster
+            .emit_post_pseudo(&mut rng, "post", F::from(1))
+            .unwrap();
+        for m in [&mut poster, &mut v1, &mut v2] {
+            deliver(m, &post);
+        }
+
+        let before = poster.export_member_state().unwrap().unwrap();
+        poster.prepare_scan(&mut rng).expect("prepare");
+        assert!(poster.scan_still_valid());
+        assert!(
+            matches!(
+                poster.emit_post_anon(&mut rng, "x"),
+                Err(SendError::ScanPending)
+            ),
+            "nothing else may be produced while a scan is pending"
+        );
+        assert_eq!(
+            poster.export_member_state().unwrap().unwrap(),
+            before,
+            "a prepared scan revealed nothing, so the saved state is the pre-scan one"
+        );
+
+        // A ban settles on every replica: the callback roots move, the prepared scan is stale.
+        let poll = v1
+            .emit_poll(
+                "ban?",
+                render::ban_poll_options(),
+                PollKind::Ban,
+                Some(post.eh),
+            )
+            .unwrap();
+        for m in [&mut poster, &mut v1, &mut v2] {
+            deliver(m, &poll);
+        }
+        for e in [
+            v1.emit_vote(&mut rng, poll.eh, BAN_OPTION).unwrap(),
+            v2.emit_vote(&mut rng, poll.eh, BAN_OPTION).unwrap(),
+        ] {
+            for m in [&mut poster, &mut v1, &mut v2] {
+                deliver(m, &e);
+            }
+        }
+        for m in [&mut poster, &mut v1, &mut v2] {
+            m.barrier();
+        }
+        assert!(!poster.scan_still_valid(), "the settlement made the scan stale");
+
+        poster.discard_scan().unwrap();
+        assert_eq!(
+            poster.export_member_state().unwrap().unwrap(),
+            before,
+            "a discard restores the exact pre-scan object"
+        );
+
+        poster.prepare_scan(&mut rng).expect("re-prepare");
+        assert!(poster.scan_still_valid());
+        let scan = poster.commit_scan().unwrap();
+        assert!(matches!(poster.discard_scan(), Err(SendError::NoPreparedScan)));
+        for m in [&mut v1, &mut v2] {
+            assert_eq!(deliver(m, &scan).unwrap().unwrap(), Status::Applied);
+        }
+        assert_eq!(fingerprint(&poster), fingerprint(&v1));
+        assert_ne!(
+            poster.member().unwrap().user.data.banned,
+            F::from(0u64),
+            "the redone scan absorbed the ban"
         );
     }
 

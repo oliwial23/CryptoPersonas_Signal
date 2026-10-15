@@ -79,12 +79,12 @@ fn ticket_domain_top<F: PrimeField>() -> F {
 
 /// The membership leaf for a called ticket: `H(tik, arg, time)`.
 fn memb_leaf<F: PrimeField + Absorb>(tik: F, arg: F, time: F) -> F {
-    <Poseidon<2>>::hash(&[tik, arg, time])
+    super::tree::poseidon2(&[tik, arg, time])
 }
 
 /// The nonmembership leaf for a range: `H(lo, hi, epoch)`.
 fn range_leaf<F: PrimeField + Absorb>(lo: F, hi: F, epoch: F) -> F {
-    <Poseidon<2>>::hash(&[lo, hi, epoch])
+    super::tree::poseidon2(&[lo, hi, epoch])
 }
 
 /// A nonmembership witness: the range `[lo, hi)` bracketing the ticket, the epoch

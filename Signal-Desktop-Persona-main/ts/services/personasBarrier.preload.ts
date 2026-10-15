@@ -279,7 +279,9 @@ let touchInterval: NodeJS.Timeout | undefined;
 // mode of a lock left behind by a crashed instance is exactly the state this is meant
 // to escape. An mtime needs no cleanup and expires on its own.
 function startLivenessTouch(): void {
-  if (touchInterval) {
+  // Only the roster-dir schedule file has an anchor to defend. A schedule taken from
+  // the phantom bundle is fixed by the bundle and needs no liveness signal.
+  if (touchInterval || getPhantomSchedule()) {
     return;
   }
   const dir = getRosterDir();

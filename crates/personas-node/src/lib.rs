@@ -19,16 +19,14 @@ use std::sync::Arc;
 use ark_serialize::CanonicalSerialize;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use personas_bulletin::merkle::params::ensure_merkle_keys;
 use personas_bulletin::replica::record::{Eh, PollKind};
 use personas_bulletin::replica::{Config as ReplicaConfig, ReplicaKeys, Status};
 use personas_core::F;
-use personas_messenger::{
-    carriage, Emitted, Heartbeat, Member, MemberKeys, Messenger,
-};
+use personas_messenger::{Emitted, Heartbeat, Member, MemberKeys, Messenger, carriage};
 use transport_api::{ConversationId, Incoming, MessageId, Transport};
 use transport_mock::MockTransport;
 
@@ -63,6 +61,12 @@ pub struct EngineOptions {
     /// with explicit `barrier()` calls.
     pub heartbeat_anchor_ms: Option<f64>,
     pub heartbeat_period_ms: Option<f64>,
+    /// A member's saved private state ([`Engine::export_member_state`]) to continue as,
+    /// instead of minting a new member. Ignored for an observer.
+    pub member_state: Option<Buffer>,
+    /// A file to journal every seen record to (with its barrier), and to restore the
+    /// replica from at construction. Public data: the records every member holds.
+    pub journal_path: Option<String>,
 }
 
 /// A record produced by an `emit*` call: the CBOR bytes to carry, its envelope
@@ -129,6 +133,78 @@ pub struct Engine {
     authorship_vk: personas_core::VK,
     /// Verifying key for `badge_pred`, so a recipient can check a badge proof.
     badge_vk: personas_core::VK,
+    /// The record journal, when persistence is on.
+    journal: Option<Journal>,
+}
+
+/// An append-only file of `(first_barrier, record)` entries — everything needed to
+/// rebuild the replica after a restart ([`Messenger::restore`]). A record is appended
+/// again when its barrier changes (an authoritative re-ingest); the last entry wins.
+///
+/// Layout: `PZJ1`, then entries of `[u64 LE barrier][u32 LE length][record bytes]`. A
+/// torn final entry (a crash mid-append) is ignored on read.
+struct Journal {
+    file: std::fs::File,
+    written: std::collections::HashMap<Eh, u64>,
+}
+
+const JOURNAL_MAGIC: &[u8; 4] = b"PZJ1";
+
+impl Journal {
+    /// Open (creating if needed) and read back the records, last entry per record wins.
+    fn open(path: &str) -> std::io::Result<(Self, Vec<(u64, Vec<u8>)>)> {
+        use std::io::{Read, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw)?;
+        if raw.is_empty() {
+            file.write_all(JOURNAL_MAGIC)?;
+            file.sync_data()?;
+        } else if raw.len() < 4 || &raw[..4] != JOURNAL_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a personas record journal",
+            ));
+        }
+        let mut latest: std::collections::BTreeMap<Eh, (u64, Vec<u8>)> =
+            std::collections::BTreeMap::new();
+        let mut at = 4;
+        while raw.len() >= at + 12 {
+            let barrier = u64::from_le_bytes(raw[at..at + 8].try_into().expect("8 bytes"));
+            let len =
+                u32::from_le_bytes(raw[at + 8..at + 12].try_into().expect("4 bytes")) as usize;
+            let Some(bytes) = raw.get(at + 12..at + 12 + len) else {
+                break; // torn tail
+            };
+            if let Ok((_, eh)) = personas_bulletin::replica::record::decode(bytes) {
+                latest.insert(eh, (barrier, bytes.to_vec()));
+            }
+            at += 12 + len;
+        }
+        let written = latest.iter().map(|(eh, (b, _))| (*eh, *b)).collect();
+        let records = latest.into_values().collect();
+        Ok((Self { file, written }, records))
+    }
+
+    /// Append `bytes` at `barrier` unless that is already what the journal holds.
+    fn record(&mut self, eh: Eh, barrier: u64, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        if self.written.get(&eh) == Some(&barrier) {
+            return Ok(());
+        }
+        let mut entry = Vec::with_capacity(12 + bytes.len());
+        entry.extend_from_slice(&barrier.to_le_bytes());
+        entry.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        entry.extend_from_slice(bytes);
+        self.file.write_all(&entry)?;
+        self.file.sync_data()?;
+        self.written.insert(eh, barrier);
+        Ok(())
+    }
 }
 
 fn eh_to_hex(eh: &Eh) -> String {
@@ -136,8 +212,7 @@ fn eh_to_hex(eh: &Eh) -> String {
 }
 
 fn eh_from_hex(s: &str) -> napi::Result<Eh> {
-    let bytes = hex::decode(s)
-        .map_err(|e| napi::Error::from_reason(format!("bad eh hex: {e}")))?;
+    let bytes = hex::decode(s).map_err(|e| napi::Error::from_reason(format!("bad eh hex: {e}")))?;
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| napi::Error::from_reason("eh must be 32 bytes"))?;
@@ -177,7 +252,12 @@ impl Engine {
         let is_member = options.member.unwrap_or(true);
         let member = if is_member {
             let member_keys = MemberKeys::from_server_keys(&keys);
-            Some(Member::create(member_keys, &mut rng))
+            Some(match &options.member_state {
+                Some(state) => Member::from_state(state.as_ref(), member_keys).map_err(|e| {
+                    napi::Error::from_reason(format!("member_state is unreadable: {e}"))
+                })?,
+                None => Member::create(member_keys, &mut rng),
+            })
         } else {
             None
         };
@@ -195,13 +275,42 @@ impl Engine {
         let authorship_vk = keys.authorship_pred_verifying_key.clone();
         let badge_vk = keys.badge_pred_verifying_key.clone();
 
-        let mut inner: Engine32 =
-            Messenger::new(transport, conversation, replica_keys, config, member);
+        let heartbeat = match (options.heartbeat_anchor_ms, options.heartbeat_period_ms) {
+            (Some(anchor), Some(period)) => Some(Heartbeat::new(anchor as u64, period as u64)),
+            _ => None,
+        };
+        let (journal, records) = match &options.journal_path {
+            Some(path) => {
+                let (journal, records) = Journal::open(path)
+                    .map_err(|e| napi::Error::from_reason(format!("journal {path}: {e}")))?;
+                (Some(journal), records)
+            }
+            None => (None, Vec::new()),
+        };
+        let mut inner: Engine32 = if records.is_empty() {
+            Messenger::new(transport, conversation, replica_keys, config, member)
+        } else {
+            // Resume at the barrier the schedule says it is now (or, without one, the
+            // latest journalled barrier).
+            let latest = records.iter().map(|(b, _)| *b).max().unwrap_or(0);
+            let now = heartbeat
+                .as_ref()
+                .map(|h| h.barrier_at(now_ms()))
+                .unwrap_or(latest)
+                .max(latest);
+            Messenger::restore(
+                transport,
+                conversation,
+                replica_keys,
+                config,
+                member,
+                records,
+                now,
+            )
+        };
 
-        if let (Some(anchor), Some(period)) =
-            (options.heartbeat_anchor_ms, options.heartbeat_period_ms)
-        {
-            inner = inner.with_heartbeat(Heartbeat::new(anchor as u64, period as u64));
+        if let Some(heartbeat) = heartbeat {
+            inner = inner.with_heartbeat(heartbeat);
         }
 
         Ok(Self {
@@ -209,17 +318,86 @@ impl Engine {
             rng,
             authorship_vk,
             badge_vk,
+            journal,
         })
     }
 
-    fn emit<T>(
-        r: Result<Emitted, T>,
-    ) -> napi::Result<JsEmitted>
+    fn emit<T>(&mut self, r: Result<Emitted, T>) -> napi::Result<JsEmitted>
     where
         T: std::fmt::Display,
     {
-        r.map(to_emitted)
-            .map_err(|e| napi::Error::from_reason(format!("emit failed: {e}")))
+        let emitted = r.map_err(|e| napi::Error::from_reason(format!("emit failed: {e}")))?;
+        // The messenger folded our own record into the replica: journal it.
+        self.journal_record(emitted.eh, &emitted.bytes)?;
+        Ok(to_emitted(emitted))
+    }
+
+    /// Journal a record the replica has seen, at its current barrier. A journal write
+    /// failure is an error: a record missing from the journal would be missing after a
+    /// restart, which forks this member off the group.
+    fn journal_record(&mut self, eh: Eh, bytes: &[u8]) -> napi::Result<()> {
+        let Some(journal) = self.journal.as_mut() else {
+            return Ok(());
+        };
+        let Some(barrier) = self.inner.replica().first_barrier(&eh) else {
+            return Ok(());
+        };
+        journal
+            .record(eh, barrier, bytes)
+            .map_err(|e| napi::Error::from_reason(format!("journal write failed: {e}")))
+    }
+
+    /// This member's private state, to save ENCRYPTED and pass back as `memberState`
+    /// after a restart. Save it after every emit and before sending what was emitted:
+    /// restoring a state older than a record already sent would spend a revealed
+    /// nullifier again and link that record to its author. While a scan is prepared
+    /// but not committed, this is the pre-scan state.
+    #[napi]
+    pub fn export_member_state(&self) -> napi::Result<Option<Buffer>> {
+        match self.inner.export_member_state() {
+            None => Ok(None),
+            Some(Ok(bytes)) => Ok(Some(bytes.into())),
+            Some(Err(e)) => Err(napi::Error::from_reason(format!("export failed: {e}"))),
+        }
+    }
+
+    /// Whether this member's current object is on the bulletin — it has joined and its
+    /// records are part of this replica. After a restore, `true` means no new join.
+    #[napi]
+    pub fn member_on_bulletin(&self) -> bool {
+        self.inner.member_on_bulletin()
+    }
+
+    /// Prove a scan without releasing it; returns its envelope hash. Check
+    /// [`scan_still_valid`](Self::scan_still_valid), then [`commit_scan`] (which returns
+    /// the record to send) or [`discard_scan`]. Every other emit is refused meanwhile.
+    #[napi]
+    pub fn prepare_scan(&mut self) -> napi::Result<String> {
+        self.inner
+            .prepare_scan(&mut self.rng)
+            .map(|eh| eh_to_hex(&eh))
+            .map_err(|e| napi::Error::from_reason(format!("scan failed: {e}")))
+    }
+
+    /// Whether the prepared scan's callback roots are still this replica's current ones.
+    #[napi]
+    pub fn scan_still_valid(&self) -> bool {
+        self.inner.scan_still_valid()
+    }
+
+    /// Release the prepared scan: fold it in and return it to send. Irrevocable.
+    #[napi]
+    pub fn commit_scan(&mut self) -> napi::Result<JsEmitted> {
+        let committed = self.inner.commit_scan();
+        self.emit(committed)
+    }
+
+    /// Abandon the prepared scan (never released) and restore the pre-scan object.
+    #[napi]
+    pub fn discard_scan(&mut self) -> napi::Result<()> {
+        self.inner
+            .discard_scan()
+            .map_err(|e| napi::Error::from_reason(format!("discard failed: {e}")))
     }
 
     /// Prove that two of MY pseudonyms share an author. Returns the encoded proof plus
@@ -234,11 +412,7 @@ impl Engine {
     /// statement, which is why it needed no protocol change (see
     /// PERSONAS_ZK_WORKPLAN.md step 3).
     #[napi]
-    pub fn emit_authorship(
-        &mut self,
-        context_a: f64,
-        context_b: f64,
-    ) -> napi::Result<Buffer> {
+    pub fn emit_authorship(&mut self, context_a: f64, context_b: f64) -> napi::Result<Buffer> {
         self.guard_not_scanning("emit_authorship")?;
         if context_a == context_b {
             // A pseudonym is trivially itself; the proof would verify and say nothing.
@@ -314,16 +488,15 @@ impl Engine {
                 "emit_badge_request: slot must be 1 (Faculty), 2 (Student) or 3 (Industry)",
             ));
         }
-        Self::emit(self.inner.emit_badge_request(&mut self.rng, slot as u8))
+        {
+            let r = self.inner.emit_badge_request(&mut self.rng, slot as u8);
+            self.emit(r)
+        }
     }
 
     /// Approve a badge request, naming the request record's envelope hash.
     #[napi]
-    pub fn emit_badge_approve(
-        &mut self,
-        request: String,
-        slot: u32,
-    ) -> napi::Result<JsEmitted> {
+    pub fn emit_badge_approve(&mut self, request: String, slot: u32) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_badge_approve")?;
         if slot < 1 || slot > 3 {
             return napi::Result::Err(napi::Error::from_reason(
@@ -331,7 +504,10 @@ impl Engine {
             ));
         }
         let target = eh_from_hex(&request)?;
-        Self::emit(self.inner.emit_badge_approve(target, slot as u8))
+        {
+            let r = self.inner.emit_badge_approve(target, slot as u8);
+            self.emit(r)
+        }
     }
 
     /// Prove we hold `badge` (by NAME) in its slot. Returns the encoded proof.
@@ -356,15 +532,12 @@ impl Engine {
     /// the message: otherwise a valid Student proof could be displayed as Faculty.
     #[napi]
     pub fn verify_badge_proof(&self, proof: Buffer) -> Option<String> {
-        let (_slot, value) =
-            personas_core::verify_badge_proof(&self.badge_vk, proof.as_ref())?;
+        let (_slot, value) = personas_core::verify_badge_proof(&self.badge_vk, proof.as_ref())?;
         // Map back through the same table the prover used, so an unrecognised value is
         // reported as unverified rather than rendered as something plausible.
         ["Faculty", "Student", "Industry"]
             .iter()
-            .find(|name| {
-                personas_core::badge_value(name).map(|(_, v)| v) == Some(value)
-            })
+            .find(|name| personas_core::badge_value(name).map(|(_, v)| v) == Some(value))
             .map(|name| (*name).to_string())
     }
 
@@ -467,27 +640,32 @@ impl Engine {
     #[napi]
     pub fn emit_join(&mut self) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_join")?;
-        Self::emit(self.inner.emit_join())
+        {
+            let r = self.inner.emit_join();
+            self.emit(r)
+        }
     }
 
     /// Emit a pseudonymous post under `context` (the thread/topic the persona is
     /// scoped to). Generates a real Groth16 proof — seconds at production heights.
     #[napi]
-    pub fn emit_post_pseudo(
-        &mut self,
-        body: String,
-        context: f64,
-    ) -> napi::Result<JsEmitted> {
+    pub fn emit_post_pseudo(&mut self, body: String, context: f64) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_post_pseudo")?;
         let ctx = F::from(context as u64);
-        Self::emit(self.inner.emit_post_pseudo(&mut self.rng, body, ctx))
+        {
+            let r = self.inner.emit_post_pseudo(&mut self.rng, body, ctx);
+            self.emit(r)
+        }
     }
 
     /// Emit an anonymous post (no linkable persona).
     #[napi]
     pub fn emit_post_anon(&mut self, body: String) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_post_anon")?;
-        Self::emit(self.inner.emit_post_anon(&mut self.rng, body))
+        {
+            let r = self.inner.emit_post_anon(&mut self.rng, body);
+            self.emit(r)
+        }
     }
 
     /// Emit a rate-limited pseudonymous post as the `i`-th persona for `context`.
@@ -503,10 +681,10 @@ impl Engine {
         self.guard_not_scanning("emit_post_pseudo_rate")?;
         let ctx = F::from(context as u64);
         let idx = F::from(i as u64);
-        Self::emit(
-            self.inner
-                .emit_post_pseudo_rate(&mut self.rng, body, ctx, idx),
-        )
+        let r = self
+            .inner
+            .emit_post_pseudo_rate(&mut self.rng, body, ctx, idx);
+        self.emit(r)
     }
 
     /// Open a poll. `kind` is `"ban"` or `"standard"`; `target` (hex `Eh`) is the
@@ -526,14 +704,19 @@ impl Engine {
             other => {
                 return Err(napi::Error::from_reason(format!(
                     "unknown poll kind: {other}"
-                )))
+                )));
             }
         };
         let target_eh = match target {
             Some(s) => Some(eh_from_hex(&s)?),
             None => None,
         };
-        Self::emit(self.inner.emit_poll(question, options, poll_kind, target_eh))
+        {
+            let r = self
+                .inner
+                .emit_poll(question, options, poll_kind, target_eh);
+            self.emit(r)
+        }
     }
 
     /// Cast a ballot (`option` index) in the poll named by hex `Eh` `poll`.
@@ -541,7 +724,10 @@ impl Engine {
     pub fn emit_vote(&mut self, poll: String, option: u32) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_vote")?;
         let poll_eh = eh_from_hex(&poll)?;
-        Self::emit(self.inner.emit_vote(&mut self.rng, poll_eh, option))
+        {
+            let r = self.inner.emit_vote(&mut self.rng, poll_eh, option);
+            self.emit(r)
+        }
     }
 
     /// Rate the record named by hex `Eh` `target` by `delta` (§10).
@@ -549,14 +735,20 @@ impl Engine {
     pub fn emit_rate(&mut self, target: String, delta: i32) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_rate")?;
         let target_eh = eh_from_hex(&target)?;
-        Self::emit(self.inner.emit_rate(&mut self.rng, target_eh, delta as i8))
+        {
+            let r = self.inner.emit_rate(&mut self.rng, target_eh, delta as i8);
+            self.emit(r)
+        }
     }
 
     /// Emit a scan absorbing every callback invoked on this member since its last
     /// scan (§5.2) — how a banned member's ban becomes self-evident.
     #[napi]
     pub fn emit_scan(&mut self) -> napi::Result<JsEmitted> {
-        Self::emit(self.inner.emit_scan(&mut self.rng))
+        {
+            let r = self.inner.emit_scan(&mut self.rng);
+            self.emit(r)
+        }
     }
 
     /// Ingest a record that arrived over Desktop. `received_at_ms` is the service
@@ -566,9 +758,10 @@ impl Engine {
     pub fn ingest(&mut self, record: Buffer, received_at_ms: f64) -> napi::Result<JsStatus> {
         // The record's envelope hash, so the caller can find the resulting chat-log
         // entry (a post) after a successful ingest.
-        let eh = personas_bulletin::replica::record::decode(record.as_ref())
-            .map(|(_, eh)| eh_to_hex(&eh))
-            .unwrap_or_default();
+        let decoded_eh = personas_bulletin::replica::record::decode(record.as_ref())
+            .ok()
+            .map(|(_, eh)| eh);
+        let eh = decoded_eh.as_ref().map(eh_to_hex).unwrap_or_default();
         let carried = carriage::encode(record.as_ref());
         let incoming = Incoming::Message {
             id: MessageId("desktop".into()),
@@ -579,7 +772,11 @@ impl Engine {
             attachments: carried.attachment.into_iter().collect(),
             received_at: received_at_ms as u64,
         };
-        match self.inner.ingest_incoming(&incoming) {
+        let result = self.inner.ingest_incoming(&incoming);
+        if let (Some(Ok(_)), Some(decoded)) = (&result, decoded_eh) {
+            self.journal_record(decoded, record.as_ref())?;
+        }
+        match result {
             None => Err(napi::Error::from_reason(
                 "ingest: body carried no record (marker missing)",
             )),
@@ -785,3 +982,11 @@ impl Engine {
     }
 }
 
+/// Wall-clock milliseconds since the Unix epoch, for placing a restored replica on the
+/// shared barrier schedule.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}

@@ -51,6 +51,7 @@ use personas_core::{Args, ArgsVar, Cr, F, H, PK, Snark, persona};
 
 use zk_callbacks::generic::bulletin::PublicUserBul;
 use zk_callbacks::generic::object::Time;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use zk_callbacks::generic::user::User;
 use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
@@ -142,6 +143,39 @@ impl Member {
     /// Wrap an existing user (e.g. restored from disk).
     pub fn from_user(user: User<F, MsgUser>, keys: MemberKeys) -> Self {
         Self { user, keys }
+    }
+
+    /// The member's private state (its zk user object: secret key, commitment
+    /// randomness, nullifier, outstanding callbacks, badges, reputation), for saving.
+    ///
+    /// SECRET. Whoever holds these bytes can link every persona and anonymous post of
+    /// this member to each other and act as them; the caller must store them encrypted.
+    ///
+    /// ORDERING. Save the state an emit produced BEFORE sending the record. Each record
+    /// reveals the nullifier of the object it spends; restoring an older state after its
+    /// record went out would spend that object again, and two records with one nullifier
+    /// are provably from the same member — an anonymous post linked to its author.
+    pub fn export_state(&self) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+        export_user_state(&self.user)
+    }
+
+    /// Restore a member saved with [`export_state`](Self::export_state).
+    pub fn from_state(
+        bytes: &[u8],
+        keys: MemberKeys,
+    ) -> Result<Self, ark_serialize::SerializationError> {
+        let user = User::<F, MsgUser>::deserialize_with_mode(
+            bytes,
+            ark_serialize::Compress::No,
+            ark_serialize::Validate::Yes,
+        )?;
+        Ok(Self { user, keys })
+    }
+
+    /// Whether this member's current object is in `obj` — i.e. it has joined and its
+    /// latest record has been accepted, so it can prove membership.
+    pub fn is_on_bulletin<const OH: usize>(&self, obj: &MerkleObjStore<F, OH>) -> bool {
+        self.require_member(obj).is_ok()
     }
 
     /// This member's current object commitment — what a `Join` commits and what
@@ -593,4 +627,13 @@ pub fn open_poll(
         kind,
         target,
     }
+}
+
+/// Serialize a member's zk user object (see [`Member::export_state`]).
+pub(crate) fn export_user_state(
+    user: &User<F, MsgUser>,
+) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+    let mut bytes = Vec::new();
+    user.serialize_with_mode(&mut bytes, ark_serialize::Compress::No)?;
+    Ok(bytes)
 }

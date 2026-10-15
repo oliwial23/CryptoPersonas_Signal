@@ -26,6 +26,10 @@
 import { randomBytes } from 'node:crypto';
 
 import { createLogger } from '../logging/log.std.ts';
+import {
+  personasExtrasChanged,
+  registerPersistedExtra,
+} from './personasPersistence.preload.ts';
 
 const log = createLogger('personasPseudonyms');
 
@@ -43,6 +47,26 @@ export type PersonaPseudonym = {
 };
 
 const pseudonyms: Array<PersonaPseudonym> = [];
+
+// Saved with the member state (personasPersistence), so a restart keeps every
+// pseudonym: the nonce is the identity, and losing it means never posting as it again.
+registerPersistedExtra('pseudonyms', {
+  snapshot: () => pseudonyms.map(p => ({ ...p })),
+  restore: value => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+    const restored = value.filter(
+      (p): p is PersonaPseudonym =>
+        typeof p?.nonce === 'number' &&
+        Number.isSafeInteger(p.nonce) &&
+        typeof p?.index === 'number' &&
+        (p.petname === undefined || typeof p.petname === 'string')
+    );
+    pseudonyms.splice(0, pseudonyms.length, ...restored);
+    notify();
+  },
+});
 
 function drawNonce(): number {
   // Cryptographically random rather than sequential: a guessable nonce would let an
@@ -69,6 +93,7 @@ export function createPseudonym(): PersonaPseudonym {
   pseudonyms.push(entry);
   log.info(`createPseudonym: minted #${entry.index}`);
   notify();
+  personasExtrasChanged();
   return entry;
 }
 
@@ -89,6 +114,7 @@ export function recordPetname(nonce: number, petname: string): void {
   }
   entry.petname = petname;
   notify();
+  personasExtrasChanged();
 }
 
 /** Ensure at least one pseudonym exists, so the picker is never empty. */

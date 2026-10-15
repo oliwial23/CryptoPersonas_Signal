@@ -32,10 +32,8 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate
 use blake2::{Blake2s256, Digest};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use zk_callbacks::crypto::hash::HasherZK;
 use zk_callbacks::generic::object::{Com, Nul};
 use zk_callbacks::generic::user::ExecutedMethod;
-use zk_callbacks::impls::hash::Poseidon;
 
 use personas_core::{Args, Cr, F, Snark};
 
@@ -88,7 +86,7 @@ impl Eh {
     /// and unique per record (which keeps pseudonyms in different polls/targets
     /// unlinkable). It replaces the service's `fresh_context()`.
     pub fn context(&self) -> F {
-        <Poseidon<2>>::hash(&[F::from_le_bytes_mod_order(&self.0)])
+        crate::merkle::tree::poseidon2(&[F::from_le_bytes_mod_order(&self.0)])
     }
 }
 

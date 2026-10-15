@@ -30,7 +30,12 @@
 use ark_crypto_primitives::sponge::Absorb;
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use zk_callbacks::{crypto::hash::HasherZK, impls::hash::Poseidon};
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use ark_crypto_primitives::crh::{CRHScheme, poseidon::CRH};
+use ark_crypto_primitives::sponge::poseidon::{PoseidonConfig, find_poseidon_ark_and_mds};
 
 /// The value stored in an unfilled leaf slot.
 ///
@@ -49,7 +54,55 @@ pub fn empty_leaf<F: PrimeField>() -> F {
 /// with [`Poseidon::hash_in_zk`] over the same two-element input in the same
 /// (left, right) order.
 pub fn hash_pair<F: PrimeField + Absorb>(left: F, right: F) -> F {
-    <Poseidon<2>>::hash(&[left, right])
+    poseidon2(&[left, right])
+}
+
+/// The system Poseidon, `zk_callbacks`' `Poseidon<2>::hash`, with its parameters
+/// generated once instead of on every call.
+///
+/// `Poseidon<2>::hash` re-derives the round constants and MDS matrix (a Grain LFSR run)
+/// for every single hash. That dominated the replica's cost: a rebuild of a height-32
+/// tree is thousands of hashes, so one incoming post cost seconds on the UI thread.
+/// The parameters are a pure function of the field, so caching them changes nothing
+/// about the output; `tests::cached_poseidon_matches_the_library` pins that.
+pub(crate) fn poseidon2<F: PrimeField + Absorb>(data: &[F]) -> F {
+    CRH::evaluate(poseidon2_params::<F>().as_ref(), data).expect("poseidon evaluate")
+}
+
+type ParamsCache = Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>;
+
+fn poseidon2_params<F: PrimeField + Absorb>() -> Arc<PoseidonConfig<F>> {
+    static CACHE: OnceLock<ParamsCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("poseidon params cache poisoned");
+    let entry = cache
+        .entry(TypeId::of::<F>())
+        .or_insert_with(|| Arc::new(rate2_params::<F>()));
+    Arc::clone(entry)
+        .downcast::<PoseidonConfig<F>>()
+        .expect("cache is keyed by field type")
+}
+
+/// Exactly `zk_callbacks::util::gen_poseidon_params(2, false)` (crate-private there):
+/// rate 2, alpha 17, 8 full rounds, 31 partial rounds, capacity 1.
+fn rate2_params<F: PrimeField>() -> PoseidonConfig<F> {
+    let (rate, alpha, full_rounds, partial_rounds, skip_matrices) = (2, 17, 8, 31, 0);
+    let (ark, mds) = find_poseidon_ark_and_mds::<F>(
+        F::MODULUS_BIT_SIZE as u64,
+        rate,
+        full_rounds,
+        partial_rounds,
+        skip_matrices,
+    );
+    PoseidonConfig {
+        full_rounds: full_rounds as usize,
+        partial_rounds: partial_rounds as usize,
+        alpha,
+        ark,
+        mds,
+        rate,
+        capacity: 1,
+    }
 }
 
 /// Precompute `zeros[0..=HEIGHT]`, the hash of an empty subtree at each level.
@@ -256,6 +309,25 @@ mod tests {
     use ark_bn254::Fr as F;
 
     const H: usize = 6;
+
+    /// The cached Poseidon must be bit-for-bit the library's: every replica's roots,
+    /// and every proof's public inputs, depend on it.
+    #[test]
+    fn cached_poseidon_matches_the_library() {
+        use zk_callbacks::{crypto::hash::HasherZK, impls::hash::Poseidon};
+        let inputs: Vec<Vec<F>> = vec![
+            vec![F::from(0u64)],
+            vec![F::from(7u64)],
+            vec![F::from(1u64), F::from(2u64)],
+            vec![F::from(u64::MAX), -F::from(3u64)],
+            vec![F::from(5u64), F::from(6u64), F::from(7u64)],
+        ];
+        for data in inputs {
+            assert_eq!(poseidon2(&data), <Poseidon<2>>::hash(&data), "input {data:?}");
+        }
+        let (a, b) = (F::from(11u64), F::from(13u64));
+        assert_eq!(hash_pair(a, b), <Poseidon<2>>::hash(&[a, b]));
+    }
 
     /// Every appended leaf produces a path that recomputes the current root.
     #[test]

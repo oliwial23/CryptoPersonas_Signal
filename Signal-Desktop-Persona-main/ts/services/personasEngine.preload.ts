@@ -35,9 +35,19 @@ import {
   encodeAuthorshipProof,
   encodeBadgeProof,
 } from './personasCarriage.std.ts';
-import { hasPhantomMaterial } from './personasPhantom.preload.ts';
+import {
+  getPhantomBundleFingerprint,
+  hasPhantomMaterial,
+} from './personasPhantom.preload.ts';
+import {
+  initPersonasPersistence,
+  loadPersonasState,
+  openPersonasGroupState,
+  savePersonasState,
+} from './personasPersistence.preload.ts';
 import { ensureProvingKeys, getPinnedKeysSha256 } from './personasKeys.preload.ts';
 import { drop } from '../util/drop.std.ts';
+import { sleep } from '../util/sleep.std.ts';
 import {
   getBarrierSchedule,
   ingestTimestampFor,
@@ -77,6 +87,27 @@ let constructionFailed = false;
 // With a pinned key hash, the engine is built only once the downloaded keys verified.
 let keysReady = false;
 let keysRetry: NodeJS.Timeout | undefined;
+// The state key must be fetched (async) before the engine is built, so a saved member
+// can be restored rather than replaced by a new one.
+let persistenceReady = false;
+const readyWaiters: Array<() => void> = [];
+
+// For the receive path: a record that arrives while the engine is still starting (the
+// queue drained right after launch, i.e. everything sent while this member was offline)
+// must WAIT for it. Dropping it would leave this replica without that record, and every
+// later post builds on it — the member would fork off the group again. Returns at once
+// when the engine exists or is not coming (disabled, failed, or no group bundle yet).
+export async function waitForPersonasEngineIfStarting(timeoutMs = 120_000): Promise<void> {
+  if (engine || constructionFailed || !isPersonasEngineEnabled() || !hasPhantomMaterial()) {
+    return;
+  }
+  await Promise.race([
+    sleep(timeoutMs),
+    new Promise<void>(resolve => {
+      readyWaiters.push(resolve);
+    }),
+  ]);
+}
 const KEYS_RETRY_MS = 30_000;
 
 // The engine singleton for this instance (one Member per process). Built lazily on
@@ -98,6 +129,9 @@ export function getPersonasEngine(): Engine | undefined {
   if (getPinnedKeysSha256() && !keysReady) {
     return undefined;
   }
+  if (!persistenceReady) {
+    return undefined;
+  }
   const dataDir = getKeysDir();
   // Phase 6: put the replica on the SHARED barrier schedule when there is a roster
   // dir to agree through. Every member then buckets an ingest by the record's
@@ -106,6 +140,11 @@ export function getPersonasEngine(): Engine | undefined {
   // a revoked persona's posts flag. Without a schedule we keep the old local-barrier
   // cadence (a lone instance has nobody to agree with).
   const schedule = getBarrierSchedule();
+  // Continue as the saved member, on the saved replica (personasPersistence). Without a
+  // state key both are undefined and the engine starts fresh, in memory, as before.
+  const fingerprint = getPhantomBundleFingerprint();
+  const groupState = fingerprint ? openPersonasGroupState(fingerprint) : undefined;
+  const memberState = groupState ? loadPersonasState() : undefined;
   try {
     engine = new Engine({
       dataDir,
@@ -116,7 +155,20 @@ export function getPersonasEngine(): Engine | undefined {
             heartbeatPeriodMs: schedule.periodMs,
           }
         : {}),
+      ...(memberState ? { memberState } : {}),
+      ...(groupState ? { journalPath: groupState.journalPath } : {}),
     });
+    if (memberState) {
+      log.info(
+        `restored the saved member (${
+          engine.memberOnBulletin() ? 'on the bulletin' : 'NOT on the restored bulletin'
+        })`
+      );
+    } else {
+      // A new member: save it now, before its join can be sent.
+      const state = engine.exportMemberState();
+      savePersonasState(state ? Buffer.from(state) : undefined);
+    }
     log.info(
       `constructed engine (keys: ${dataDir}; ${
         schedule
@@ -127,9 +179,15 @@ export function getPersonasEngine(): Engine | undefined {
     // Advance the replica along the schedule so settlement happens on time even in a
     // silent group. No-op when there is no shared schedule.
     startBarrierTicker(nowMs => engine?.tick(nowMs));
+    for (const wake of readyWaiters.splice(0)) {
+      wake();
+    }
   } catch (error) {
     constructionFailed = true;
     log.error(`failed to construct engine: ${toLogFormat(error)}`);
+    for (const wake of readyWaiters.splice(0)) {
+      wake();
+    }
   }
   return engine;
 }
@@ -143,6 +201,8 @@ export function warmPersonasEngine(): void {
   // Fetch (or verify) the pinned proving keys first; a no-op without a pinned hash.
   drop(
     (async () => {
+      await initPersonasPersistence();
+      persistenceReady = true;
       keysReady = await ensureProvingKeys(getKeysDir());
       if (keysReady) {
         getPersonasEngine();
@@ -261,6 +321,16 @@ export function ingestRecordForTimeline(
   }
 }
 
+// THE ORDERING RULE (personasPersistence): the member state an emit produced is saved,
+// durably, before the record is sent — never after. Throws if it cannot be saved; every
+// caller treats that as "do not send".
+function persistAfterEmit(currentEngine: Engine): void {
+  const state = currentEngine.exportMemberState();
+  if (!savePersonasState(state ? Buffer.from(state) : undefined)) {
+    throw new Error('could not save the member state; not sending');
+  }
+}
+
 // Emit + self-ingest a record (a member's own replica must contain its own records),
 // returning the record ready to carry. Used for protocol records (join/rate/vote/scan)
 // and dev helpers where the whole body is the record.
@@ -272,6 +342,7 @@ export function emitAndSelfIngest(
     return undefined;
   }
   const emitted = produce(currentEngine);
+  persistAfterEmit(currentEngine);
   // Our own record never went to the server, so there is no service timestamp;
   // ingestTimestampFor falls back to local wall-clock on the shared schedule (and to
   // the local-barrier 0 when there is no schedule).
@@ -321,6 +392,7 @@ export function composePersonaPost(
       // unlinkable petname.
       emitted = currentEngine.emitPostPseudo(text, choice.nonce);
     }
+    persistAfterEmit(currentEngine);
   } catch (error) {
     log.error(`composePersonaPost: emit failed: ${toLogFormat(error)}`);
     return undefined;
@@ -361,6 +433,7 @@ export function composePersonaRate(
   let emitted: Emitted;
   try {
     emitted = currentEngine.emitRate(targetEh, delta);
+    persistAfterEmit(currentEngine);
   } catch (error) {
     log.error(`composePersonaRate: emit failed: ${toLogFormat(error)}`);
     return undefined;
@@ -389,6 +462,7 @@ export function composePersonaPoll(
       descriptor.kind,
       descriptor.kind === 'ban' ? targetEh : undefined
     );
+    persistAfterEmit(currentEngine);
   } catch (error) {
     log.error(`composePersonaPoll: emit failed: ${toLogFormat(error)}`);
     return undefined;
@@ -427,6 +501,7 @@ export function composePersonaVote(
     // `H(sk, context)`, with no nonce. One pseudonym per poll, hence one vote per
     // member. Nothing else needs passing.
     emitted = currentEngine.emitVote(pollEh, optionIndex);
+    persistAfterEmit(currentEngine);
   } catch (error) {
     log.error(`composePersonaVote: emit failed: ${toLogFormat(error)}`);
     return undefined;
@@ -435,14 +510,35 @@ export function composePersonaVote(
   return { eh: emitted.eh, body: encodeVoteBody(emitted.bytes) };
 }
 
-// Absorb the callbacks (revocations) fired since our last scan. Emitting a scan is
-// how a member's own view picks up bans that settled while it was running, and how
-// the flag propagates to everyone else's replica.
-export function composePersonaScan():
-  | { eh: string; body: string }
-  | undefined {
-  const result = emitAndSelfIngest(currentEngine => currentEngine.emitScan());
-  return result ? { eh: result.emitted.eh, body: result.body } : undefined;
+// Absorb the callbacks (revocations, badges, reputation) fired since our last scan.
+//
+// In two steps, so a scan that went stale while it was being proved is never sent (see
+// Messenger::prepare_scan in the engine): prepare (prove; nothing released), check
+// `personaScanStillValid` close to sending, then commit — which is the only way to get
+// the record to send — or discard. Throws "nothing to scan" when nothing is outstanding.
+export function preparePersonaScan(): string | undefined {
+  const currentEngine = getPersonasEngine();
+  return currentEngine ? currentEngine.prepareScan() : undefined;
+}
+
+export function personaScanStillValid(): boolean {
+  return getPersonasEngine()?.scanStillValid() ?? false;
+}
+
+export function discardPersonaScan(): void {
+  getPersonasEngine()?.discardScan();
+}
+
+// Release the prepared scan and save the state it produced, before it is sent.
+export function commitPersonaScan(): { eh: string; body: string } | undefined {
+  const currentEngine = getPersonasEngine();
+  if (!currentEngine) {
+    return undefined;
+  }
+  const emitted = currentEngine.commitScan();
+  persistAfterEmit(currentEngine);
+  currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
+  return { eh: emitted.eh, body: encodeRecordBody(emitted.bytes) };
 }
 
 export const BADGE_SLOTS: ReadonlyArray<{ slot: number; name: string }> = [
@@ -490,6 +586,7 @@ function emitBadgeRecord(
     return undefined;
   }
   const emitted = produce(currentEngine);
+  persistAfterEmit(currentEngine);
   currentEngine.ingest(emitted.bytes, ingestTimestampFor(undefined));
   return { eh: emitted.eh, body: encodeBadgeBody(emitted.bytes) };
 }

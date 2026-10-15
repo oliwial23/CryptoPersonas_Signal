@@ -245,8 +245,8 @@ export function PersonaStatusDialog({
                 }
                 detail={
                   status.heldBadges.length > 0
-                    ? 'Real badges: written into your zk object by a scan after an approver invoked your callback. These are the ones a badge proof could attest to.'
-                    : 'You hold no badges in your object. The badge label the composer attaches to a post is NOT this \u2014 it is an unverified string anyone can claim. Request-and-approve is step 4 of PERSONAS_ZK_WORKPLAN.md.'
+                    ? 'Zero-knowledge badges: an approver invoked your request\u2019s callback, and your own scan wrote the badge into your private zk object \u2014 nobody can add one there for you or read it from outside. \u201cProve badge\u201d sends a Groth16 proof over badge_pred that you hold it, without revealing which member you are; recipients verify the proof before showing it. The badge label on an ordinary post is different: it is only attached when you hold the badge, but it is display metadata, not a proof, so a modified client could fake it. Use \u201cProve badge\u201d when it matters.'
+                    : 'You hold no zero-knowledge badges yet. Request one; once an admin approves, your next scan (it runs before each persona post, or use \u201cScan now\u201d) writes it into your private zk object, from where \u201cProve badge\u201d can prove it in zero knowledge.'
                 }
               />
               <Row

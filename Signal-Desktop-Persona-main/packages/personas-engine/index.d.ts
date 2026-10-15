@@ -26,6 +26,10 @@ export interface EngineOptions {
    */
   heartbeatAnchorMs?: number;
   heartbeatPeriodMs?: number;
+  /** A member's saved private state (exportMemberState) to continue as. SECRET. */
+  memberState?: Buffer;
+  /** A file to journal every seen record to, and to restore the replica from. */
+  journalPath?: string;
 }
 
 /** A record produced by an `emit*` call. */
@@ -155,6 +159,22 @@ export class Engine {
   isScanning(): boolean;
   /** Callbacks still outstanding mid-sweep; scan until this reaches zero. */
   outstandingCallbacks(): number;
+  /**
+   * This member's private state, to save ENCRYPTED and pass back as `memberState`.
+   * Save after every emit and before sending; while a scan is prepared, this is the
+   * pre-scan state.
+   */
+  exportMemberState(): Buffer | null;
+  /** Whether this member's current object is on the bulletin (joined, in sync). */
+  memberOnBulletin(): boolean;
+  /** Prove a scan without releasing it; returns its eh. Blocks every other emit. */
+  prepareScan(): string;
+  /** Whether the prepared scan's callback roots are still current. */
+  scanStillValid(): boolean;
+  /** Release the prepared scan and return it to send. Irrevocable. */
+  commitScan(): Emitted;
+  /** Abandon the prepared (never released) scan, restoring the pre-scan object. */
+  discardScan(): void;
 }
 
 declare const addon: { Engine: typeof Engine };

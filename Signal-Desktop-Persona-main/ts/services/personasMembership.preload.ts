@@ -26,6 +26,7 @@ import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
 import {
   emitAndSelfIngest,
+  getPersonasEngine,
   isPersonasEngineEnabled,
 } from './personasEngine.preload.ts';
 import { ensureSealedSenderWarmedUp } from './personasSealedSender.preload.ts';
@@ -39,8 +40,17 @@ let state: JoinState = 'not-joined';
 // several (a second membership for the same account is exactly what we must avoid).
 let inFlight: Promise<boolean> | undefined;
 
-export function hasJoinedPersonaGroup(): boolean {
+// A member restored after a restart (personasPersistence) whose object is already on the
+// bulletin is a member: it must not join again.
+function isRestoredMember(): boolean {
+  if (state !== 'joined' && getPersonasEngine()?.memberOnBulletin() === true) {
+    state = 'joined';
+  }
   return state === 'joined';
+}
+
+export function hasJoinedPersonaGroup(): boolean {
+  return isRestoredMember();
 }
 
 async function sendJoin(conversation: ConversationModel): Promise<boolean> {
@@ -71,7 +81,7 @@ export async function ensurePersonaJoined(
   if (!isPersonasEngineEnabled()) {
     return false;
   }
-  if (state === 'joined') {
+  if (isRestoredMember()) {
     return true;
   }
   if (inFlight) {

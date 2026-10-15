@@ -31,6 +31,16 @@
 //! against the root it names is a fixed fact), so replay costs one verification per
 //! record, not one per rebuild.
 //!
+//! Replaying from genesis on every change is quadratic in practice: the cost grows with
+//! (records × barriers), and the messenger rebuilds on every ingest *and* every
+//! heartbeat. So the rebuild is checkpointed: the state at the end of each recent
+//! barrier is kept, and a change replays only from the first barrier it can affect —
+//! a record first seen at barrier `f` cannot influence barriers before `f`, because the
+//! accept loop at barrier `b` only considers records with `first_barrier <= b`. Crossing
+//! a barrier with no new record processes just that barrier. The result is the same
+//! deterministic function as a full replay (the test build asserts this on every
+//! incremental rebuild); only records older than the checkpoint window fall back to one.
+//!
 //! # The root discipline (the security claim d1 rests on)
 //!
 //! d1 §assumption 3: *the replica pins a root it derived itself, never a root from
@@ -198,6 +208,11 @@ pub struct Replica<
     derived: Derived,
     statuses: HashMap<Eh, Status>,
 
+    /// The rebuild's state at the end of each of the last [`CHECKPOINT_BARRIERS`]
+    /// barriers, so a change replays from where it can first matter instead of from
+    /// genesis (see the module docs). Always holds `current_barrier` after a rebuild.
+    checkpoints: std::collections::BTreeMap<u64, BuildState<OH, MH, NH>>,
+
     /// Append-only journal of accepted record bytes; replayed on [`Replica::open`].
     journal: Option<PathBuf>,
 }
@@ -217,6 +232,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             produced_order: VecDeque::new(),
             derived: Derived::default(),
             statuses: HashMap::new(),
+            checkpoints: std::collections::BTreeMap::new(),
             journal: None,
         };
         r.rebuild();
@@ -354,9 +370,11 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             // provisional barrier assigned by an optimistic self-fold; anything else is
             // an ordinary duplicate and is ignored.
             if authoritative && prev.first_barrier != first_barrier {
+                let from = prev.first_barrier.min(first_barrier);
                 self.seen.get_mut(&eh).expect("just found").first_barrier = first_barrier;
+                let built = self.current_barrier;
                 self.current_barrier = self.current_barrier.max(first_barrier);
-                self.rebuild();
+                self.rebuild_from(from.min(built + 1));
             }
             return Ok(self.statuses.get(&eh).cloned().unwrap_or(Status::Buffered));
         }
@@ -367,6 +385,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         }
         // A record whose bucket is ahead of where we've reached is itself evidence the
         // schedule advanced that far (the provider serviced it then), so cross to it.
+        let built = self.current_barrier;
         self.current_barrier = self.current_barrier.max(first_barrier);
         self.seen.insert(
             eh,
@@ -376,7 +395,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 first_barrier,
             },
         );
-        self.rebuild();
+        self.rebuild_from(first_barrier.min(built + 1));
         Ok(self.statuses.get(&eh).cloned().unwrap_or(Status::Buffered))
     }
 
@@ -401,8 +420,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         if barrier <= self.current_barrier {
             return;
         }
+        let built = self.current_barrier;
         self.current_barrier = barrier;
-        self.rebuild();
+        // Nothing before `built` changed: carry on from the state already reached.
+        self.rebuild_from(built + 1);
     }
 
     // --- Accessors --------------------------------------------------------------
@@ -446,6 +467,13 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     }
 
     /// The status the accept rule assigned a record, by envelope hash.
+    /// The barrier a seen record is placed at (its `first_barrier`), or `None` if this
+    /// replica has not seen it. What a persistent journal must record alongside the
+    /// bytes to restore the replica faithfully (see [`from_records`](Self::from_records)).
+    pub fn first_barrier(&self, eh: &Eh) -> Option<u64> {
+        self.seen.get(eh).map(|s| s.first_barrier)
+    }
+
     pub fn status(&self, eh: &Eh) -> Option<Status> {
         self.statuses.get(eh).cloned()
     }
@@ -477,30 +505,51 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     /// Re-derive the entire bulletin from the seen record set and the current
     /// barrier. Deterministic: the same inputs yield byte-identical trees.
     fn rebuild(&mut self) {
-        let mut obj = MerkleObjStore::<F, OH>::new();
-        let mut cbs = MerkleCallbackStore::<F, MH, NH>::new();
-        let mut derived = Derived::default();
-        let mut statuses: HashMap<Eh, Status> = HashMap::new();
+        self.rebuild_from(0);
+    }
 
-        let mut produced: HashSet<[u8; 32]> = HashSet::new();
-        let mut produced_order: VecDeque<[u8; 32]> = VecDeque::new();
-        let mut applied: HashSet<Eh> = HashSet::new();
-        // The genesis (empty-tree) root is producible from the start.
-        record_root(
-            &mut produced,
-            &mut produced_order,
-            obj.root(),
-            self.config.root_window,
-        );
+    /// Re-derive the bulletin, replaying from the start of barrier `from`: resume from
+    /// the checkpoint at the end of `from - 1` and run barriers `from..=current`.
+    /// Callers pass the earliest barrier their change can affect. Falls back to a full
+    /// replay when that checkpoint has aged out (or `from` is 0).
+    fn rebuild_from(&mut self, from: u64) {
+        self.rebuild_from_inner(from);
 
-        for b in 0..=self.current_barrier {
+        // The incremental path must be indistinguishable from a full replay; the test
+        // build checks that on every incremental rebuild, so every engine test (the
+        // proof-carrying e2e ones included) exercises it.
+        #[cfg(test)]
+        if from > 0 {
+            let incremental = self.fingerprint();
+            self.rebuild_from_inner(0);
+            assert_eq!(
+                incremental,
+                self.fingerprint(),
+                "incremental rebuild from barrier {from} diverged from a full replay"
+            );
+        }
+    }
+
+    fn rebuild_from_inner(&mut self, from: u64) {
+        let resumed = from
+            .checked_sub(1)
+            .and_then(|prev| self.checkpoints.get(&prev))
+            .cloned();
+        let (from, mut st) = match resumed {
+            Some(st) => (from, st),
+            None => (0, BuildState::genesis(self.config.root_window)),
+        };
+        // Checkpoints at or after `from` describe a past that no longer holds.
+        drop(self.checkpoints.split_off(&from));
+
+        for b in from..=self.current_barrier {
             // (1) The barrier event fires *first* (§5.2): settle every ticket due or
             //     banned as of the records applied through the previous barrier, and
             //     re-pin the callback root. A scan that arrives at barrier `b` must
             //     therefore prove against the *post*-settlement callback set — which
             //     is exactly what makes a ban enforceable the moment a replica crosses
             //     its barrier. (At `b == 0` there is nothing yet to settle.)
-            settle_barrier(b, &self.config, &mut cbs, &mut derived);
+            settle_barrier(b, &self.config, &mut st.cbs, &mut st.derived);
 
             // (2) Apply every record now available, smallest eh first, until the
             //     worklist stops making progress. `seen` iterates in ascending eh,
@@ -509,36 +558,84 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             loop {
                 let next = self.seen.iter().find(|(eh, s)| {
                     s.first_barrier <= b
-                        && !applied.contains(*eh)
-                        && is_applicable(&s.record, &produced, &derived)
+                        && !st.applied.contains(*eh)
+                        && is_applicable(&s.record, &st.produced, &st.derived)
                 });
                 let Some((&eh, _)) = next else { break };
-                applied.insert(eh);
+                st.applied.insert(eh);
                 let status = self.apply(
                     eh,
                     b,
-                    &mut obj,
-                    &cbs,
-                    &mut derived,
-                    &mut produced,
-                    &mut produced_order,
+                    &mut st.obj,
+                    &st.cbs,
+                    &mut st.derived,
+                    &mut st.produced,
+                    &mut st.produced_order,
                 );
-                statuses.insert(eh, status);
+                st.statuses.insert(eh, status);
             }
+
+            self.checkpoints.insert(b, st.clone());
         }
+
+        // Keep only the recent past: a record is bucketed by its service timestamp, so
+        // it lands at (or within a barrier or two of) the current barrier. Older
+        // arrivals take the full-replay fallback.
+        let keep_from = self
+            .current_barrier
+            .saturating_sub(CHECKPOINT_BARRIERS - 1);
+        self.checkpoints = self.checkpoints.split_off(&keep_from);
 
         // Anything never applied and never rejected is waiting on a root it has not
         // seen (a prover ahead, or an orphan) — buffered.
+        let mut statuses = st.statuses;
         for eh in self.seen.keys() {
             statuses.entry(*eh).or_insert(Status::Buffered);
         }
 
-        self.obj = obj;
-        self.cbs = cbs;
-        self.derived = derived;
-        self.produced = produced;
-        self.produced_order = produced_order;
+        self.obj = st.obj;
+        self.cbs = st.cbs;
+        self.derived = st.derived;
+        self.produced = st.produced;
+        self.produced_order = st.produced_order;
         self.statuses = statuses;
+    }
+
+    /// Everything observable about the derived bulletin, for the incremental-rebuild
+    /// self-check.
+    #[cfg(test)]
+    fn fingerprint(&self) -> String {
+        let mut statuses: Vec<_> = self.statuses.iter().map(|(eh, s)| (eh.0, s.clone())).collect();
+        statuses.sort_by_key(|(eh, _)| *eh);
+        let log: Vec<_> = self
+            .derived
+            .log
+            .iter()
+            .map(|e| (e.eh.0, e.kind, e.author.clone(), e.body.clone(), e.flagged))
+            .collect();
+        let mut outstanding: Vec<_> = self
+            .derived
+            .outstanding
+            .iter()
+            .map(|(eh, o)| (eh.0, o.settled, o.banned, o.badge_slot, o.settle_barrier))
+            .collect();
+        outstanding.sort_by_key(|o| o.0);
+        let mut polls: Vec<_> = self
+            .derived
+            .polls
+            .iter()
+            .map(|(eh, p)| (eh.0, p.closed, p.opened_barrier))
+            .collect();
+        polls.sort_by_key(|p| p.0);
+        let mut produced: Vec<_> = self.produced.iter().copied().collect();
+        produced.sort();
+        format!(
+            "{:?}|{:?}|{:?}|{statuses:?}|{log:?}|{outstanding:?}|{polls:?}|{produced:?}|{:?}",
+            self.obj.root(),
+            self.cbs.memb_root(),
+            self.cbs.nmemb_root(),
+            self.produced_order,
+        )
     }
 
     /// Apply one record against the state being rebuilt. Only ever called when
@@ -879,6 +976,43 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 derived.rate(*target, claimed.0, *delta as i64);
                 Status::Applied
             }
+        }
+    }
+}
+
+/// How many recent barriers keep a rebuild checkpoint (see the module docs). At the
+/// demo's 10 s heartbeat this is about ten minutes; a record bucketed further back than
+/// that triggers one full replay.
+const CHECKPOINT_BARRIERS: u64 = 64;
+
+/// The rebuild's working state, as it stands at the end of a barrier.
+#[derive(Clone)]
+struct BuildState<const OH: usize, const MH: usize, const NH: usize> {
+    obj: MerkleObjStore<F, OH>,
+    cbs: MerkleCallbackStore<F, MH, NH>,
+    derived: Derived,
+    statuses: HashMap<Eh, Status>,
+    produced: HashSet<[u8; 32]>,
+    produced_order: VecDeque<[u8; 32]>,
+    applied: HashSet<Eh>,
+}
+
+impl<const OH: usize, const MH: usize, const NH: usize> BuildState<OH, MH, NH> {
+    /// The empty bulletin, before barrier 0.
+    fn genesis(root_window: usize) -> Self {
+        let obj = MerkleObjStore::<F, OH>::new();
+        let mut produced = HashSet::new();
+        let mut produced_order = VecDeque::new();
+        // The genesis (empty-tree) root is producible from the start.
+        record_root(&mut produced, &mut produced_order, obj.root(), root_window);
+        Self {
+            obj,
+            cbs: MerkleCallbackStore::new(),
+            derived: Derived::default(),
+            statuses: HashMap::new(),
+            produced,
+            produced_order,
+            applied: HashSet::new(),
         }
     }
 }

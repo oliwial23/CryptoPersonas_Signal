@@ -144,9 +144,11 @@ import { trackHeapSize } from '../ts/util/oomNotifier.node.ts';
 import { sendDummyKeystroke } from './WindowsNotifications.main.ts';
 import { maybeMigrateSafeStorageBackend } from '../ts/util/linuxPasswordStoreMigration.main.ts';
 import {
+  getPersonasStateStorage,
   isPersonasBuild,
   labelPersonasWindow,
   openPersonasExtraMember,
+  setPersonasStateKeySource,
   startPersonasRuntime,
 } from './personas.main.ts';
 
@@ -736,6 +738,8 @@ async function createWindow() {
         ? join(rootDir, 'ts', 'windows', 'main', 'tsx.preload.js')
         : join(rootDir, 'bundles', 'preload', 'wrapper.js'),
       spellcheck,
+      // Personas build: see the command-line switches above.
+      ...(isPersonasBuild() ? { backgroundThrottling: false } : {}),
     },
     icon: windowIcon,
     ...pick(windowConfig, ['autoHideMenuBar', 'x', 'y']),
@@ -1067,6 +1071,8 @@ async function createWindow() {
 }
 
 // Renderer asks if we are done with the database
+ipc.handle('personas:state-storage', () => getPersonasStateStorage());
+
 ipc.handle('database-ready', async () => {
   if (!sqlInitPromise) {
     log.error('database-ready requested, but sqlInitPromise is falsey');
@@ -1812,6 +1818,7 @@ async function initializeSQL(
   let key: string;
   try {
     key = getSQLKey();
+    setPersonasStateKeySource(key);
   } catch (error) {
     try {
       // Initialize with *some* key to setup paths
@@ -2094,6 +2101,15 @@ const featuresToDisable = `HardwareMediaKeyHandling,${app.commandLine.getSwitchV
 )}`;
 app.commandLine.appendSwitch('disable-features', featuresToDisable);
 
+// Personas build: a member must keep processing messages and ticking the shared barrier
+// clock while its window is in the background. Chromium otherwise throttles background
+// timers to about once a minute, so incoming posts pile up and settlement runs late.
+if (isPersonasBuild()) {
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+}
+
 resolveTranslationsLocale();
 app.commandLine.appendSwitch('lang', getResolvedMessagesLocale().name);
 
@@ -2124,6 +2140,10 @@ app.on('ready', async () => {
   // Personas build: start the localhost relay and set the PERSONAS_* environment before
   // any window (and so any renderer process, which inherits it) exists. No-op otherwise.
   await startPersonasRuntime(app.getPath('userData'));
+  if (isPersonasBuild()) {
+    // And keep macOS App Nap from suspending the app when it is not in front.
+    powerSaveBlocker.start('prevent-app-suspension');
+  }
 
   dns.setFallback(await getDNSFallback());
   if (DISABLE_IPV6) {

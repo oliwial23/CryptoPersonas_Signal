@@ -19,7 +19,7 @@
 //      trust root) that replace the production values in the renderer config.
 
 import { execFileSync, spawn } from 'node:child_process';
-import { randomInt } from 'node:crypto';
+import { hkdfSync, randomInt } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request } from 'node:https';
 import { join } from 'node:path';
@@ -270,3 +270,34 @@ export function labelPersonasWindow(window: BrowserWindow): void {
     window.setTitle(label(title));
   });
 }
+
+// --- encrypted state storage for the ZK engine ------------------------------------------
+
+// The engine's member state is this member's persona secret: anyone holding it can link
+// all of the member's pseudonyms and anonymous posts and act as them. It is saved so a
+// restart does not fork the member off its group, and it is saved ENCRYPTED, under a key
+// derived from Signal's own database key — which Signal protects with the OS keychain
+// (safeStorage) — so the secret is exactly as protected as the message database itself.
+//
+// Only a derived key leaves the main process, never the database key.
+let stateKey: Buffer<ArrayBuffer> | undefined;
+
+export function setPersonasStateKeySource(sqlKey: string): void {
+  stateKey = Buffer.from(
+    hkdfSync('sha256', Buffer.from(sqlKey, 'utf8'), Buffer.alloc(0), 'signal-personas member state v1', 32)
+  );
+}
+
+export type PersonasStateStorage = Readonly<{ key: string; dir: string }>;
+
+// For the renderer (ipc 'personas:state-storage'): the state key and directory, or
+// undefined when this is not a personas member or the database key is not available —
+// in which case the engine runs in memory only, as before, rather than store the
+// secret unencrypted.
+export function getPersonasStateStorage(): PersonasStateStorage | undefined {
+  if (!process.env.PERSONAS_AUTO_REGISTER || !stateKey) {
+    return undefined;
+  }
+  return { key: stateKey.toString('hex'), dir: join(app.getPath('userData'), 'personas-state') };
+}
+

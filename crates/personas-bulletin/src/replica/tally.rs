@@ -185,7 +185,7 @@ pub struct LogEntry {
 /// tested as plain data. Every method here is a deterministic function of the
 /// records ingested so far — feed two replicas the same records in any arrival
 /// order and these structures end up equal.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Derived {
     /// Open and recently-closed polls, keyed by the `PollOpen`'s `eh`.
     pub polls: HashMap<Eh, Poll>,

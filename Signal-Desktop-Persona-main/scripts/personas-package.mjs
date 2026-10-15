@@ -82,8 +82,13 @@ if (!skipBuild) {
   run('pnpm', ['run', 'build:rolldown:prod']);
 }
 
-// 2b. The ZK engine for an Intel build: cross-compiled from the Rust workspace, placed
-//     where packages/personas-engine/index.cjs looks for it (personas-engine.<platform>-<arch>.node).
+// 2b. The ZK engine, rebuilt from the Rust workspace every time so a package can never
+//     ship a stale one, and placed where packages/personas-engine/index.cjs looks for it
+//     (personas-engine.<platform>-<arch>.node). Apple Silicon is the native build
+//     (packages/personas-engine/build.sh); Intel is cross-compiled.
+if (arch === 'arm64') {
+  run(join(ROOT, 'packages/personas-engine/build.sh'), []);
+}
 if (arch === 'x64') {
   const rustDir = join(ROOT, '..');
   execFileSync(

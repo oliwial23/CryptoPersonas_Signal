@@ -225,3 +225,42 @@ fn the_journal_survives_a_restart() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn checkpointed_rebuilds_match_a_full_replay_across_a_long_schedule() {
+    // The rebuild resumes from per-barrier checkpoints instead of replaying from
+    // genesis (module docs). Drive it through every path — on-time, slightly late,
+    // older than the checkpoint window, provisional-then-authoritative, and many empty
+    // barriers — and compare against a replica rebuilt from scratch. (The test build
+    // also self-checks every incremental rebuild against a full replay.)
+    let mut r = replica();
+    let mut records = Vec::new();
+    let mut place = |r: &mut TestReplica, rec: (Vec<u8>, super::record::Eh), at: u64| {
+        r.ingest_at(rec.0.clone(), at).unwrap();
+        records.push((at, rec.0));
+    };
+
+    place(&mut r, join(31), 0);
+    r.advance_to(10);
+    place(&mut r, join(32), 10); // on time
+    r.advance_to(12);
+    place(&mut r, join(33), 11); // one barrier late
+    let (poll, poll_eh) = ban_poll();
+    place(&mut r, (poll, poll_eh), 12);
+    r.advance_to(150); // past the checkpoint window
+    place(&mut r, join(34), 20); // far older than any checkpoint: full replay
+    place(&mut r, join(35), 149);
+    let (late, late_eh) = join(36);
+    r.ingest(late.clone()).unwrap(); // provisional at 150...
+    r.ingest_at(late.clone(), 148).unwrap(); // ...then service-stamped two barriers back
+    records.push((148, late));
+    r.advance_to(151);
+
+    let fresh = TestReplica::from_records(placeholder_keys(), Config::default(), records, 151);
+    assert_eq!(r.obj_root(), fresh.obj_root());
+    assert_eq!(r.status(&late_eh), Some(Status::Applied));
+    assert_eq!(
+        r.poll(&poll_eh).map(|p| (p.opened_barrier, p.closed)),
+        fresh.poll(&poll_eh).map(|p| (p.opened_barrier, p.closed))
+    );
+}

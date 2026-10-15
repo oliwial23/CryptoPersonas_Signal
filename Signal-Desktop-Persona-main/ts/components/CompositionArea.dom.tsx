@@ -470,6 +470,15 @@ export const CompositionArea = memo(function CompositionArea({
   // Sticky for this conversation until changed, so you set "Union" once and keep
   // posting rather than re-picking it on every message.
   const [personaTopic, setPersonaTopic] = useState<string | undefined>();
+  // Choosing a normal message, Anonymous, or an unlimited pseudonym leaves the context.
+  // A context only applies to rate-limited personas, and `personaValueToChoice` turns
+  // any send made while a context is selected into one — so without this, picking
+  // "Anonymous" after posting in a context still sent as rate-limited #1 there, and the
+  // only way out was to find "No topic" first.
+  const selectTopicFreePersona = useCallback((value: string) => {
+    setPersonaValue(value);
+    setPersonaTopic(undefined);
+  }, []);
   const [isTopicDialogOpen, setIsTopicDialogOpen] = useState(false);
   const [newTopicName, setNewTopicName] = useState('');
   const [isStatusDialogOpen, setIsStatusDialogOpen] = useState(false);
@@ -1103,7 +1112,7 @@ export const CompositionArea = memo(function CompositionArea({
           )}
           <AxoDropdownMenu.RadioGroup
             value={personaValue}
-            onValueChange={setPersonaValue}
+            onValueChange={selectTopicFreePersona}
           >
             <AxoDropdownMenu.RadioItem value="off">
               Normal message
@@ -1125,7 +1134,7 @@ export const CompositionArea = memo(function CompositionArea({
           </AxoDropdownMenu.Label>
           <AxoDropdownMenu.RadioGroup
             value={personaValue}
-            onValueChange={setPersonaValue}
+            onValueChange={selectTopicFreePersona}
           >
             {personaPseudonyms.map(pseudonym => (
               <AxoDropdownMenu.RadioItem

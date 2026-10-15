@@ -9,12 +9,14 @@ import {
   ingestRecordForTimeline,
   verifyPersonaAuthorship,
   verifyPersonaBadgeProof,
+  waitForPersonasEngineIfStarting,
 } from '../services/personasEngine.preload.ts';
 import {
   decodePostBadge,
   decodePostContextName,
   decodeAuthorshipProof,
   decodeBadgeProof,
+  decodeRecordBody,
 } from '../services/personasCarriage.std.ts';
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
 import {
@@ -249,6 +251,11 @@ export async function handleDataMessage(
       return;
     }
 
+    // A record that arrives while the engine is still starting waits for it rather
+    // than being dropped (a dropped record forks this member off the group).
+    if (decodeRecordBody(initialMessage.body)) {
+      await waitForPersonasEngineIfStarting();
+    }
     const personasRecord = ingestRecordForTimeline(
       initialMessage.body,
       message.get('serverTimestamp') ?? 0

@@ -68,6 +68,24 @@ pub enum SendError {
     /// `Messenger::prove_authorship`).
     #[error("could not encode an authorship proof: {0}")]
     ProofCodec(#[from] ark_serialize::SerializationError),
+    /// A prepared scan is waiting to be committed or discarded; nothing else may be
+    /// produced until it is (see [`Messenger::prepare_scan`]).
+    #[error("a prepared scan is pending; commit or discard it first")]
+    ScanPending,
+    /// `commit_scan`/`discard_scan` with no prepared scan.
+    #[error("no prepared scan")]
+    NoPreparedScan,
+}
+
+/// A scan that has been proved but not yet released (see [`Messenger::prepare_scan`]).
+struct PendingScan {
+    emitted: Emitted,
+    /// The member's object before the scan advanced it — restored by a discard.
+    before: zk_callbacks::generic::user::User<F, personas_core::circuits::MsgUser>,
+    /// The callback roots the proof pins; the scan is acceptable only while the
+    /// replica's current roots still equal these.
+    memb_root: F,
+    nmemb_root: F,
 }
 
 /// A record produced and folded into the sender's own replica, ready to broadcast.
@@ -102,6 +120,8 @@ pub struct Messenger<
     /// a settlement barrier (§14, d5). Defaults to [`Heartbeat::default`]; a live group
     /// sets its own anchor with [`with_heartbeat`](Self::with_heartbeat).
     heartbeat: Heartbeat,
+    /// A proved scan not yet released (commit) or abandoned (discard).
+    pending_scan: Option<PendingScan>,
 }
 
 impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
@@ -120,6 +140,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             replica: Replica::new(keys, config),
             member,
             heartbeat: Heartbeat::default(),
+            pending_scan: None,
         }
     }
 
@@ -146,6 +167,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             replica: Replica::open(path, keys, config)?,
             member,
             heartbeat: Heartbeat::default(),
+            pending_scan: None,
         })
     }
 
@@ -171,7 +193,31 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             replica,
             member,
             heartbeat: Heartbeat::default(),
+            pending_scan: None,
         })
+    }
+
+    /// Rebuild a messenger saved across a restart: the replica from its journalled
+    /// `(first_barrier, bytes)` records at `current_barrier`, and the member (if any)
+    /// restored by the caller with [`Member::from_state`]. Unlike [`adopt`](Self::adopt)
+    /// there is no pin to check — these are this client's own records.
+    pub fn restore(
+        transport: Arc<dyn Transport>,
+        conversation: impl Into<ConversationId>,
+        keys: ReplicaKeys,
+        config: Config,
+        member: Option<Member>,
+        records: Vec<(u64, Vec<u8>)>,
+        current_barrier: u64,
+    ) -> Self {
+        Self {
+            conversation: conversation.into(),
+            transport,
+            replica: Replica::from_records(keys, config, records, current_barrier),
+            member,
+            heartbeat: Heartbeat::default(),
+            pending_scan: None,
+        }
     }
 
     // --- Accessors --------------------------------------------------------------
@@ -182,6 +228,29 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
 
     pub fn member(&self) -> Option<&Member> {
         self.member.as_ref()
+    }
+
+    /// The member's private state for saving ([`Member::export_state`]), or `None` for
+    /// an observer. While a scan is pending this is the state BEFORE it: a prepared
+    /// scan has revealed nothing, so the pre-scan object is still the unspent one.
+    pub fn export_member_state(&self) -> Option<Result<Vec<u8>, SendError>> {
+        let member = self.member.as_ref()?;
+        Some(match &self.pending_scan {
+            Some(pending) => member::export_user_state(&pending.before).map_err(SendError::from),
+            None => member.export_state().map_err(SendError::from),
+        })
+    }
+
+    /// Whether this member's current object is on the replica's object tree.
+    pub fn member_on_bulletin(&self) -> bool {
+        self.member
+            .as_ref()
+            .is_some_and(|m| m.is_on_bulletin(self.replica.obj_store()))
+    }
+
+    /// The barrier the shared schedule assigns to `now_ms`.
+    pub fn barrier_at(&self, now_ms: u64) -> u64 {
+        self.heartbeat.barrier_at(now_ms)
     }
 
     pub fn conversation(&self) -> &ConversationId {
@@ -473,6 +542,77 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         self.emit(record)
     }
 
+    // --- Send: a scan that can be checked before it is released (§5.2) ----------
+    //
+    // A scan pins the replica's CURRENT callback roots, and every replica rejects it if
+    // a settlement re-pinned them before the scan's barrier ("scan names a superseded
+    // barrier"). Proving takes seconds, so a scan can go stale while it is being made.
+    // A stale scan that is SENT is the dangerous case: it reveals the member's nullifier
+    // (under the member's real name — scans are attributable), every replica rejects it,
+    // and the member's local object has nevertheless advanced past it.
+    //
+    // So a scan is produced in two steps. `prepare_scan` proves it and advances the
+    // object but releases nothing; the caller checks `scan_still_valid` (after waiting
+    // out a barrier boundary if one is close) and then either `commit_scan`s — which
+    // folds it into the replica and only now hands over the bytes to send — or
+    // `discard_scan`s, which restores the pre-scan object. A discard can only happen
+    // before commit, i.e. before the bytes exist outside this struct, so the nullifier a
+    // discarded scan would have revealed has never been revealed, and the restored
+    // object is safe to spend. Nothing else can be produced while a scan is pending.
+
+    /// Prove a scan without releasing it. Returns its envelope hash only.
+    pub fn prepare_scan(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+    ) -> Result<Eh, SendError> {
+        let (record, before, memb_root, nmemb_root) = {
+            let (replica, member) = self.parts_mut()?;
+            let before = member.user.clone();
+            let cbs = replica.callback_store();
+            let (memb_root, nmemb_root) = (cbs.memb_root(), cbs.nmemb_root());
+            let record = member.scan(rng, replica.obj_store(), cbs)?;
+            (record, before, memb_root, nmemb_root)
+        };
+        let (bytes, eh) = record::encode(&record)?;
+        self.pending_scan = Some(PendingScan {
+            emitted: Emitted {
+                bytes,
+                eh,
+                persona: None,
+            },
+            before,
+            memb_root,
+            nmemb_root,
+        });
+        Ok(eh)
+    }
+
+    /// Whether the prepared scan would still be accepted at the replica's current
+    /// barrier: its pinned callback roots are still the current ones.
+    pub fn scan_still_valid(&self) -> bool {
+        self.pending_scan.as_ref().is_some_and(|p| {
+            let cbs = self.replica.callback_store();
+            p.memb_root == cbs.memb_root() && p.nmemb_root == cbs.nmemb_root()
+        })
+    }
+
+    /// Release the prepared scan: fold it into our replica and return it to send. After
+    /// this it can no longer be discarded.
+    pub fn commit_scan(&mut self) -> Result<Emitted, SendError> {
+        let pending = self.pending_scan.take().ok_or(SendError::NoPreparedScan)?;
+        let _ = self.replica.ingest(pending.emitted.bytes.clone());
+        Ok(pending.emitted)
+    }
+
+    /// Abandon the prepared scan and restore the object it advanced. Safe only because
+    /// the scan was never released (see above).
+    pub fn discard_scan(&mut self) -> Result<(), SendError> {
+        let pending = self.pending_scan.take().ok_or(SendError::NoPreparedScan)?;
+        let member = self.member.as_mut().ok_or(SendError::Observer)?;
+        member.user = pending.before;
+        Ok(())
+    }
+
     // --- Send: broadcast (async) ------------------------------------------------
 
     /// Broadcast an already-[`emit`](Self::emit_join)ted record over the transport.
@@ -570,6 +710,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     /// Encode a produced record, fold it into the sender's *own* replica (a sender is
     /// a member of its own log), and return it ready to broadcast.
     fn emit(&mut self, record: Record) -> Result<Emitted, SendError> {
+        if self.pending_scan.is_some() {
+            return Err(SendError::ScanPending);
+        }
         let (bytes, eh) = record::encode(&record)?;
         let persona = persona_for(&record);
         // Idempotent by `eh`, so the echo the transport later delivers is deduped.
@@ -580,6 +723,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     /// Split the disjoint `replica`/`member` fields so a produce step can read the
     /// object tree while mutating the member's user state.
     fn parts_mut(&mut self) -> Result<(&Replica<OH, MH, NH>, &mut Member), SendError> {
+        // Every proving flow comes through here: none may run on top of a pending scan.
+        if self.pending_scan.is_some() {
+            return Err(SendError::ScanPending);
+        }
         let member = self.member.as_mut().ok_or(SendError::Observer)?;
         Ok((&self.replica, member))
     }

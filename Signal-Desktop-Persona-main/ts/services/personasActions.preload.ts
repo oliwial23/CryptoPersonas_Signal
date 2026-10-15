@@ -33,13 +33,18 @@ import { toLogFormat } from '../types/errors.std.ts';
 import {
   composePersonaPoll,
   composePersonaRate,
-  composePersonaScan,
+  commitPersonaScan,
   composePersonaVote,
+  discardPersonaScan,
+  personaScanStillValid,
+  preparePersonaScan,
   isPersonasEngineEnabled,
   getPersonasEngine,
   type PersonaPollDescriptor,
 } from './personasEngine.preload.ts';
 import { ensurePersonaJoined } from './personasMembership.preload.ts';
+import { getBarrierSchedule } from './personasBarrier.preload.ts';
+import { sleep } from '../util/sleep.std.ts';
 import { isOutgoing } from '../messages/helpers.std.ts';
 import { ToastType } from '../types/Toast.dom.tsx';
 
@@ -471,6 +476,66 @@ export async function maybeSendPersonaRateForReaction({
 // redundant anyway — dropping it loses nothing.
 let scanInFlight = false;
 
+// SCAN TIMING. A scan pins the callback roots of the barrier it was proved in, and every
+// replica rejects it if a settlement re-pinned them before the barrier its SERVICE
+// timestamp falls in. So: start proving early in a barrier, check the scan is still valid
+// right before releasing it, and never release it within SEND_MARGIN_MS of a boundary
+// (that margin also absorbs clock skew between this machine and the server). A stale
+// scan is discarded before it is sent — never undone after — so it reveals nothing
+// (see Messenger::prepare_scan).
+const SEND_MARGIN_MS = 2_500;
+const MAX_SCAN_ATTEMPTS = 3;
+let lastScanProofMs = 4_000;
+
+function msToNextBarrier(): number | undefined {
+  const schedule = getBarrierSchedule();
+  if (!schedule) {
+    return undefined;
+  }
+  const into = (Date.now() - schedule.anchorMs) % schedule.periodMs;
+  return schedule.periodMs - into;
+}
+
+// If a barrier boundary is less than `needMs` away, wait until just past it and bring the
+// replica onto the new barrier (settling whatever falls due there).
+async function clearOfBarrier(needMs: number): Promise<void> {
+  const left = msToNextBarrier();
+  if (left == null || left >= needMs) {
+    return;
+  }
+  await sleep(left + 300);
+  getPersonasEngine()?.tick(Date.now());
+}
+
+// Prove, check and release one scan. Returns the record to send, or undefined if every
+// attempt went stale. Throws "nothing to scan" when nothing is outstanding.
+async function produceValidScan(): Promise<{ eh: string; body: string } | undefined> {
+  for (let attempt = 1; attempt <= MAX_SCAN_ATTEMPTS; attempt += 1) {
+    // oxlint-disable-next-line no-await-in-loop
+    await clearOfBarrier(lastScanProofMs + SEND_MARGIN_MS);
+    const started = Date.now();
+    if (preparePersonaScan() === undefined) {
+      return undefined;
+    }
+    lastScanProofMs = Date.now() - started;
+    try {
+      // oxlint-disable-next-line no-await-in-loop
+      await clearOfBarrier(SEND_MARGIN_MS);
+    } catch (error) {
+      // Never leave a prepared scan pending: it blocks every other persona action.
+      // Discarding is safe — nothing has been released.
+      discardPersonaScan();
+      throw error;
+    }
+    if (personaScanStillValid()) {
+      return commitPersonaScan();
+    }
+    discardPersonaScan();
+    log.warn(`produceValidScan: attempt ${attempt} went stale at a settlement; discarded unsent`);
+  }
+  return undefined;
+}
+
 
 /**
  * Is this member banned in this group? `undefined` when it cannot be determined
@@ -588,7 +653,7 @@ export async function sendPersonaScan(
   try {
     // A scan is only meaningful once we are a member, but unlike the others it should
     // not CAUSE a join — a lurking instance that never posted has nothing to absorb.
-    const scan = composePersonaScan();
+    const scan = await produceValidScan();
     if (!scan) {
       return false;
     }

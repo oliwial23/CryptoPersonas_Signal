@@ -343,6 +343,12 @@ export function hasPhantomMaterial(): boolean {
   return material !== undefined;
 }
 
+// Which group's bundle this member holds — what its saved engine state is keyed by, so a
+// new group (after a server reset, say) starts from a fresh member and replica.
+export function getPhantomBundleFingerprint(): string | undefined {
+  return material ? bundleFingerprint(material) : undefined;
+}
+
 export function getPhantomSchedule(): PhantomMaterial['schedule'] | undefined {
   return material?.schedule;
 }
