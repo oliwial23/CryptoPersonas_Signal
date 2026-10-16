@@ -5,133 +5,403 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Signal Personas — tester guide</title>
 <style>
-  :root { --bg: #fff; --fg: #1b1b1b; --muted: #5f6368; --card: #f4f5f7; --accent: #2c6bed; --warn: #fff4e5; --warn-fg: #6b4300; }
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --fg: #1b1c1f; --muted: #5d6169; --line: #e3e5e9;
+    --accent: #2c6bed; --accent-soft: #e8efff; --accent-fg: #ffffff;
+    --warn: #fff3df; --warn-line: #f2c879; --warn-fg: #5c3b00;
+    --green: #2f9e5b; --orange: #e07b1f; --purple: #8a4fd8;
+    --mock: #eef0f3;
+  }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #121212; --fg: #ececec; --muted: #a8a8a8; --card: #1f2023; --accent: #6b9bff; --warn: #3a2a10; --warn-fg: #ffd59a; }
+    :root {
+      --bg: #111214; --surface: #1b1c1f; --fg: #ececee; --muted: #a3a6ad; --line: #2c2e33;
+      --accent: #6b9bff; --accent-soft: #1d2a47; --accent-fg: #0d1220;
+      --warn: #33270f; --warn-line: #7a5a1d; --warn-fg: #ffd99a;
+      --mock: #25272b;
+    }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  main { max-width: 760px; margin: 0 auto; padding: 40px 16px 64px; }
-  h1 { font-size: 1.8rem; margin: 0 0 6px; }
-  h2 { font-size: 1.2rem; margin: 36px 0 10px; }
-  p, li { color: var(--fg); }
-  .lede { color: var(--muted); margin: 0 0 24px; }
-  .download { display: block; padding: 18px 20px; border-radius: 12px; background: var(--accent); color: #fff;
-              text-decoration: none; font-weight: 600; text-align: center; font-size: 1.05rem; }
-  .download small { display: block; font-weight: 400; opacity: .85; margin-top: 4px; }
-  .download + .download { margin-top: 10px; }
-  .download.secondary { background: var(--card); color: var(--fg); }
-  .card { background: var(--card); border-radius: 12px; padding: 14px 18px; margin: 12px 0; }
-  .warn { background: var(--warn); color: var(--warn-fg); border-radius: 12px; padding: 12px 16px; margin: 12px 0; }
-  ol, ul { padding-left: 22px; }
-  li { margin: 6px 0; }
-  code { background: var(--card); padding: 1px 6px; border-radius: 4px; font-size: .92em; word-break: break-all; }
-  footer { margin-top: 44px; color: var(--muted); font-size: .9rem; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 16px 72px; }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.35rem; margin: 0; }
+  h3 { font-size: 1.05rem; margin: 16px 0 4px; }
+  p { margin: 8px 0; }
+  a { color: var(--accent); }
+  .lede { color: var(--muted); font-size: 1.05rem; margin: 0 0 24px; }
+  .muted { color: var(--muted); }
+
+  .downloads { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 8px 0 6px; }
+  .download { display: block; padding: 16px 18px; border-radius: 14px; background: var(--accent); color: var(--accent-fg);
+              text-decoration: none; font-weight: 650; text-align: center; }
+  .download small { display: block; font-weight: 400; opacity: .85; margin-top: 2px; }
+  .download.secondary { background: var(--surface); color: var(--fg); border: 1px solid var(--line); }
+
+  nav.toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 28px 0 8px; }
+  nav.toc a { text-decoration: none; color: var(--fg); background: var(--surface); border: 1px solid var(--line);
+              border-radius: 999px; padding: 6px 12px; font-size: .9rem; }
+  nav.toc a span { color: var(--accent); font-weight: 700; margin-right: 4px; }
+
+  .callout { display: flex; gap: 14px; background: var(--warn); border: 1px solid var(--warn-line); color: var(--warn-fg);
+             border-radius: 14px; padding: 16px 18px; margin: 24px 0; }
+  .callout .big { font-size: 1.6rem; line-height: 1; }
+  .callout strong.title { display: block; font-size: 1.1rem; margin-bottom: 4px; }
+
+  section.step { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 22px 22px 18px;
+                 margin: 18px 0; scroll-margin-top: 16px; }
+  .step-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .num { flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--accent); color: var(--accent-fg);
+         display: grid; place-items: center; font-weight: 700; }
+  ol.do { padding-left: 22px; margin: 8px 0; }
+  ol.do li { margin: 8px 0; }
+  .ui { display: inline-block; background: var(--mock); border: 1px solid var(--line); border-radius: 6px;
+        padding: 0 7px; font-size: .92em; font-weight: 600; }
+  .tip { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 10px 14px; border-radius: 0 10px 10px 0;
+         margin: 12px 0; }
+  .note { border-left: 3px solid var(--warn-line); background: var(--warn); color: var(--warn-fg); padding: 10px 14px;
+          border-radius: 0 10px 10px 0; margin: 12px 0; }
+  .icon { display: inline-block; width: 1.25em; height: 1.25em; vertical-align: -0.25em; color: var(--accent); }
+
+  /* Drawings of the app's UI */
+  .mock { background: var(--mock); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin: 14px 0; }
+  .mock-caption { font-size: .85rem; color: var(--muted); margin-top: 8px; text-align: center; }
+  .composer { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--line);
+              border-radius: 22px; padding: 6px 8px 6px 16px; max-width: 520px; margin: 0 auto; }
+  .composer .field { flex: 1; color: var(--muted); }
+  .composer .btn { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); }
+  .composer .btn .icon { color: inherit; }
+  .composer .btn.persona { color: var(--accent); background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: 2px; }
+  .menu { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; max-width: 340px; margin: 0 auto;
+          box-shadow: 0 6px 20px rgba(0,0,0,.08); padding: 6px 0; font-size: .93rem; }
+  .menu .label { color: var(--muted); font-size: .8rem; padding: 6px 14px 2px; }
+  .menu .item { padding: 6px 14px; display: flex; align-items: center; gap: 8px; }
+  .menu .item.on { background: var(--accent-soft); }
+  .menu .dot { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--muted); flex: none; }
+  .menu .item.on .dot { border-color: var(--accent); background: var(--accent); }
+  .menu .sep { border-top: 1px solid var(--line); margin: 6px 0; }
+  .menu .item.hl { font-weight: 650; color: var(--accent); }
+  .windows { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .win { flex: 1 1 150px; max-width: 220px; border-radius: 10px; border: 4px solid; background: var(--surface); }
+  .win .bar { font-size: .78rem; font-weight: 700; color: #fff; padding: 2px 8px; }
+  .win .body { padding: 10px; font-size: .82rem; color: var(--muted); min-height: 56px; }
+  .win.green { border-color: var(--green); } .win.green .bar { background: var(--green); }
+  .win.orange { border-color: var(--orange); } .win.orange .bar { background: var(--orange); }
+  .win.purple { border-color: var(--purple); } .win.purple .bar { background: var(--purple); }
+
+  .features { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+  .feature { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; background: var(--bg); }
+  .feature h3 { margin-top: 0; }
+  .feature p { margin: 4px 0; font-size: .95rem; }
+  .feature .how { color: var(--muted); font-size: .9rem; }
+
+  table.status { width: 100%; border-collapse: collapse; font-size: .95rem; margin: 8px 0; }
+  table.status td { border-top: 1px solid var(--line); padding: 8px 6px; vertical-align: top; }
+  table.status td:first-child { font-weight: 600; white-space: nowrap; padding-right: 14px; }
+
+  details { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 16px; margin: 10px 0; }
+  details summary { cursor: pointer; font-weight: 600; }
+  ul.tight { padding-left: 20px; margin: 6px 0; } ul.tight li { margin: 5px 0; }
+  code { background: var(--mock); padding: 1px 6px; border-radius: 4px; font-size: .9em; word-break: break-all; }
+  footer { margin-top: 44px; color: var(--muted); font-size: .9rem; text-align: center; }
+
+  @media (max-width: 640px) {
+    .downloads, .features { grid-template-columns: 1fr; }
+    section.step { padding: 18px 16px 14px; }
+    h1 { font-size: 1.6rem; }
+    table.status td:first-child { white-space: normal; }
+  }
 </style>
 </head>
 <body>
 <main>
-  <h1>Signal Personas</h1>
-  <p class="lede">A research prototype of <em>Cryptographic Personas</em>: a group chat where members can post
-    anonymously or under personas, rate posts, and vote to ban someone — all without anyone,
-    including the server, learning who wrote what. It runs on a private test server, separate
-    from the real Signal.</p>
+  <!-- The persona button's icon (and its neighbours), drawn once and reused below. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="persona-icon" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <circle cx="12" cy="9.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M6.3 18.2c1.3-2.4 3.4-3.6 5.7-3.6s4.4 1.2 5.7 3.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="plus-icon" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M12 7.5v9M7.5 12h9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="mic-icon" viewBox="0 0 24 24">
+      <rect x="9" y="3.5" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M6 11.5a6 6 0 0 0 12 0M12 17.5v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+  </svg>
 
-  <a class="download" href="Signal-Personas-arm64.dmg">Download for Mac with Apple Silicon
-    <small>M1, M2, M3, M4 or later · macOS 12 or later · about 140 MB</small></a>
-  <a class="download secondary" href="Signal-Personas-x64.dmg">Download for Mac with Intel
-    <small>macOS 12 or later · about 150 MB</small></a>
-  <p class="lede">Not sure which Mac you have? Apple menu → <strong>About This Mac</strong>: it says
+  <h1>Signal Personas</h1>
+  <p class="lede">A research prototype of <em>Cryptographic Personas</em>: a group chat where you can post
+    anonymously or under pseudonyms, rate posts, earn badges and ban bad actors — without anyone, including
+    the server, learning who wrote what. It runs on a private test server, separate from the real Signal.</p>
+
+  <div class="downloads">
+    <a class="download" href="Signal-Personas-arm64.dmg">Download for Apple Silicon
+      <small>M1, M2, M3, M4 or later · about 150 MB</small></a>
+    <a class="download secondary" href="Signal-Personas-x64.dmg">Download for Intel Mac
+      <small>macOS 12 or later · about 155 MB</small></a>
+  </div>
+  <p class="muted">Not sure which Mac you have? Apple menu → <span class="ui">About This Mac</span>. It says
     <em>Chip: Apple M…</em> (Apple Silicon) or <em>Processor: … Intel</em> (Intel).</p>
 
-  <h2>1. Install</h2>
-  <ol>
-    <li>Open the downloaded <code>.dmg</code> and drag <strong>Signal Personas</strong> into <strong>Applications</strong>.</li>
-    <li>Open it from Applications. macOS will refuse the first time, because the app is not
-      registered with Apple:
-      <div class="card">
-        <strong>macOS 15 (Sequoia) or later:</strong> click <em>Done</em>, then open
-        <strong>System Settings → Privacy &amp; Security</strong>, scroll down to the message about
-        Signal Personas, click <strong>Open Anyway</strong>, and confirm.<br><br>
-        <strong>macOS 14 or earlier:</strong> right-click the app, choose <strong>Open</strong>, then <strong>Open</strong> again.
+  <nav class="toc" aria-label="Steps">
+    <a href="#install"><span>1</span>Install</a>
+    <a href="#group"><span>2</span>Make your test group</a>
+    <a href="#button"><span>3</span>Find the persona button</a>
+    <a href="#anon"><span>4</span>Post anonymously</a>
+    <a href="#second"><span>5</span>Add a second account</a>
+    <a href="#features"><span>6</span>Try everything else</a>
+    <a href="#status">Persona status</a>
+    <a href="#help">Help</a>
+  </nav>
+
+  <div class="callout" role="note">
+    <div class="big" aria-hidden="true">⚠️</div>
+    <div>
+      <strong class="title">Personas work in ONE group per app, for now.</strong>
+      The first group you create (or are added to with personas on) becomes your personas group. Any other
+      group — on your main account <em>or</em> on an extra member — will not have personas. So: make
+      <strong>one</strong> test group, and add everyone, including your extra members, to <strong>that</strong>
+      group. Do not create a second group.
+    </div>
+  </div>
+
+  <section class="step" id="install">
+    <div class="step-head"><div class="num">1</div><h2>Install</h2></div>
+    <ol class="do">
+      <li>Open the downloaded <code>.dmg</code> and drag <strong>Signal Personas</strong> into
+        <strong>Applications</strong>.</li>
+      <li>Open it from Applications. The first time, macOS refuses because the app is not registered with Apple:
+        <ul class="tight">
+          <li><strong>macOS 15 (Sequoia) or later:</strong> click <span class="ui">Done</span>, open
+            <span class="ui">System Settings → Privacy &amp; Security</span>, scroll to the message about Signal
+            Personas, click <span class="ui">Open Anyway</span> and confirm.</li>
+          <li><strong>macOS 14 or earlier:</strong> right-click the app, choose <span class="ui">Open</span>, then
+            <span class="ui">Open</span> again.</li>
+        </ul>
+        You only need to do this once.
+      </li>
+      <li>Choose a <strong>display name</strong>. Other testers see it; it does not have to be your real name.</li>
+      <li>Wait about a minute while it creates a test account (a made-up number, no SMS) and downloads the shared
+        cryptographic keys.</li>
+    </ol>
+    <p class="muted">It installs next to the real Signal without touching it: separate app, data and server.</p>
+  </section>
+
+  <section class="step" id="group">
+    <div class="step-head"><div class="num">2</div><h2>Make your test group</h2></div>
+    <ol class="do">
+      <li>Click <span class="ui">New chat</span> (the pencil at the top of the chat list), then
+        <span class="ui">New group</span>.</li>
+      <li>On <span class="ui">Choose members</span>, pick any other testers you see — or click
+        <span class="ui">Skip</span>. You will add your own second account to this group in step 5.</li>
+      <li>Give it a name (for example <em>Personas test</em>) and click <span class="ui">Create</span>.</li>
+      <li>Wait about <strong>30 seconds</strong>. The app turns personas on for this group automatically and gives
+        it its own anonymous identity.</li>
+    </ol>
+    <div class="tip"><strong>Joining someone else's group instead?</strong> That works too: once they add you, that
+      group becomes your personas group. Just don't also create your own.</div>
+    <div class="note"><strong>Group made before this version?</strong> A group admin opens the persona button
+      (step 3) and chooses <span class="ui">Turn on personas in this group</span>. Only one admin should do this.</div>
+  </section>
+
+  <section class="step" id="button">
+    <div class="step-head"><div class="num">3</div><h2>Find the persona button</h2></div>
+    <p>Everything persona-related starts from one button, <strong>next to the message box</strong> at the bottom
+      of your group chat. It looks like this:
+      <svg class="icon" role="img" aria-label="persona button icon"><use href="#persona-icon"/></svg>
+      — a person in a circle, just left of the <svg class="icon" style="color:var(--muted)" role="img"
+      aria-label="plus"><use href="#plus-icon"/></svg> button.</p>
+    <div class="mock">
+      <div class="composer" aria-hidden="true">
+        <span class="field">Message</span>
+        <span class="btn"><svg class="icon"><use href="#mic-icon"/></svg></span>
+        <span class="btn persona"><svg class="icon"><use href="#persona-icon"/></svg></span>
+        <span class="btn"><svg class="icon"><use href="#plus-icon"/></svg></span>
       </div>
-      You only need to do this once.</li>
-    <li>Choose a <strong>display name</strong>. Other testers see it next to your account. It does not
-      need to be your real name.</li>
-    <li>Give it a minute: the app creates a test account (with a made-up phone number — no SMS, no
-      real number needed) and downloads the shared cryptographic keys (about 50 MB).</li>
-  </ol>
-  <p>It installs alongside the real Signal without touching it: separate app, separate data, separate server.</p>
+      <div class="mock-caption">The persona button (highlighted). It turns blue while a persona is selected, so you
+        always know when you are not posting as yourself.</div>
+    </div>
+    <p>Click it to open the <strong>persona menu</strong>. At the very bottom is
+      <span class="ui">Persona status…</span> — your control panel (see <a href="#status">below</a>).</p>
+    <div class="mock">
+      <div class="menu" aria-hidden="true">
+        <div class="item on"><span class="dot"></span>Normal message</div>
+        <div class="item"><span class="dot"></span>Anonymous</div>
+        <div class="sep"></div>
+        <div class="label">Pseudonyms · unlimited, no context</div>
+        <div class="item">New pseudonym</div>
+        <div class="sep"></div>
+        <div class="label">Rate-limited · max 3 per context</div>
+        <div class="item"><span class="dot"></span>#1 &nbsp; #2 &nbsp; #3</div>
+        <div class="sep"></div>
+        <div class="item">Request badge… · Prove badge…</div>
+        <div class="item">Prove authorship…</div>
+        <div class="sep"></div>
+        <div class="item hl">Persona status…</div>
+      </div>
+      <div class="mock-caption">A simplified view of the persona menu.</div>
+    </div>
+  </section>
 
-  <h2>2. Things to try</h2>
-  <ul>
-    <li><strong>Find people.</strong> Other testers who have the app open appear in your contacts automatically.</li>
-    <li><strong>Make a group.</strong> Create a new group and add two or more people. The app sets up the
-      group's own anonymous identity for everyone in it; give it about 30 seconds after creating the group.
-      For a group that already exists, an admin opens the persona menu and chooses <strong>Turn on personas
-      in this group</strong> (only one admin needs to).</li>
-    <li><strong>One personas group per app, for now.</strong> Personas belong to their group: your personas,
-      reputation and badges in one group cannot be linked to another. The app uses personas in the first
-      group it was given them in; elsewhere the persona menu says so.</li>
-    <li><strong>Adding people later works.</strong> Someone added after the group started posting gets the
-      group's state from an admin's app automatically (no old message text), so an admin needs the app
-      open. Until it arrives, their persona menu waits.</li>
-    <li><strong>Post anonymously.</strong> Nobody in the group can tell who sent it — not even from the
-      message metadata.</li>
-    <li><strong>Post as a persona.</strong> A persona is a pseudonym. Posts under the same persona are linked to
-      each other but not to you, and you can use several personas that nobody can link together.</li>
-    <li><strong>React and rate.</strong> Reputation attaches to personas, not to people.</li>
-    <li><strong>Ban someone.</strong> Any member can open a ban poll on a post (needs at least three members);
-      an admin can choose <strong>Ban permanently</strong>, which takes effect within seconds with no poll. A
-      banned author can no longer post anonymously or as a persona — enforced by zero-knowledge proofs, not by
-      trusting the server — and nobody learns who they are.</li>
-  </ul>
-  <h2>Playing several members yourself</h2>
-  <p>A ban poll needs three members, and some things are easiest to see from both sides. You can run
-    two extra members on the same Mac, besides your own: choose <strong>File → Open Extra Member 1</strong>
-    (or <strong>2</strong>), or use the buttons at the bottom of the <strong>Persona status</strong> panel.
-    Each opens in its own window, asks for its own display name the first time, and appears to everyone
-    else as a separate person. Every window is framed in its member's color — green for your own,
-    orange and purple for the extras — with the member's name at the top. Opening an extra member
-    that is already open just brings its window to the front.</p>
-  <p>You can also ask whoever invited you about the <strong>browser members</strong> (alice, bob, carol)
-    you can control from a web page.</p>
+  <section class="step" id="anon">
+    <div class="step-head"><div class="num">4</div><h2>Post anonymously</h2></div>
+    <ol class="do">
+      <li>In your test group, click the persona button
+        <svg class="icon" role="img" aria-label="persona button"><use href="#persona-icon"/></svg> and choose
+        <span class="ui">Anonymous</span>.</li>
+      <li>Type a message and send it. The first one takes a few seconds — your Mac is making a zero-knowledge proof.</li>
+      <li>It shows as <strong>Anonymous</strong>. Nobody in the group can tell it was you, not even from the message
+        metadata.</li>
+      <li>To go back to normal messages, open the persona button and choose <span class="ui">Normal message</span>.</li>
+    </ol>
+  </section>
 
-  <h2>3. Good to know</h2>
-  <div class="warn">This is a test system. Do not share anything sensitive. Accounts and messages may be wiped
-    whenever the test server is reset.</div>
-  <ul>
-    <li><strong>Who sees what.</strong> Your display name is visible to other testers. What you post
-      anonymously or under a persona is not linked to it. The test server delivers messages but
-      cannot read them or tell who wrote a persona post.</li>
-    <li><strong>Posting at the exact same moment</strong> as someone else can occasionally drop one of the two
-      posts. If a post does not show up for others, send it again.</li>
-    <li><strong>Slow first post.</strong> Each persona post includes a zero-knowledge proof made on your Mac,
-      which can take a few seconds.</li>
-    <li><strong>If the test server is reset</strong>, everyone's account is wiped. The app notices,
-      restarts, and registers again with the same name; your contacts come back within a minute or two,
-      but groups have to be created again.</li>
-    <li>Contacts only list people whose app has been open in the last hour.</li>
-    <li><strong>One persona member per account.</strong> If your personas get stuck (your persona posts
-      stop showing up for others), open <strong>Persona status</strong> and choose <strong>Request a
-      reset</strong>. A group admin approves it and you rejoin as a new member — your old reputation,
-      badges and personas are gone. Admins see the request, and whether you proved you are not banned,
-      in the same panel.</li>
-    <li>The app never updates itself; you will be sent a new download when there is a new version.</li>
-  </ul>
+  <section class="step" id="second">
+    <div class="step-head"><div class="num">5</div><h2>See it from the other side: add a second account</h2></div>
+    <p><strong>This is great — but to see how posting anonymously looks to others in the group, you can add a
+      second account on the same Mac.</strong> Each extra account opens in its own window and counts as a separate
+      person.</p>
+    <div class="mock">
+      <div class="windows" aria-hidden="true">
+        <div class="win green"><div class="bar">You</div><div class="body">Your main account</div></div>
+        <div class="win orange"><div class="bar">Extra member 1</div><div class="body">A second person</div></div>
+        <div class="win purple"><div class="bar">Extra member 2</div><div class="body">A third person (for ban polls)</div></div>
+      </div>
+      <div class="mock-caption">Each window is framed in its own colour, with its name at the top.</div>
+    </div>
 
-  <h2>4. Reporting a problem</h2>
-  <ol>
-    <li>Note what you did and roughly when.</li>
-    <li>In the app, open <strong>View → Debug Log</strong> and choose <strong>Save</strong> to keep it as a
-      file. (Uploading the log is turned off in this build, so nothing is sent anywhere.)</li>
-    <li>Send the file and your notes to the person who invited you.</li>
-  </ol>
+    <h3>a. Open the second account</h3>
+    <ol class="do">
+      <li>In your main (<strong style="color:var(--green)">green</strong>) window, open your test group, click the
+        persona button <svg class="icon" role="img" aria-label="persona button"><use href="#persona-icon"/></svg>
+        and choose <span class="ui">Persona status…</span>.</li>
+      <li>At the bottom of the panel, click <span class="ui">Open extra member 1</span>.</li>
+      <li>A new window with an <strong style="color:var(--orange)">orange</strong> frame opens. Choose a display name
+        for it (for example <em>Alex</em>) and wait about a minute for it to set up.</li>
+    </ol>
+    <div class="note"><strong>Don't create a group in the extra member's window.</strong> It would become that
+      account's only personas group. Add it to your existing group instead:</div>
 
-  <h2>5. Uninstalling</h2>
-  <p>Quit the app, delete <strong>Signal Personas</strong> from Applications, and delete the folder
-    <code>~/Library/Application Support/Signal-Personas</code> (plus
-    <code>Signal-Personas-extra-1</code> and <code>-extra-2</code> if you opened extra members).</p>
+    <h3>b. Add it to your test group</h3>
+    <ol class="do">
+      <li>Go back to your <strong style="color:var(--green)">green</strong> main window and open your test group.</li>
+      <li>Click the <strong>group's name</strong> at the top of the chat to open the group's settings.</li>
+      <li>Click <span class="ui">Add members</span>, pick the extra member's display name, and confirm.</li>
+      <li>Keep your main window open. Within about 30 seconds your app sends the new member the group's anonymous
+        identity and current state, automatically (never any old message text).</li>
+      <li>In the orange window, open the group, click the persona button and choose
+        <span class="ui">Persona status…</span>. When <strong>Group state</strong> says <em>Up to date</em>, it is
+        ready.</li>
+    </ol>
+    <div class="tip"><strong>Now try it:</strong> post anonymously from one window and watch it arrive in the other as
+      <em>Anonymous</em>. Then switch roles. Repeat with <span class="ui">Open extra member 2</span>
+      (<strong style="color:var(--purple)">purple</strong>) for a third person — ban polls need three members.</div>
+  </section>
+
+  <section class="step" id="features">
+    <div class="step-head"><div class="num">6</div><h2>Try everything else</h2></div>
+    <p class="muted">These start from the persona button
+      <svg class="icon" role="img" aria-label="persona button"><use href="#persona-icon"/></svg>, or from a
+      message's menu (right-click the message, or hover over it and click <span class="ui">⋯</span>).</p>
+    <div class="features">
+      <div class="feature">
+        <h3>Pseudonyms</h3>
+        <p>A made-up name like <em>~eligible turtle</em>. Posts under one pseudonym are linked to each other but not to
+          you, and nobody can link your different pseudonyms together.</p>
+        <p class="how">Persona button → <span class="ui">New pseudonym</span>, then send.</p>
+      </div>
+      <div class="feature">
+        <h3>Contexts &amp; rate-limited personas</h3>
+        <p>A context is a topic. In each one you get at most <strong>3</strong> personas (#1–#3), enforced by the
+          proof itself, so nobody can flood a topic with fake voices.</p>
+        <p class="how">An admin creates one: persona button → <span class="ui">New context…</span>. Then choose the
+          context and #1, #2 or #3.</p>
+      </div>
+      <div class="feature">
+        <h3>Rate posts</h3>
+        <p>Give a persona post 👍 or 👎. Reputation belongs to the persona, not the person, and only its owner can
+          see it.</p>
+        <p class="how">Message menu → <span class="ui">React</span> → 👍 / 👎. The author's score updates in Persona
+          status after their next post.</p>
+      </div>
+      <div class="feature">
+        <h3>Badges</h3>
+        <p>Faculty, Student or Industry — granted by an admin and shown on your posts. You can prove you hold one
+          without revealing who you are.</p>
+        <p class="how">Persona button → <span class="ui">Request badge…</span>. An admin clicks
+          <span class="ui">Approve</span> in the chat. It appears after your next post; then choose it under
+          <span class="ui">Badge</span>, or use <span class="ui">Prove badge…</span>.</p>
+      </div>
+      <div class="feature">
+        <h3>Prove authorship</h3>
+        <p>Show that two of your pseudonyms are the same person — your choice, and permanent.</p>
+        <p class="how">Post under two pseudonyms first, then persona button →
+          <span class="ui">Prove authorship…</span>.</p>
+      </div>
+      <div class="feature">
+        <h3>Ban someone</h3>
+        <p>A banned author can no longer post anonymously or as a persona — and still nobody learns who they are.</p>
+        <p class="how">Message menu → <span class="ui">Request ban poll…</span> (anyone; the group votes) or
+          <span class="ui">Ban permanently</span> (admins; takes effect within seconds, no poll).</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="step" id="status">
+    <div class="step-head"><div class="num">★</div><h2>The Persona status panel</h2></div>
+    <p>Persona button <svg class="icon" role="img" aria-label="persona button"><use href="#persona-icon"/></svg>
+      → <span class="ui">Persona status…</span>. A green check means all is well.</p>
+    <table class="status">
+      <tr><td>Anonymous sending</td><td><em>Ready</em> once the other members have been heard from. Until then, wait
+        before posting anonymously.</td></tr>
+      <tr><td>Group state</td><td><em>Up to date</em> — or <em>Waiting for an admin</em> if you were added later (an
+        admin's app sends it automatically).</td></tr>
+      <tr><td>Membership</td><td>Happens automatically on your first persona action.</td></tr>
+      <tr><td>Reputation</td><td>Your own score from 👍/👎. Only you can see it.</td></tr>
+      <tr><td>Badges</td><td>The badges you hold.</td></tr>
+      <tr><td>Am I banned?</td><td>Yes or No. A ban lands at your next scan, which runs before every persona post.</td></tr>
+      <tr><td>Contexts</td><td>The topics in this group.</td></tr>
+    </table>
+    <p>Admins also see <strong>badge requests</strong> and <strong>reset requests</strong> here, with Approve and
+      Dismiss buttons. At the bottom: <span class="ui">Open extra member 1</span> / <span class="ui">2</span>, and
+      <span class="ui">Scan now</span>, which picks up anything waiting for you (badges, ratings, bans) right away.</p>
+  </section>
+
+  <section class="step" id="help">
+    <div class="step-head"><div class="num">?</div><h2>Good to know &amp; help</h2></div>
+    <ul class="tight">
+      <li><strong>This is a test system.</strong> Don't share anything sensitive; accounts and messages may be wiped
+        when the test server is reset.</li>
+      <li><strong>Posting at the exact same moment</strong> as someone else can occasionally lose one of the two posts.
+        If a post doesn't show up for others, send it again.</li>
+      <li><strong>Persona posts stopped getting through?</strong> Persona status → <span class="ui">Request a
+        reset</span>. An admin approves it and you rejoin as a new member (your reputation, badges and personas start
+        over).</li>
+      <li><strong>Contacts</strong> list testers whose app was open in the last hour.</li>
+      <li><strong>Server reset:</strong> the app re-registers with the same name on its own; groups have to be made
+        again.</li>
+      <li><strong>Updates</strong> don't install themselves — you'll be sent a new download.</li>
+    </ul>
+    <details>
+      <summary>Reporting a problem</summary>
+      <ol class="do">
+        <li>Note what you did and roughly when.</li>
+        <li>In the app, choose <span class="ui">View → Debug Log</span>, then <span class="ui">Save</span>. (Nothing is
+          uploaded.)</li>
+        <li>Send the file and your notes to the person who invited you.</li>
+      </ol>
+    </details>
+    <details>
+      <summary>Uninstalling</summary>
+      <p>Quit the app, delete <strong>Signal Personas</strong> from Applications, and delete the folder
+        <code>~/Library/Application Support/Signal-Personas</code> (plus <code>Signal-Personas-extra-1</code> and
+        <code>-extra-2</code> if you opened extra members).</p>
+    </details>
+  </section>
 
   <footer>Cryptographic Personas — research prototype. Questions? Ask the person who invited you.</footer>
 </main>

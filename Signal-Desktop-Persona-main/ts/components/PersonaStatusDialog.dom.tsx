@@ -201,6 +201,16 @@ export function PersonaStatusDialog({
                 }
               />
               <Row
+                label="Am I banned?"
+                ok={status.banned === false}
+                value={bannedLabel(status.banned)}
+                detail={
+                  status.banned === false
+                    ? 'A ban lands at your next scan, which runs before every persona post.'
+                    : undefined
+                }
+              />
+              <Row
                 label="Contexts"
                 value={
                   status.topics.length > 0
@@ -382,6 +392,13 @@ export function PersonaStatusDialog({
       </AxoDialog.Content>
     </AxoDialog.Root>
   );
+}
+
+function bannedLabel(banned: boolean | undefined): string {
+  if (banned == null) {
+    return 'Unknown';
+  }
+  return banned ? 'Yes' : 'No';
 }
 
 function Notice({
