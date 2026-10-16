@@ -315,6 +315,12 @@ pub enum Record {
         cb_memb_root: Ark<F>,
         cb_nmemb_root: Ark<F>,
     },
+
+    /// A group admin's PERMANENT BAN of the author of post `target`: its callback is
+    /// invoked with `BAN_FLAG` at the next barrier, with no poll and nothing anyone can
+    /// vote down. Carries no proof; like [`Record::RejoinApprove`] it is sent under the
+    /// admin's own account and the client ingests it only from a Signal group admin.
+    Ban { target: Eh },
 }
 
 impl Record {
@@ -330,6 +336,7 @@ impl Record {
             Record::BadgeRequest { .. } => "BadgeRequest",
             Record::BadgeApprove { .. } => "BadgeApprove",
             Record::RejoinApprove { .. } => "RejoinApprove",
+            Record::Ban { .. } => "Ban",
         }
     }
 }

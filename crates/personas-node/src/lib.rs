@@ -132,9 +132,9 @@ pub struct JsJoinCounts {
 /// The account a join or re-join approval names, and which kind it is.
 #[napi(object)]
 pub struct JsAccountClaim {
-    /// `"join"` or `"rejoin-approve"`.
+    /// `"join"`, `"rejoin-approve"` or `"ban"`.
     pub kind: String,
-    /// The account's ACI as 32 hex characters (no dashes).
+    /// The account's ACI as 32 hex characters (no dashes); empty for a ban.
     pub account: String,
 }
 
@@ -797,6 +797,16 @@ impl Engine {
         self.emit(r)
     }
 
+    /// As a group admin: ban the author of post `target` (its eh, hex) permanently and
+    /// at once — no poll. Send it under the admin's OWN account: members only ingest it
+    /// from an admin.
+    #[napi]
+    pub fn emit_ban(&mut self, target: String) -> napi::Result<JsEmitted> {
+        let target = eh_from_hex(&target)?;
+        let r = self.inner.emit_ban(target);
+        self.emit(r)
+    }
+
     /// The proof a reset request carries: this member, as `account`, is not banned and
     /// has just completed a scan sweep, against the group's current tree. Fails when the
     /// member is banned, has not swept since its last action, or is out of sync.
@@ -850,6 +860,13 @@ impl Engine {
             personas_bulletin::replica::record::Record::Join { account, .. } => ("join", account.0),
             personas_bulletin::replica::record::Record::RejoinApprove { account } => {
                 ("rejoin-approve", account.0)
+            }
+            // A ban names no account, but like an approval it must come from an admin.
+            personas_bulletin::replica::record::Record::Ban { .. } => {
+                return Some(JsAccountClaim {
+                    kind: "ban".to_string(),
+                    account: String::new(),
+                });
             }
             _ => return None,
         };

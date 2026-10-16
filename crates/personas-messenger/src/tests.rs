@@ -406,6 +406,76 @@ mod e2e {
         );
     }
 
+    /// An admin's PERMANENT BAN is one record, not a poll: one barrier later the post's
+    /// ticket is invoked with BAN_FLAG, the author's posts are flagged, and the author's
+    /// next scan bans them. Nothing anyone votes can undo it.
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_an_admin_ban_takes_effect_at_the_next_barrier_with_no_poll() {
+        let mut rng = StdRng::seed_from_u64(61);
+        let keys = keygen(&mut rng);
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let conv = ConversationId("ban".into());
+        let new_member = |rng: &mut StdRng| {
+            Msg::new(
+                transport.clone(),
+                conv.clone(),
+                keys.replica.clone(),
+                config(),
+                Some(Member::create(keys.member.clone(), rng)),
+            )
+        };
+        let mut poster = new_member(&mut rng);
+        let mut admin = new_member(&mut rng);
+        let joins = [
+            poster.emit_join(&mut rng, acct()).unwrap(),
+            admin.emit_join(&mut rng, acct()).unwrap(),
+        ];
+        for e in &joins {
+            deliver(&mut poster, e);
+            deliver(&mut admin, e);
+        }
+        let post = poster
+            .emit_post_pseudo(&mut rng, "the offending post", F::from(0xBA4))
+            .unwrap();
+        deliver(&mut admin, &post);
+
+        let ban = admin.emit_ban(post.eh).unwrap();
+        assert_eq!(deliver(&mut poster, &ban).unwrap().unwrap(), Status::Applied);
+        assert!(admin.replica().derived().polls.is_empty(), "no poll is opened");
+        for m in [&mut poster, &mut admin] {
+            m.barrier();
+        }
+        assert_eq!(fingerprint(&poster), fingerprint(&admin), "both agree");
+        assert!(
+            poster
+                .render()
+                .iter()
+                .any(|line| line.starts_with(render::FLAG_PREFIX)),
+            "the banned persona's post is flagged"
+        );
+
+        let scan = poster.emit_scan(&mut rng).unwrap();
+        assert_eq!(deliver(&mut admin, &scan).unwrap().unwrap(), Status::Applied);
+        assert_eq!(poster.member().unwrap().user.data.banned, F::from(1), "banned");
+        // Its persona proofs are no longer satisfiable: either proving refuses, or the
+        // proof it makes is rejected by everyone else.
+        match poster.emit_post_anon(&mut rng, "still here?") {
+            Err(_) => {}
+            Ok(post) => assert!(
+                matches!(deliver(&mut admin, &post).unwrap().unwrap(), Status::Rejected(_)),
+                "a banned member's persona post is refused"
+            ),
+        }
+
+        // Banning the same post again is the identical record: a duplicate, no change.
+        let before = fingerprint(&poster);
+        let again = admin.emit_ban(post.eh).unwrap();
+        assert_eq!(again.eh, ban.eh);
+        deliver(&mut poster, &again);
+        assert_eq!(fingerprint(&poster), before);
+    }
+
     /// **The d5 convergence proof.** Four replicas receive the same records in different
     /// arrival orders *and* run their heartbeats out of step, yet converge on
     /// byte-identical roots — because each record's settlement barrier is bucketed from

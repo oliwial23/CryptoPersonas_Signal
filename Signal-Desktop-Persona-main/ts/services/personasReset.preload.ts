@@ -363,5 +363,11 @@ export function recordSenderProblem(
   ) {
     return 'a re-join approval from someone who is not a group admin';
   }
+  if (
+    claim.kind === 'ban' &&
+    !(senderServiceId && conversation.isAdmin(senderServiceId as never))
+  ) {
+    return 'a ban from someone who is not a group admin';
+  }
   return undefined;
 }

@@ -37,7 +37,6 @@ import { getSealedSenderReadiness } from './personasSealedSender.preload.ts';
 import { listTopics } from './personasTopics.preload.ts';
 import { isAutoScanEnabled } from './personasFlags.preload.ts';
 
-export { KNOWN_LIMITATIONS } from './personasLimitations.std.ts';
 
 const log = createLogger('personasStatus');
 

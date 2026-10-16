@@ -409,6 +409,15 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     /// As a group admin, allow `account` one more join (after it asked for a reset).
     /// The client sends this under the admin's own account and every member checks the
     /// sender is an admin before ingesting it.
+    /// As a group admin: ban the author of post `target` permanently, with no poll.
+    /// Send it under the admin's OWN account: members only ingest it from an admin.
+    pub fn emit_ban(&mut self, target: Eh) -> Result<Emitted, SendError> {
+        if self.member.is_none() {
+            return Err(SendError::Observer);
+        }
+        self.emit(Record::Ban { target })
+    }
+
     pub fn emit_rejoin_approve(&mut self, account: F) -> Result<Emitted, SendError> {
         if self.member.is_none() {
             return Err(SendError::Observer);

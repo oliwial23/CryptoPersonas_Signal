@@ -125,19 +125,15 @@ export function MessageContextMenu({
             menu item uses. */}
         {/* "Ban author…" rather than "Open revocation poll": an admin looking for a way
             to ban someone searches for the word ban, and the old label hid the feature
-            from the person it was built for. The trailing ellipsis is doing real work —
-            it signals that this STARTS something rather than finishing it, because the
-            protocol has no unilateral ban. A ban exists only as a poll that settles at
-            a barrier, so one admin click cannot remove anyone by itself. */}
+            from the person it was built for. The trailing ellipsis on the request
+            signals that it STARTS something (a poll) rather than finishing it. */}
         {/* TWO distinct actions, deliberately not one.
             "Request ban poll" is open to every member: anyone may raise a post for the
             group to judge. It opens the poll and casts nothing, so a request is never
             misreported as a verdict.
-            "Ban permanently" is admin-only and also casts the admin's Ban ballot, which
-            is what makes the poll carry at its close barrier and actually revoke the
-            author's persona privileges. The wording says "permanently" because that is
-            the user-visible effect; the honest caveat (a Keep vote can still cancel it)
-            lives in sendPersonaBanPoll's doc comment and in the workplan. */}
+            "Ban permanently" is admin-only and is NOT a poll: one Ban record, sent under
+            the admin's own account, that every replica applies at the next barrier
+            (sendPersonaBan). Nobody can vote it down. */}
         {onPersonaBanPoll && (
           <AxoMenuBuilder.Item symbol="block" onSelect={onPersonaBanPoll}>
             Request ban poll…

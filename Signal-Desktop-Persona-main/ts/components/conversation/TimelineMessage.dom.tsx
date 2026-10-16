@@ -585,8 +585,9 @@ export function TimelineMessage(props: Props): JSX.Element {
         description={
           'You are about to ban this user. They will lose anonymous and pseudonymous ' +
           'posting in this group and will only be able to send messages under their ' +
-          'real identity here. This takes effect at the next settlement barrier and ' +
-          'cannot be undone. Do you want to proceed?'
+          'real identity here. It takes effect within a few seconds, with no poll, and ' +
+          'cannot be undone. The group will see that you issued it; who wrote the post ' +
+          'stays hidden. Do you want to proceed?'
         }
       >
         <AxoConfirmDialog.Cancel />

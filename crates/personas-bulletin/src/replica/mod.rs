@@ -794,6 +794,25 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 Status::Applied
             }
 
+            Record::Ban { target } => {
+                // An admin's decision (checked by the client before ingest): the post's
+                // ticket falls due at once and is invoked with BAN_FLAG at the next
+                // barrier (`settle_barrier`), exactly as a passed ban poll would.
+                match derived.outstanding.get_mut(target) {
+                    Some(out) if out.settled => return Status::Rejected("post already settled"),
+                    Some(out) => out.banned = true,
+                    None => return Status::Rejected("no such post"),
+                }
+                derived.log.push(LogEntry {
+                    eh,
+                    kind: "Ban",
+                    author: None,
+                    body: String::new(),
+                    flagged: false,
+                });
+                Status::Applied
+            }
+
             Record::RejoinApprove { account } => {
                 // Admin-ness is checked by the client before ingest (the record is sent
                 // under the admin's own account); here it only grants the allowance.
@@ -1184,6 +1203,8 @@ fn is_applicable(record: &Record, produced: &HashSet<[u8; 32]>, derived: &Derive
         // An approval pins no root: it carries no proof, only a reference to a ticket
         // the replica already holds.
         Record::BadgeApprove { target, .. } => derived.outstanding.contains_key(target),
+        // Likewise a ban: it names a post whose ticket the replica holds.
+        Record::Ban { target } => derived.outstanding.contains_key(target),
         Record::Rate { obj_root, .. } => holds(obj_root.0),
         Record::Scan { obj_root, .. } => holds(obj_root.0),
         Record::Vote { poll, obj_root, .. } => {
