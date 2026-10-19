@@ -1044,7 +1044,7 @@ const getPropsForMessage = (
           kind: message.personaPoll.kind,
           myVote: message.personaMyVote,
           statusLine: message.personaEh
-            ? getPollStatusLine(message.personaEh)
+            ? getPollStatusLine(conversation.groupId, message.personaEh)
             : undefined,
         }
       : undefined,
@@ -1058,7 +1058,10 @@ const getPropsForMessage = (
           eh: message.personaBadgeNotice.eh,
           slot: message.personaBadgeNotice.slot,
           name: badgeNameForSlot(message.personaBadgeNotice.slot),
-          pending: isBadgeRequestPending(message.personaBadgeNotice.eh),
+          pending: isBadgeRequestPending(
+            conversation.groupId,
+            message.personaBadgeNotice.eh
+          ),
           // Signal's own group-admin role. A client-side gate: nothing in the replica's
           // accept rule checks it, so this hides the button rather than preventing the
           // record — the same honest limitation as the ban button.

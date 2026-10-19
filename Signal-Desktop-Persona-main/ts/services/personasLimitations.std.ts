@@ -8,7 +8,7 @@
 // renderer bundle. One line each; only what changes how someone demos it.
 
 export const PERSONA_TIPS: ReadonlyArray<string> = [
-  'Each group has its own personas; they cannot be linked across groups. This app uses personas in one group for now.',
+  'Each group has its own personas; they cannot be linked across groups. An account can use personas in up to 3 groups.',
   'Someone added later needs an admin\u2019s app open to get started.',
   'If two people post at the same moment, one post can be lost \u2014 send it again.',
   'An admin\u2019s permanent ban takes effect within seconds; the group sees which admin issued it.',

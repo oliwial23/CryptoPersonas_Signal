@@ -136,12 +136,13 @@ export function getPersonaStatus(
     ? getSealedSenderReadiness(conversation)
     : { ready: false, missing: [], total: 0 };
 
+  const groupId = conversation?.get('groupId');
   const status: PersonaStatus = {
     enabled,
-    joined: hasJoinedPersonaGroup(),
+    joined: hasJoinedPersonaGroup(groupId),
     sealedSenderReady: readiness.ready,
     sealedSenderMissing: readiness.missing,
-    topics: listTopics(),
+    topics: groupId ? listTopics(groupId) : [],
     polls: [],
     recordCount: 0,
     isSignalAdmin: conversation?.areWeAdmin() ?? false,
@@ -152,9 +153,9 @@ export function getPersonaStatus(
     scanStuck: false,
     outstandingCallbacks: 0,
     stateLost: false,
-    resetState: ownResetState(),
-    catchUp: catchUpState(),
-    resetRequests: conversation?.areWeAdmin() ? listResetRequests() : [],
+    resetState: ownResetState(groupId),
+    catchUp: catchUpState(groupId),
+    resetRequests: conversation?.areWeAdmin() ? listResetRequests(groupId) : [],
   };
 
   if (!enabled) {
@@ -164,7 +165,7 @@ export function getPersonaStatus(
   // Engine reads are best-effort: a status panel must never be the thing that breaks
   // the app, and an unavailable engine is itself worth reporting (as undefined).
   try {
-    const engine = getPersonasEngine();
+    const engine = getPersonasEngine(groupId);
     if (engine) {
       status.barrier = engine.currentBarrier();
       status.fingerprint = engine.fingerprint();
@@ -187,7 +188,7 @@ export function getPersonaStatus(
         status.heldBadges = engine.getBadges();
       }
 
-      status.pendingBadgeRequests = pendingBadgeRequests();
+      status.pendingBadgeRequests = pendingBadgeRequests(groupId);
 
       status.authorshipZk =
         typeof engine.emitAuthorship === 'function' &&

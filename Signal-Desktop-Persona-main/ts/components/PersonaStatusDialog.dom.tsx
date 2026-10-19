@@ -8,7 +8,7 @@
 // row explains itself only when something is wrong. Developer diagnostics (barrier,
 // replica fingerprint) are one small line at the bottom, for bug reports.
 
-import { type JSX } from 'react';
+import { type JSX, type ReactNode } from 'react';
 
 import { AxoButton } from '../axo/AxoButton.dom.tsx';
 import { AxoDialog } from '../axo/AxoDialog.dom.tsx';
@@ -74,6 +74,8 @@ export type PersonaStatusDialogProps = {
   onApproveReset?: (account: string) => void;
   /** As an admin: hide a reset request (local only). */
   onDismissReset?: (account: string) => void;
+  /** Your contact code, and adding someone by theirs (PersonaContactsPanel). */
+  contactsPanel?: ReactNode;
 };
 
 function Row({
@@ -119,6 +121,7 @@ export function PersonaStatusDialog({
   onRequestReset,
   onApproveReset,
   onDismissReset,
+  contactsPanel,
 }: PersonaStatusDialogProps): JSX.Element {
   const caughtUp = (status?.catchUp ?? 'done') === 'done';
   return (
@@ -134,7 +137,7 @@ export function PersonaStatusDialog({
               Personas are not enabled in this app.
             </div>
           ) : (
-            <div className={tw('divide-border-primary divide-y')}>
+            <div className={tw('divide-(--axo-color-border-primary) divide-y')}>
               {status.banned === true && (
                 <Notice title="You are banned in this group">
                   A group admin banned you. You can still send normal messages
@@ -339,6 +342,9 @@ export function PersonaStatusDialog({
                   )}
                 </Section>
               )}
+              {contactsPanel != null && (
+                <Section title="Contacts">{contactsPanel}</Section>
+              )}
               <Section title="Good to know">
                 <ul className={tw('flex list-disc flex-col gap-1 ps-4')}>
                   {PERSONA_TIPS.map(tip => (
@@ -410,7 +416,7 @@ function Notice({
 }): JSX.Element {
   return (
     <div
-      className={tw('bg-fill-secondary mb-2 rounded-lg p-3 type-body-medium')}
+      className={tw('bg-secondary mb-2 rounded-lg p-3 type-body-medium')}
     >
       <div className={tw('mb-1 flex items-center gap-1.5 font-semibold')}>
         <AxoSymbol.InlineGlyph symbol="x-circle" label={null} />

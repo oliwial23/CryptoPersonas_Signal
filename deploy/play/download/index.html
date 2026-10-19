@@ -153,7 +153,8 @@
     <a href="#button"><span>3</span>Find the persona button</a>
     <a href="#anon"><span>4</span>Post anonymously</a>
     <a href="#second"><span>5</span>Add a second account</a>
-    <a href="#features"><span>6</span>Try everything else</a>
+    <a href="#contacts"><span>6</span>Add other testers</a>
+    <a href="#features"><span>7</span>Try everything else</a>
     <a href="#status">Persona status</a>
     <a href="#help">Help</a>
   </nav>
@@ -161,11 +162,11 @@
   <div class="callout" role="note">
     <div class="big" aria-hidden="true">⚠️</div>
     <div>
-      <strong class="title">Personas work in ONE group per app, for now.</strong>
-      The first group you create (or are added to with personas on) becomes your personas group. Any other
-      group — on your main account <em>or</em> on an extra member — will not have personas. So: make
-      <strong>one</strong> test group, and add everyone, including your extra members, to <strong>that</strong>
-      group. Do not create a second group.
+      <strong class="title">Each account can use personas in up to 3 groups.</strong>
+      Every group has its own personas, reputation, badges and bans — nothing carries over between groups. Your
+      main account and each extra member count separately (3 groups each). Once an account is in 3 personas
+      groups, any further group it joins won't have personas. Start with <strong>one</strong> test group and add
+      everyone, including your extra members, to it.
     </div>
   </div>
 
@@ -202,8 +203,8 @@
       <li>Wait about <strong>30 seconds</strong>. The app turns personas on for this group automatically and gives
         it its own anonymous identity.</li>
     </ol>
-    <div class="tip"><strong>Joining someone else's group instead?</strong> That works too: once they add you, that
-      group becomes your personas group. Just don't also create your own.</div>
+    <div class="tip"><strong>Want more groups?</strong> Each account can have personas in up to 3 groups; make
+      another the same way. Each group has its own personas, so try one first.</div>
     <div class="note"><strong>Group made before this version?</strong> A group admin opens the persona button
       (step 3) and chooses <span class="ui">Turn on personas in this group</span>. Only one admin should do this.</div>
   </section>
@@ -283,8 +284,8 @@
       <li>A new window with an <strong style="color:var(--orange)">orange</strong> frame opens. Choose a display name
         for it (for example <em>Alex</em>) and wait about a minute for it to set up.</li>
     </ol>
-    <div class="note"><strong>Don't create a group in the extra member's window.</strong> It would become that
-      account's only personas group. Add it to your existing group instead:</div>
+    <div class="note"><strong>Don't create a new group in the extra member's window</strong> — to see your posts
+      from the other side, it needs to be in the <em>same</em> group. Add it to your existing group:</div>
 
     <h3>b. Add it to your test group</h3>
     <ol class="do">
@@ -302,8 +303,37 @@
       (<strong style="color:var(--purple)">purple</strong>) for a third person — ban polls need three members.</div>
   </section>
 
+  <section class="step" id="contacts">
+    <div class="step-head"><div class="num">6</div><h2>Add other testers with a contact code</h2></div>
+    <p>For privacy, testers can't see each other: your contacts start out as just the shared demo members
+      (alice, bob, carol) and your own extra members. To add another tester, swap <strong>contact codes</strong>
+      — a short code like <code>K7PQ-2MXD</code> that only finds you.</p>
+    <h3>a. Find your own code</h3>
+    <ol class="do">
+      <li>Open <span class="ui">Settings</span> (the gear at the bottom of the left sidebar), then
+        <span class="ui">General</span>. Your code is at the top, under <strong>Signal Personas contacts</strong>.
+        <br><span class="muted">Or, in a personas group: persona button
+        <svg class="icon" role="img" aria-label="persona button"><use href="#persona-icon"/></svg> →
+        <span class="ui">Persona status…</span> → <strong>Contacts</strong>.</span></li>
+      <li>Click <span class="ui">Copy</span> and send it to the other tester yourself — by text, email or in
+        person.</li>
+    </ol>
+    <h3>b. Add someone by their code</h3>
+    <ol class="do">
+      <li>In the same place, under <strong>Add a Signal Personas user</strong>, type the code they gave you and click
+        <span class="ui">Add</span>.</li>
+      <li>A chat with them opens. They are now in your contacts: you can message them, or add them to your test group
+        (open the group, click its name, <span class="ui">Add members</span>).</li>
+    </ol>
+    <div class="tip"><strong>Adding is one-way.</strong> Entering someone's code adds <em>them</em> to <em>your</em>
+      contacts. They see you once you message them or add them to a group. Anyone you share a group with also shows up
+      in your contacts automatically.</div>
+    <div class="note"><strong>Shared your code too widely?</strong> Click <span class="ui">New code</span>. The old
+      code stops working at once; people who already added you keep you.</div>
+  </section>
+
   <section class="step" id="features">
-    <div class="step-head"><div class="num">6</div><h2>Try everything else</h2></div>
+    <div class="step-head"><div class="num">7</div><h2>Try everything else</h2></div>
     <p class="muted">These start from the persona button
       <svg class="icon" role="img" aria-label="persona button"><use href="#persona-icon"/></svg>, or from a
       message's menu (right-click the message, or hover over it and click <span class="ui">⋯</span>).</p>
@@ -381,8 +411,8 @@
       <li><strong>Persona posts stopped getting through?</strong> Persona status → <span class="ui">Request a
         reset</span>. An admin approves it and you rejoin as a new member (your reputation, badges and personas start
         over).</li>
-      <li><strong>Who you can see:</strong> your contacts are only the shared demo members (alice, bob, carol) and
-        your own extra members. Other testers can't see your account, and you can't see theirs.</li>
+      <li><strong>Who can see you:</strong> only the people you give your contact code to, plus anyone you share a
+        group with. Everyone sees the shared demo members (alice, bob, carol). See <a href="#contacts">step 6</a>.</li>
       <li><strong>Server reset:</strong> the app re-registers with the same name on its own; groups have to be made
         again.</li>
       <li><strong>Updates</strong> don't install themselves — you'll be sent a new download.</li>

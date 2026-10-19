@@ -146,7 +146,8 @@ import {
 } from './messageReceiverEvents.std.ts';
 import {
   PHANTOM_SENDER_ACI,
-  getExpectedPhantomCertificate,
+  hasAnyPhantomCertificate,
+  isExpectedPhantomCertificate,
 } from '../services/personasPhantomCert.std.ts';
 import { createLogger } from '../logging/log.std.ts';
 import { diffArraysAsSets } from '../util/diffArraysAsSets.std.ts';
@@ -1659,15 +1660,15 @@ export default class MessageReceiver
     // identify the poster; a mismatch is what a distributor tagging one member with a
     // different certificate looks like, so it is refused rather than trusted.
     if (certificate.senderUuid() === PHANTOM_SENDER_ACI) {
-      const expected = getExpectedPhantomCertificate();
-      if (!expected) {
+      if (!hasAnyPhantomCertificate()) {
         throw new Error(
           `${logId}: phantom-sender message before this member holds a phantom bundle`
         );
       }
-      if (!Bytes.areEqual(certificate.serialize(), expected)) {
+      // One of OUR groups' certificates, byte for byte (one per personas group).
+      if (!isExpectedPhantomCertificate(certificate.serialize())) {
         throw new Error(
-          `${logId}: phantom certificate does not match our bundle; refusing it`
+          `${logId}: phantom certificate does not match any of our bundles; refusing it`
         );
       }
     }

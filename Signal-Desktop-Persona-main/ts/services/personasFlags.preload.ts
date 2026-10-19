@@ -23,12 +23,12 @@
 // which only need to RECORD a post (notably the conversation model) do not have to
 // import the native ZK addon transitively.
 
-import type { ConversationModel } from '../models/conversations.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
 import { drop } from '../util/drop.std.ts';
 import {
+  builtPersonasEngines,
   isPersonasEngineEnabled,
   isPostFlagged,
 } from './personasEngine.preload.ts';
@@ -92,16 +92,19 @@ async function refreshPersonaFlags(): Promise<number> {
 
   let changed = 0;
   for (const [eh, messageId] of tracked) {
-    const flagged = isPostFlagged(eh);
-    if (flagged == null) {
-      // The engine has no entry for this eh (it may have been rejected, or this
-      // replica has not folded it yet). Leave the message as it is.
-      continue;
-    }
-
     const message = window.MessageCache.getById(messageId);
     if (!message) {
       // Scrolled out of the cache; it will be re-tracked when reloaded.
+      continue;
+    }
+    // The post's own group: each personas group has its own engine.
+    const groupId = window.ConversationController.get(
+      message.get('conversationId')
+    )?.get('groupId');
+    const flagged = isPostFlagged(groupId, eh);
+    if (flagged == null) {
+      // The engine has no entry for this eh (it may have been rejected, or this
+      // replica has not folded it yet). Leave the message as it is.
       continue;
     }
     if (Boolean(message.get('personaFlagged')) === flagged) {
@@ -123,12 +126,8 @@ async function refreshPersonaFlags(): Promise<number> {
 let refreshInterval: NodeJS.Timeout | undefined;
 let scanInterval: NodeJS.Timeout | undefined;
 
-// Start both loops. `getConversation` is injected so this module does not have to
-// guess which conversation the demo group is — the caller supplies the currently
-// selected one, which in the demo is the persona group.
-export function startPersonaFlagLoops(
-  getConversation: () => ConversationModel | undefined
-): void {
+// Start both loops. The idle scan tends every personas group whose engine is built.
+export function startPersonaFlagLoops(): void {
   if (!isPersonasEngineEnabled()) {
     return;
   }
@@ -148,19 +147,21 @@ export function startPersonaFlagLoops(
 
   if (!scanInterval && isAutoScanEnabled()) {
     scanInterval = setInterval(() => {
-      // Only a joined member has callbacks to absorb, and only then is a scan record
-      // acceptable to the other replicas.
-      if (!hasJoinedPersonaGroup()) {
-        return;
-      }
-      const conversation = getConversation();
-      if (!conversation) {
-        return;
-      }
       drop(
-        sendPersonaScan(conversation).catch(error =>
-          log.error(`scan failed: ${toLogFormat(error)}`)
-        )
+        (async () => {
+          for (const [groupId] of builtPersonasEngines()) {
+            // Only a joined member has callbacks to absorb, and only then is a scan
+            // record acceptable to the other replicas.
+            const conversation = window.ConversationController.get(groupId);
+            if (!conversation || !hasJoinedPersonaGroup(groupId)) {
+              continue;
+            }
+            // oxlint-disable-next-line no-await-in-loop
+            await sendPersonaScan(conversation).catch(error =>
+              log.error(`scan failed: ${toLogFormat(error)}`)
+            );
+          }
+        })()
       );
     }, SCAN_INTERVAL_MS);
   }

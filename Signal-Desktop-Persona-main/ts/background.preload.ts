@@ -19,10 +19,9 @@ import { ensureDemoProfileUploaded } from './textsecure/personaAutoRegister.prel
 import { warmPersonasEngine } from './services/personasEngine.preload.ts';
 import { startPersonaFlagLoops } from './services/personasFlags.preload.ts';
 import { ensureOnePseudonym } from './services/personasPseudonyms.preload.ts';
-import { getSelectedConversationId } from './state/selectors/nav.std.ts';
 import {
   warmPhantomMaterial,
-  getPhantomTrustRootBase64,
+  getPhantomTrustRootsBase64,
   installPhantomChain,
   onPhantomMaterialReady,
   startPhantomDistribution,
@@ -609,22 +608,25 @@ async function startApp(): Promise<void> {
     // against — that is what admits phantom-sender group messages. No-op (and no
     // extra trust root) for non-demo builds.
     await warmPhantomMaterial();
-    const phantomTrustRoot = getPhantomTrustRootBase64();
+    const phantomTrustRoots = getPhantomTrustRootsBase64();
 
     log.info('Initializing MessageReceiver');
     messageReceiver = new MessageReceiver({
       storage: itemStorage,
       serverTrustRoots: [
         ...window.getServerTrustRoots(),
-        ...(phantomTrustRoot ? [phantomTrustRoot] : []),
+        ...phantomTrustRoots,
       ],
     });
-    // Personas demo: a member that joins a group after boot receives the phantom bundle
-    // later, 1:1. When it arrives (or right away, if already held), admit its trust root
-    // and build the engine on the bundle's barrier schedule.
+    // Personas demo: a member added to a group after boot receives its phantom bundle
+    // later, 1:1. When each bundle arrives (or right away, for those already held), admit
+    // its trust root and build that group's engine on the bundle's barrier schedule.
     onPhantomMaterialReady(mat => {
       messageReceiver?.addServerTrustRoot(mat.trustRootPublicBase64);
-      warmPersonasEngine();
+      warmPersonasEngine(mat.groupId);
+      // Mint one unlimited pseudonym so the group's picker is never empty. Its petname
+      // stays unknown until its first post — the engine only reveals that on emit.
+      ensureOnePseudonym(mat.groupId);
     });
     window.ConversationController.registerDelayBeforeUpdatingRedux(() => {
       if (backupsService.isImportRunning()) {
@@ -1651,16 +1653,7 @@ async function startApp(): Promise<void> {
       // ingest time is only ever correct at that instant — without this loop a
       // revoked persona's earlier posts would never visibly flag. The scan half
       // absorbs the revocation callbacks that produce the flag in the first place.
-      // Mint one unlimited pseudonym so the composer's picker is never empty on a
-      // fresh instance. Its petname stays unknown until its first post — the engine
-      // only reveals that on emit.
-      ensureOnePseudonym();
-
-      startPersonaFlagLoops(() =>
-        window.ConversationController.get(
-          getSelectedConversationId(window.reduxStore.getState())
-        )
-      );
+      startPersonaFlagLoops();
     } else {
       window.IPC.readyForUpdates();
       drop(

@@ -29,8 +29,11 @@ import type { ConversationModel } from '../models/conversations.preload.ts';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
-import { getPersonasEngine } from './personasEngine.preload.ts';
-import { emitAndSelfIngest } from './personasEngine.preload.ts';
+import {
+  emitAndSelfIngest,
+  getPersonasEngine,
+  groupIdOf,
+} from './personasEngine.preload.ts';
 import {
   decodeRecordBody,
   encodeResetRequest,
@@ -53,35 +56,36 @@ const log = createLogger('personasReset');
 // --- our own request ------------------------------------------------------------------
 
 type OwnRequest = {
-  conversationId: string;
   requestedAt: number;
   // The barrier at which the approval was first seen in our replica; we re-join only
   // in a LATER barrier.
   approvedAtBarrier?: number;
 };
 
-let ownRequest: OwnRequest | undefined;
+// Per personas group: a reset is a new member IN THAT GROUP.
+const ownRequests = new Map<string, OwnRequest>();
 
 registerPersistedExtra('resetRequest', {
-  snapshot: () => ownRequest ?? null,
-  restore: value => {
+  snapshot: groupId => ownRequests.get(groupId) ?? null,
+  restore: (groupId, value) => {
     const v = value as Partial<OwnRequest> | null;
-    ownRequest =
-      v && typeof v.conversationId === 'string' && typeof v.requestedAt === 'number'
-        ? {
-            conversationId: v.conversationId,
-            requestedAt: v.requestedAt,
-            ...(typeof v.approvedAtBarrier === 'number'
-              ? { approvedAtBarrier: v.approvedAtBarrier }
-              : {}),
-          }
-        : undefined;
+    if (v && typeof v.requestedAt === 'number') {
+      ownRequests.set(groupId, {
+        requestedAt: v.requestedAt,
+        ...(typeof v.approvedAtBarrier === 'number'
+          ? { approvedAtBarrier: v.approvedAtBarrier }
+          : {}),
+      });
+    } else {
+      ownRequests.delete(groupId);
+    }
   },
 });
 
 export type ResetState = 'none' | 'requested' | 'approved';
 
-export function ownResetState(): ResetState {
+export function ownResetState(groupId: string | undefined): ResetState {
+  const ownRequest = groupId ? ownRequests.get(groupId) : undefined;
   if (!ownRequest) {
     return 'none';
   }
@@ -98,9 +102,10 @@ export async function requestPersonasReset(
   conversation: ConversationModel,
   sweep: () => Promise<boolean>
 ): Promise<{ ok: true; proved: boolean } | { ok: false; reason: string }> {
-  const engine = getPersonasEngine();
+  const groupId = groupIdOf(conversation);
+  const engine = getPersonasEngine(groupId);
   const account = ourPersonasAccount();
-  if (!engine || !account) {
+  if (!groupId || !engine || !account) {
     return { ok: false, reason: 'the personas engine is not ready' };
   }
 
@@ -135,26 +140,31 @@ export async function requestPersonasReset(
   } catch (error) {
     return { ok: false, reason: `could not send the request: ${toLogFormat(error)}` };
   }
-  ownRequest = { conversationId: conversation.id, requestedAt: Date.now() };
-  personasExtrasChanged();
+  ownRequests.set(groupId, { requestedAt: Date.now() });
+  personasExtrasChanged(groupId);
   log.info(`requestPersonasReset: sent (${proof ? 'with' : 'WITHOUT'} a not-banned proof)`);
   return { ok: true, proved: proof != null };
 }
 
 /**
- * Run on every barrier tick: once an admin's approval for our account is in our
- * replica, wait for the next barrier, then become a fresh member and join again.
+ * Run on every flag-loop tick, for every group with a pending request: once an admin's
+ * approval for our account is in that group's replica, wait for the next barrier, then
+ * become a fresh member there and join again.
  */
 export async function maybeCompletePersonasReset(): Promise<void> {
-  try {
-    await completePersonasResetIfApproved();
-  } catch (error) {
-    log.error(`maybeCompletePersonasReset failed: ${toLogFormat(error)}`);
+  for (const groupId of [...ownRequests.keys()]) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop
+      await completePersonasResetIfApproved(groupId);
+    } catch (error) {
+      log.error(`maybeCompletePersonasReset failed: ${toLogFormat(error)}`);
+    }
   }
 }
 
-async function completePersonasResetIfApproved(): Promise<void> {
-  const engine = getPersonasEngine();
+async function completePersonasResetIfApproved(groupId: string): Promise<void> {
+  const ownRequest = ownRequests.get(groupId);
+  const engine = getPersonasEngine(groupId);
   const account = ourPersonasAccount();
   if (!ownRequest || !engine || !account) {
     return;
@@ -166,25 +176,25 @@ async function completePersonasResetIfApproved(): Promise<void> {
   const barrier = engine.currentBarrier();
   if (ownRequest.approvedAtBarrier == null) {
     ownRequest.approvedAtBarrier = barrier;
-    personasExtrasChanged();
+    personasExtrasChanged(groupId);
     log.info(`maybeCompletePersonasReset: approved; re-joining after barrier ${barrier}`);
     return;
   }
   if (barrier <= ownRequest.approvedAtBarrier) {
     return;
   }
-  const conversation = window.ConversationController.get(ownRequest.conversationId);
+  const conversation = window.ConversationController.get(groupId);
   if (!conversation) {
     return;
   }
 
   engine.resetMember();
-  clearPseudonyms();
-  forgetPersonaJoin();
-  ownRequest = undefined;
+  clearPseudonyms(groupId);
+  forgetPersonaJoin(groupId);
+  ownRequests.delete(groupId);
   // Save the fresh object before anything is sent (the ordering rule).
   const state = engine.exportMemberState();
-  savePersonasState(state ? Buffer.from(state) : undefined);
+  savePersonasState(groupId, state ? Buffer.from(state) : undefined);
   log.warn('maybeCompletePersonasReset: reset to a fresh member; joining again');
   await ensurePersonaJoined(conversation);
 }
@@ -212,8 +222,12 @@ const PROOF_NOT_YET =
 // phantom while the request travels under their own account: two senders, no ordering
 // between them. So the request often arrives first and cannot verify YET. Keep the
 // proof and try again whenever the list is read; once verified it stays verified.
-function checkResetProof(account: string, proof: string | undefined): boolean {
-  const engine = getPersonasEngine();
+function checkResetProof(
+  groupId: string,
+  account: string,
+  proof: string | undefined
+): boolean {
+  const engine = getPersonasEngine(groupId);
   if (!proof || !engine) {
     return false;
   }
@@ -224,14 +238,25 @@ function checkResetProof(account: string, proof: string | undefined): boolean {
   }
 }
 
-const received = new Map<string, ReceivedResetRequest>();
+// Per personas group: account -> the request it sent there.
+const receivedByGroup = new Map<string, Map<string, ReceivedResetRequest>>();
+
+function receivedIn(groupId: string): Map<string, ReceivedResetRequest> {
+  let received = receivedByGroup.get(groupId);
+  if (!received) {
+    received = new Map();
+    receivedByGroup.set(groupId, received);
+  }
+  return received;
+}
 
 registerPersistedExtra('resetRequestsReceived', {
-  snapshot: () => [...received.values()],
-  restore: value => {
+  snapshot: groupId => [...receivedIn(groupId).values()],
+  restore: (groupId, value) => {
     if (!Array.isArray(value)) {
       return;
     }
+    const received = receivedIn(groupId);
     for (const r of value as Array<Partial<ReceivedResetRequest>>) {
       if (typeof r.account === 'string' && typeof r.name === 'string') {
         received.set(r.account, {
@@ -250,22 +275,26 @@ registerPersistedExtra('resetRequestsReceived', {
 const accountOf = (serviceId: string | undefined) =>
   serviceId?.replaceAll('-', '').toLowerCase();
 
-/** Receive seam: a reset request from `senderServiceId`. */
+/** Receive seam: a reset request in group `groupId` from `senderServiceId`. */
 export function ingestResetRequest(
+  groupId: string | undefined,
   wire: PersonaResetRequestWire,
   senderServiceId: string | undefined
 ): void {
+  if (!groupId) {
+    return;
+  }
   if (accountOf(senderServiceId) !== wire.a) {
     log.warn('ingestResetRequest: the request names another account than its sender; dropped');
     return;
   }
   // Verifies the proof AND that it was made against our own tree.
-  const proofOk = checkResetProof(wire.a, wire.p ?? undefined);
+  const proofOk = checkResetProof(groupId, wire.a, wire.p ?? undefined);
   const name =
     (senderServiceId &&
       window.ConversationController.get(senderServiceId)?.getTitle()) ||
     'a member';
-  received.set(wire.a, {
+  receivedIn(groupId).set(wire.a, {
     account: wire.a,
     name,
     proofOk,
@@ -273,22 +302,28 @@ export function ingestResetRequest(
     ...(wire.p ? { proof: wire.p } : {}),
     at: Date.now(),
   });
-  personasExtrasChanged();
+  personasExtrasChanged(groupId);
   log.info(`ingestResetRequest: from ${name} (${proofOk ? 'not-banned proof verified' : 'NOT proved'})`);
 }
 
-export function listResetRequests(): ReadonlyArray<ReceivedResetRequest> {
-  const engine = getPersonasEngine();
+export function listResetRequests(
+  groupId: string | undefined
+): ReadonlyArray<ReceivedResetRequest> {
+  if (!groupId) {
+    return [];
+  }
+  const engine = getPersonasEngine(groupId);
+  const received = receivedIn(groupId);
   let changed = false;
   for (const r of received.values()) {
-    if (!r.proofOk && r.proof && checkResetProof(r.account, r.proof)) {
+    if (!r.proofOk && r.proof && checkResetProof(groupId, r.account, r.proof)) {
       r.proofOk = true;
       delete r.reason;
       changed = true;
     }
   }
   if (changed) {
-    personasExtrasChanged();
+    personasExtrasChanged(groupId);
   }
   return [...received.values()].filter(r => {
     // Drop requests that are already approved (the account may join again).
@@ -308,8 +343,9 @@ export async function approvePersonasReset(
   if (!conversation.areWeAdmin()) {
     return { ok: false, reason: 'only a group admin can approve a reset' };
   }
+  const groupId = groupIdOf(conversation);
   try {
-    const result = emitAndSelfIngest(engine => engine.emitRejoinApprove(account));
+    const result = emitAndSelfIngest(groupId, engine => engine.emitRejoinApprove(account));
     if (!result) {
       return { ok: false, reason: 'the personas engine is not ready' };
     }
@@ -321,15 +357,20 @@ export async function approvePersonasReset(
   } catch (error) {
     return { ok: false, reason: toLogFormat(error) };
   }
-  received.delete(account);
-  personasExtrasChanged();
+  if (groupId) {
+    receivedIn(groupId).delete(account);
+    personasExtrasChanged(groupId);
+  }
   log.info('approvePersonasReset: approval sent');
   return { ok: true };
 }
 
-export function dismissResetRequest(account: string): void {
-  received.delete(account);
-  personasExtrasChanged();
+export function dismissResetRequest(groupId: string | undefined, account: string): void {
+  if (!groupId) {
+    return;
+  }
+  receivedIn(groupId).delete(account);
+  personasExtrasChanged(groupId);
 }
 
 // --- the receive-side sender checks ------------------------------------------------------
@@ -346,7 +387,7 @@ export function recordSenderProblem(
   conversation: ConversationModel
 ): string | undefined {
   const record = decodeRecordBody(body);
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupIdOf(conversation));
   if (!record || !engine) {
     return undefined;
   }

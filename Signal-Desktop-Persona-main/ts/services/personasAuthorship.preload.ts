@@ -67,7 +67,11 @@ export async function sendAuthorshipClaim(
     // simply repeated them, which is why the claim carried a permanent disclaimer.
     // `composePersonaAuthorship` produces a Groth16 proof over `authorship_pred`
     // binding both pseudonyms to one secret key.
-    const claim = composePersonaAuthorship(contextA, contextB);
+    const claim = composePersonaAuthorship(
+      conversation.get('groupId'),
+      contextA,
+      contextB
+    );
     if (!claim) {
       log.error('sendAuthorshipClaim: could not produce the proof');
       return false;
@@ -79,7 +83,7 @@ export async function sendAuthorshipClaim(
     // every recipient. And it means the sender's own bubble is built from the same
     // source of truth as everyone else's — the proof's public inputs — so there is no
     // path anywhere that renders a name the proof does not vouch for.
-    const verified = verifyPersonaAuthorship(claim.proof);
+    const verified = verifyPersonaAuthorship(conversation.get('groupId'), claim.proof);
     if (!verified) {
       log.error(
         'sendAuthorshipClaim: our own proof failed to verify; refusing to send it'

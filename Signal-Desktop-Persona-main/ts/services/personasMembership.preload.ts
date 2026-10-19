@@ -28,6 +28,7 @@ import { toLogFormat } from '../types/errors.std.ts';
 import {
   emitAndSelfIngest,
   getPersonasEngine,
+  groupIdOf,
   isPersonasEngineEnabled,
 } from './personasEngine.preload.ts';
 import { ensureSealedSenderWarmedUp } from './personasSealedSender.preload.ts';
@@ -38,22 +39,33 @@ const log = createLogger('personasMembership');
 
 type JoinState = 'not-joined' | 'joining' | 'joined';
 
-let state: JoinState = 'not-joined';
-// The in-flight join, so concurrent actions await one join rather than racing to emit
-// several (a second membership for the same account is exactly what we must avoid).
-let inFlight: Promise<boolean> | undefined;
+// Per personas group: whether we joined it, and the in-flight join, so concurrent
+// actions await one join rather than racing to emit several (a second membership for the
+// same account is exactly what we must avoid).
+type GroupJoin = { state: JoinState; inFlight?: Promise<boolean> };
+const joins = new Map<string, GroupJoin>();
+
+function joinOf(groupId: string): GroupJoin {
+  let entry = joins.get(groupId);
+  if (!entry) {
+    entry = { state: 'not-joined' };
+    joins.set(groupId, entry);
+  }
+  return entry;
+}
 
 // A member restored after a restart (personasPersistence) whose object is already on the
 // bulletin is a member: it must not join again.
-function isRestoredMember(): boolean {
-  if (state !== 'joined' && getPersonasEngine()?.memberOnBulletin() === true) {
-    state = 'joined';
+function isRestoredMember(groupId: string): boolean {
+  const entry = joinOf(groupId);
+  if (entry.state !== 'joined' && getPersonasEngine(groupId)?.memberOnBulletin() === true) {
+    entry.state = 'joined';
   }
-  return state === 'joined';
+  return entry.state === 'joined';
 }
 
-export function hasJoinedPersonaGroup(): boolean {
-  return isRestoredMember();
+export function hasJoinedPersonaGroup(groupId: string | undefined): boolean {
+  return groupId != null && isRestoredMember(groupId);
 }
 
 // Our account as the engine names it: the ACI's 32 hex characters. A join is accepted
@@ -64,17 +76,20 @@ export function ourPersonasAccount(): string | undefined {
 }
 
 // After an approved reset the member is a new object that has not joined.
-export function forgetPersonaJoin(): void {
-  state = 'not-joined';
+export function forgetPersonaJoin(groupId: string): void {
+  joinOf(groupId).state = 'not-joined';
 }
 
-async function sendJoin(conversation: ConversationModel): Promise<boolean> {
+async function sendJoin(
+  groupId: string,
+  conversation: ConversationModel
+): Promise<boolean> {
   const account = ourPersonasAccount();
   if (!account) {
     log.error('sendJoin: no ACI yet; cannot join');
     return false;
   }
-  const result = emitAndSelfIngest(engine => engine.emitJoin(account));
+  const result = emitAndSelfIngest(groupId, engine => engine.emitJoin(account));
   if (!result) {
     log.error('sendJoin: engine unavailable; cannot join');
     return false;
@@ -101,9 +116,10 @@ export async function ensurePersonaJoined(
   if (!isPersonasEngineEnabled()) {
     return false;
   }
-  // One personas group per app: nothing persona-related happens anywhere else.
-  if (!isPersonasGroup(conversation)) {
-    log.warn('ensurePersonaJoined: not this app\u2019s personas group; refusing');
+  // Only in a group personas are on in.
+  const groupId = groupIdOf(conversation);
+  if (!groupId || !isPersonasGroup(conversation)) {
+    log.warn('ensurePersonaJoined: personas are not on in this group; refusing');
     return false;
   }
   // A member added late has an empty replica: anything it built now would be
@@ -111,15 +127,16 @@ export async function ensurePersonaJoined(
   if (!(await ensureCaughtUp(conversation))) {
     return false;
   }
-  if (isRestoredMember()) {
+  if (isRestoredMember(groupId)) {
     return true;
   }
-  if (inFlight) {
-    return inFlight;
+  const entry = joinOf(groupId);
+  if (entry.inFlight) {
+    return entry.inFlight;
   }
 
-  state = 'joining';
-  inFlight = (async () => {
+  entry.state = 'joining';
+  entry.inFlight = (async () => {
     try {
       // Warm sealed sender BEFORE the join. Every persona action funnels through
       // here, so this is the one place that guarantees the group can be sealed to
@@ -135,17 +152,17 @@ export async function ensurePersonaJoined(
         );
       }
 
-      const ok = await sendJoin(conversation);
-      state = ok ? 'joined' : 'not-joined';
+      const ok = await sendJoin(groupId, conversation);
+      entry.state = ok ? 'joined' : 'not-joined';
       return ok;
     } catch (error) {
       log.error(`ensurePersonaJoined: failed: ${toLogFormat(error)}`);
-      state = 'not-joined';
+      entry.state = 'not-joined';
       return false;
     } finally {
-      inFlight = undefined;
+      entry.inFlight = undefined;
     }
   })();
 
-  return inFlight;
+  return entry.inFlight;
 }

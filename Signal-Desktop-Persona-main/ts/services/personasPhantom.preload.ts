@@ -32,14 +32,14 @@
 // account still authorizes delivery as a group member.
 //
 // A BUNDLE BELONGS TO ONE GROUP (version 2). Each group has its own phantom identity,
-// chain and barrier schedule, and so its own persona engine, state and personas: none of
-// it is shared with another group. For now an install takes part in ONE personas group
-// (the first it mints or adopts a bundle for); persona features are off elsewhere. A
+// chain (its own distribution id) and barrier schedule, and so its own persona engine,
+// state and personas: none of it is shared with another group. An account takes part in
+// at most MAX_PERSONAS_GROUPS personas groups (each extra member is its own account). A
 // version 1 bundle named no group and was shared across all of them; it is discarded.
 //
 // Gated on the same signals as the rest of the demo (isPersonasEngineEnabled's env).
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   IdentityKeyPair,
@@ -71,7 +71,7 @@ import {
 } from './personasCarriage.std.ts';
 import {
   PHANTOM_SENDER_ACI,
-  setExpectedPhantomCertificate,
+  addExpectedPhantomCertificate,
 } from './personasPhantomCert.std.ts';
 import {
   signalProtocolStore,
@@ -93,7 +93,6 @@ const PHANTOM_ACI: ServiceIdString = normalizeServiceId(
   'personasPhantom'
 );
 const PHANTOM_DEVICE_ID = 1;
-const SHARED_DISTRIBUTION_ID = '9f9f9f9f-0000-4000-8000-0000000d15c0';
 
 // Cert lifetime: minted once, must outlive any demo message's serverTimestamp.
 const TEN_YEARS_MS = 10 * 365 * 24 * 3600 * 1000;
@@ -123,7 +122,6 @@ export const phantomAddress = (): ProtocolAddress =>
   ProtocolAddress.new(PHANTOM_ACI, PHANTOM_DEVICE_ID);
 
 export const getPhantomAci = (): ServiceIdString => PHANTOM_ACI;
-export const getSharedDistributionId = (): string => SHARED_DISTRIBUTION_ID;
 
 // The immutable, shared phantom bundle (all fields base64), as kept in item storage.
 type SerializedBundle = {
@@ -248,8 +246,12 @@ export type PhantomMaterial = {
   schedule: { anchorMs: number; periodMs: number };
 };
 
-let material: PhantomMaterial | undefined;
-let bundleJson: string | undefined;
+// At most this many personas groups per account (each extra member is its own account).
+export const MAX_PERSONAS_GROUPS = 3;
+
+// The bundles this member holds, by Signal group id, with the JSON they were stored as.
+const held = new Map<string, { mat: PhantomMaterial; json: string }>();
+let loaded = false;
 const readyListeners: Array<(mat: PhantomMaterial) => void> = [];
 
 function isPersonasMode(): boolean {
@@ -266,7 +268,8 @@ function unb64(s: string): Uint8Array<ArrayBuffer> {
 }
 
 // Mint a fresh bundle for `groupId`. Only the group's creator (or an admin turning
-// personas on) does this; everyone else adopts.
+// personas on) does this; everyone else adopts. Each bundle has its own distribution id,
+// so the groups' phantom chains never collide in the sender-key store.
 async function generateBundle(groupId: string): Promise<SerializedBundle> {
   const trustRoot = IdentityKeyPair.generate();
   const serverKey = IdentityKeyPair.generate();
@@ -284,13 +287,14 @@ async function generateBundle(groupId: string): Promise<SerializedBundle> {
     serverKey.privateKey
   );
 
+  const distributionId = randomUUID();
   const generatorStore = new MemSenderKeyStore();
   const skdm = await SenderKeyDistributionMessage.create(
     phantomAddress(),
-    SHARED_DISTRIBUTION_ID,
+    distributionId,
     generatorStore
   );
-  const sendKeyRecord = generatorStore.rawGet(phantomAddress(), SHARED_DISTRIBUTION_ID);
+  const sendKeyRecord = generatorStore.rawGet(phantomAddress(), distributionId);
   if (!sendKeyRecord) {
     throw new Error('generateBundle: generator store missing sender key record');
   }
@@ -301,7 +305,7 @@ async function generateBundle(groupId: string): Promise<SerializedBundle> {
     trustRootPublic: b64(trustRoot.publicKey.serialize()),
     phantomIdentityKeyPair: b64(phantomIdentity.serialize()),
     phantomCert: b64(phantomCert.serialize()),
-    distributionId: SHARED_DISTRIBUTION_ID,
+    distributionId,
     skdm: b64(skdm.serialize()),
     sendKeyRecord: b64(sendKeyRecord),
     schedule: {
@@ -326,98 +330,134 @@ function deserialize(bundle: SerializedBundle): PhantomMaterial {
 
 function activate(json: string, how: string): PhantomMaterial {
   const mat = deserialize(JSON.parse(json) as SerializedBundle);
-  material = mat;
-  bundleJson = json;
-  setExpectedPhantomCertificate(mat.phantomCert.serialize());
+  held.set(mat.groupId, { mat, json });
+  addExpectedPhantomCertificate(mat.phantomCert.serialize());
   log.info(`phantom bundle ${bundleFingerprint(mat)} ${how}`);
   return mat;
 }
 
-// The bundle this member holds, from item storage. undefined until this member has
-// minted (created a group) or adopted (received one from a fellow group member).
-export async function ensurePhantomMaterial(): Promise<PhantomMaterial | undefined> {
-  if (material || !isPersonasMode()) {
-    return material;
+async function saveHeld(): Promise<void> {
+  const out: Record<string, string> = {};
+  for (const [groupId, { json }] of held) {
+    out[groupId] = json;
   }
-  const json = itemStorage.get('personasPhantomBundle');
-  if (!json) {
-    return undefined;
+  await itemStorage.put('personasPhantomBundles', JSON.stringify(out));
+}
+
+// Load every bundle this member holds from item storage, once. Migrates the single
+// bundle earlier builds stored, and drops a version 1 bundle (it named no group).
+async function loadHeld(): Promise<void> {
+  if (loaded || !isPersonasMode()) {
+    return;
   }
+  loaded = true;
   try {
-    if (!(JSON.parse(json) as Partial<SerializedBundle>).groupId) {
-      // A version 1 bundle, shared across every group. Drop it, and who it was sent to,
-      // so personas start over per group.
-      log.warn('ensurePhantomMaterial: discarding a bundle that names no group (version 1)');
-      await itemStorage.remove('personasPhantomBundle');
-      await itemStorage.remove('personasPhantomSentTo');
-      return undefined;
+    const all = itemStorage.get('personasPhantomBundles');
+    if (all) {
+      for (const json of Object.values(JSON.parse(all) as Record<string, string>)) {
+        try {
+          activate(json, 'loaded from storage');
+        } catch (error) {
+          log.error(`loadHeld: a stored bundle is unreadable: ${toLogFormat(error)}`);
+        }
+      }
     }
-    return activate(json, 'loaded from storage');
+    const single = itemStorage.get('personasPhantomBundle');
+    if (single) {
+      if ((JSON.parse(single) as Partial<SerializedBundle>).groupId) {
+        activate(single, 'migrated from the single-group store');
+        await saveHeld();
+      } else {
+        log.warn('loadHeld: discarding a bundle that names no group (version 1)');
+        await itemStorage.remove('personasPhantomSentTo');
+      }
+      await itemStorage.remove('personasPhantomBundle');
+    }
   } catch (error) {
-    log.error(`ensurePhantomMaterial: stored bundle unreadable: ${toLogFormat(error)}`);
-    return undefined;
+    log.error(`loadHeld: stored bundles unreadable: ${toLogFormat(error)}`);
   }
 }
 
-export function hasPhantomMaterial(): boolean {
-  return material !== undefined;
+// The bundle this member holds for `groupId`, if any.
+export async function ensurePhantomMaterial(
+  groupId: string | undefined
+): Promise<PhantomMaterial | undefined> {
+  await loadHeld();
+  return groupId ? held.get(groupId)?.mat : undefined;
 }
 
-// The one Signal group (GroupV2 id) this install uses personas in, once it holds a bundle.
-export function getPersonasGroupId(): string | undefined {
-  return material?.groupId;
+// Every bundle this member holds.
+export function allPhantomMaterial(): ReadonlyArray<PhantomMaterial> {
+  return [...held.values()].map(({ mat }) => mat);
 }
 
-// Whether `conversation` is this install's personas group.
+export function hasPhantomMaterial(groupId: string | undefined): boolean {
+  return groupId != null && held.has(groupId);
+}
+
+// The Signal groups (GroupV2 ids) this install uses personas in.
+export function getPersonasGroupIds(): ReadonlyArray<string> {
+  return [...held.keys()];
+}
+
+// Whether `conversation` is one of this install's personas groups.
 export function isPersonasGroup(conversation: ConversationModel | undefined): boolean {
   const groupId = conversation?.get('groupId');
-  return material != null && groupId != null && groupId === material.groupId;
+  return groupId != null && held.has(groupId);
 }
 
-// How persona features stand in `conversation`, for the composer: this is the personas
-// group; personas are not on anywhere yet; or they are on in another group (by name).
+// How persona features stand in `conversation`, for the composer: personas are on here;
+// they are not on here yet; or not on here and this account is already in its maximum
+// number of personas groups (named, so the person knows which).
 export type PersonasGroupStanding =
   | { kind: 'this' }
   | { kind: 'none' }
-  | { kind: 'other'; name: string };
+  | { kind: 'full'; names: ReadonlyArray<string> };
 
 export function personasGroupStanding(
   conversation: ConversationModel | undefined
 ): PersonasGroupStanding {
-  if (!material) {
-    return { kind: 'none' };
-  }
   if (isPersonasGroup(conversation)) {
     return { kind: 'this' };
   }
-  const group = window.ConversationController.get(material.groupId);
-  return { kind: 'other', name: group?.getTitle() ?? 'another group' };
+  if (held.size < MAX_PERSONAS_GROUPS) {
+    return { kind: 'none' };
+  }
+  return {
+    kind: 'full',
+    names: [...held.keys()].map(
+      groupId => window.ConversationController.get(groupId)?.getTitle() ?? 'a group'
+    ),
+  };
 }
 
-// Which group's bundle this member holds — what its saved engine state is keyed by, so a
-// new group (after a server reset, say) starts from a fresh member and replica.
-export function getPhantomBundleFingerprint(): string | undefined {
-  return material ? bundleFingerprint(material) : undefined;
+// Which bundle a group's saved engine state is keyed by, so a new bundle for the group
+// (after a server reset, say) starts from a fresh member and replica.
+export function getPhantomBundleFingerprint(groupId: string | undefined): string | undefined {
+  const mat = groupId ? held.get(groupId)?.mat : undefined;
+  return mat ? bundleFingerprint(mat) : undefined;
 }
 
-export function getPhantomSchedule(): PhantomMaterial['schedule'] | undefined {
-  return material?.schedule;
+export function getPhantomSchedule(
+  groupId: string | undefined
+): PhantomMaterial['schedule'] | undefined {
+  return groupId ? held.get(groupId)?.mat.schedule : undefined;
 }
 
-// Called with the material once it is available: immediately if it already is, or when
-// it is minted/adopted later. Background uses this to admit the trust root and build the
-// engine on the bundle's schedule.
+// Called with each bundle once it is available: right away for those already held, and
+// as more are minted or adopted. Background uses this to admit each trust root and
+// build each group's engine on its bundle's schedule.
 export function onPhantomMaterialReady(listener: (mat: PhantomMaterial) => void): void {
   readyListeners.push(listener);
-  if (material) {
-    listener(material);
+  for (const { mat } of held.values()) {
+    listener(mat);
   }
 }
 
 async function commitBundle(json: string, how: string): Promise<PhantomMaterial> {
-  await itemStorage.put('personasPhantomBundle', json);
   const mat = activate(json, how);
-  await installPhantomChain();
+  await saveHeld();
+  await installPhantomChain(mat.groupId);
   for (const listener of readyListeners) {
     try {
       listener(mat);
@@ -428,20 +468,23 @@ async function commitBundle(json: string, how: string): Promise<PhantomMaterial>
   return mat;
 }
 
-// The group creator mints the group's bundle. One personas group per install for now: a
-// member that already holds a bundle (for any group) keeps it and mints nothing.
+// The group creator mints the group's bundle — unless this account is already in its
+// maximum number of personas groups.
 export async function mintPhantomBundle(
   groupId: string | undefined
 ): Promise<PhantomMaterial | undefined> {
   if (!isPersonasMode() || !groupId) {
     return undefined;
   }
-  const existing = await ensurePhantomMaterial();
+  const existing = await ensurePhantomMaterial(groupId);
   if (existing) {
-    if (existing.groupId !== groupId) {
-      log.info('mintPhantomBundle: personas are already on in another group; not minting');
-    }
     return existing;
+  }
+  if (held.size >= MAX_PERSONAS_GROUPS) {
+    log.info(
+      `mintPhantomBundle: already in ${MAX_PERSONAS_GROUPS} personas groups; not minting`
+    );
+    return undefined;
   }
   return commitBundle(JSON.stringify(await generateBundle(groupId)), 'minted');
 }
@@ -467,25 +510,28 @@ export async function turnOnPersonasInGroup(
   if (!conversation.areWeAdmin()) {
     return { ok: false, reason: 'only a group admin can turn personas on' };
   }
-  const existing = await ensurePhantomMaterial();
-  if (existing) {
-    return existing.groupId === groupId
-      ? { ok: true }
-      : { ok: false, reason: 'personas are already on in another group in this app' };
+  if (await ensurePhantomMaterial(groupId)) {
+    return { ok: true };
+  }
+  if (held.size >= MAX_PERSONAS_GROUPS) {
+    return {
+      ok: false,
+      reason: `this account already uses personas in ${MAX_PERSONAS_GROUPS} groups`,
+    };
   }
   await mintPhantomBundle(groupId);
   await distributePhantomBundle();
   return { ok: true };
 }
 
-export type AdoptResult = 'adopted' | 'duplicate' | 'conflict' | 'disabled';
+export type AdoptResult = 'adopted' | 'duplicate' | 'conflict' | 'full' | 'disabled';
 
 // Adopt a bundle received from a fellow member of the group it names. The caller must
 // already have checked that (isFellowGroupMember).
 //
-// FIRST ONE WINS, AND IT IS FINAL. A second, different bundle is refused: switching
-// would silently strand our chain, and a member being fed a different certificate is
-// exactly what tagging would look like. Logged loudly instead.
+// FIRST ONE WINS, AND IT IS FINAL, per group. A second, different bundle for a group is
+// refused: switching would silently strand our chain, and a member being fed a different
+// certificate is exactly what tagging would look like. Logged loudly instead.
 export async function adoptPhantomBundle(
   wire: PersonaPhantomBundleWire,
   from: string
@@ -493,7 +539,7 @@ export async function adoptPhantomBundle(
   if (!isPersonasMode()) {
     return 'disabled';
   }
-  const existing = await ensurePhantomMaterial();
+  const existing = await ensurePhantomMaterial(wire.groupId);
   if (existing) {
     const same =
       existing.trustRootPublicBase64 === wire.trustRootPublic &&
@@ -502,20 +548,20 @@ export async function adoptPhantomBundle(
       log.info(`adoptPhantomBundle: already hold this bundle; ignoring copy from ${from}`);
       return 'duplicate';
     }
-    if (existing.groupId !== wire.groupId) {
-      log.warn(
-        `adoptPhantomBundle: ignoring a bundle for another group from ${from}: this app ` +
-          'takes part in one personas group for now'
-      );
-      return 'conflict';
-    }
     log.error(
-      `adoptPhantomBundle: REFUSED a different phantom bundle for our group from ${from}. ` +
+      `adoptPhantomBundle: REFUSED a different phantom bundle for this group from ${from}. ` +
         `We hold ${bundleFingerprint(existing)}. Either two admins turned personas on at ` +
         'once or someone is handing members different certificates; either way, ' +
         'switching would strand this member.'
     );
     return 'conflict';
+  }
+  if (held.size >= MAX_PERSONAS_GROUPS) {
+    log.warn(
+      `adoptPhantomBundle: ignoring a bundle from ${from}: this account already uses ` +
+        `personas in ${MAX_PERSONAS_GROUPS} groups`
+    );
+    return 'full';
   }
   const bundle: SerializedBundle = {
     groupId: wire.groupId,
@@ -553,7 +599,7 @@ export function isFellowGroupMember(conversationId: string, groupId: string): bo
 const MAX_PENDING_BUNDLES = 8;
 const pendingBundles = new Map<
   string,
-  { wire: PersonaPhantomBundleWire; from: string }
+  { wire: PersonaPhantomBundleWire; from: string; conversationId: string }
 >();
 
 export function holdPendingBundle(
@@ -561,22 +607,23 @@ export function holdPendingBundle(
   wire: PersonaPhantomBundleWire,
   from: string
 ): void {
-  if (!pendingBundles.has(conversationId) && pendingBundles.size >= MAX_PENDING_BUNDLES) {
+  const key = `${conversationId}:${wire.groupId}`;
+  if (!pendingBundles.has(key) && pendingBundles.size >= MAX_PENDING_BUNDLES) {
     log.warn(`holdPendingBundle: too many pending bundles; dropping the one from ${from}`);
     return;
   }
-  pendingBundles.set(conversationId, { wire, from });
+  pendingBundles.set(key, { wire, from, conversationId });
   log.info(`holdPendingBundle: holding a bundle from ${from} until they share a group with us`);
 }
 
 async function retryPendingBundles(): Promise<void> {
-  for (const [conversationId, { wire, from }] of [...pendingBundles]) {
-    if (material) {
-      pendingBundles.clear();
-      return;
+  for (const [key, { wire, from, conversationId }] of [...pendingBundles]) {
+    if (held.has(wire.groupId)) {
+      pendingBundles.delete(key);
+      continue;
     }
     if (isFellowGroupMember(conversationId, wire.groupId)) {
-      pendingBundles.delete(conversationId);
+      pendingBundles.delete(key);
       // oxlint-disable-next-line no-await-in-loop
       const result = await adoptPhantomBundle(wire, from);
       log.info(`retryPendingBundles: bundle from ${from}: ${result}`);
@@ -584,7 +631,7 @@ async function retryPendingBundles(): Promise<void> {
   }
 }
 
-// This member's current position on the shared chain, for handing to a new member.
+// This member's current position on a group's shared chain, for handing to a new member.
 async function readCurrentChainRecord(
   mat: PhantomMaterial
 ): Promise<Uint8Array<ArrayBuffer> | undefined> {
@@ -607,76 +654,83 @@ async function readCurrentChainRecord(
 
 let distributing = false;
 
-// Send the bundle 1:1 to every full member of ITS group who has not been sent it yet.
-// Any holder distributes, not only the creator, so the group does not depend on the
+// Send each bundle 1:1 to every full member of ITS group who has not been sent it yet.
+// Any holder distributes, not only the creator, so a group does not depend on its
 // creator staying online. Recipients ignore copies of a bundle they already hold.
 export async function distributePhantomBundle(): Promise<void> {
-  const mat = material;
-  if (!mat || !bundleJson || distributing) {
+  await loadHeld();
+  if (distributing || held.size === 0) {
     return;
   }
   distributing = true;
   try {
-    const fingerprint = bundleFingerprint(mat);
-    const sent = new Set(itemStorage.get('personasPhantomSentTo') ?? []);
-    const pending = new Map<string, ConversationModel>();
-    const group = window.ConversationController.get(mat.groupId);
-    if (group && isGroupV2(group.attributes) && !group.get('left')) {
-      for (const member of group.getMembers()) {
-        const serviceId = member.getServiceId();
-        if (!serviceId || isMe(member.attributes)) {
-          continue;
-        }
-        if (!sent.has(`${fingerprint}:${serviceId}`)) {
-          pending.set(serviceId, member);
-        }
-      }
-    }
-    if (pending.size === 0) {
-      return;
-    }
-
-    const chainRecord = await readCurrentChainRecord(mat);
-    if (!chainRecord) {
-      log.warn('distributePhantomBundle: no installed chain to share yet');
-      return;
-    }
-    const stored = JSON.parse(bundleJson) as SerializedBundle;
-    const body = encodePhantomBundle({
-      v: 2,
-      groupId: mat.groupId,
-      trustRootPublic: stored.trustRootPublic,
-      phantomIdentityKeyPair: stored.phantomIdentityKeyPair,
-      phantomCert: stored.phantomCert,
-      distributionId: stored.distributionId,
-      skdm: stored.skdm,
-      chainRecord: b64(chainRecord),
-      schedule: stored.schedule,
-    });
-
-    // Sequential on purpose: each recipient is marked sent (and persisted) only after
-    // its own send succeeded, so a failure retries just that member next sweep.
-    for (const [serviceId, member] of pending) {
-      try {
-        // oxlint-disable-next-line no-await-in-loop
-        await member.enqueueMessageForSend(
-          { body, attachments: [] },
-          // Key material: never shown, and only ever sent 1:1.
-          { hideFromTimeline: true }
-        );
-        sent.add(`${fingerprint}:${serviceId}`);
-        // oxlint-disable-next-line no-await-in-loop
-        await itemStorage.put('personasPhantomSentTo', [...sent]);
-        log.info(`distributePhantomBundle: sent bundle ${fingerprint} to ${serviceId}`);
-      } catch (error) {
-        log.warn(
-          `distributePhantomBundle: send to ${serviceId} failed (retrying next sweep): ` +
-            toLogFormat(error)
-        );
-      }
+    for (const { mat, json } of [...held.values()]) {
+      // oxlint-disable-next-line no-await-in-loop
+      await distributeOne(mat, json);
     }
   } finally {
     distributing = false;
+  }
+}
+
+async function distributeOne(mat: PhantomMaterial, json: string): Promise<void> {
+  const fingerprint = bundleFingerprint(mat);
+  const sent = new Set(itemStorage.get('personasPhantomSentTo') ?? []);
+  const pending = new Map<string, ConversationModel>();
+  const group = window.ConversationController.get(mat.groupId);
+  if (group && isGroupV2(group.attributes) && !group.get('left')) {
+    for (const member of group.getMembers()) {
+      const serviceId = member.getServiceId();
+      if (!serviceId || isMe(member.attributes)) {
+        continue;
+      }
+      if (!sent.has(`${fingerprint}:${serviceId}`)) {
+        pending.set(serviceId, member);
+      }
+    }
+  }
+  if (pending.size === 0) {
+    return;
+  }
+
+  const chainRecord = await readCurrentChainRecord(mat);
+  if (!chainRecord) {
+    log.warn('distributePhantomBundle: no installed chain to share yet');
+    return;
+  }
+  const stored = JSON.parse(json) as SerializedBundle;
+  const body = encodePhantomBundle({
+    v: 2,
+    groupId: mat.groupId,
+    trustRootPublic: stored.trustRootPublic,
+    phantomIdentityKeyPair: stored.phantomIdentityKeyPair,
+    phantomCert: stored.phantomCert,
+    distributionId: stored.distributionId,
+    skdm: stored.skdm,
+    chainRecord: b64(chainRecord),
+    schedule: stored.schedule,
+  });
+
+  // Sequential on purpose: each recipient is marked sent (and persisted) only after
+  // its own send succeeded, so a failure retries just that member next sweep.
+  for (const [serviceId, member] of pending) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop
+      await member.enqueueMessageForSend(
+        { body, attachments: [] },
+        // Key material: never shown, and only ever sent 1:1.
+        { hideFromTimeline: true }
+      );
+      sent.add(`${fingerprint}:${serviceId}`);
+      // oxlint-disable-next-line no-await-in-loop
+      await itemStorage.put('personasPhantomSentTo', [...sent]);
+      log.info(`distributePhantomBundle: sent bundle ${fingerprint} to ${serviceId}`);
+    } catch (error) {
+      log.warn(
+        `distributePhantomBundle: send to ${serviceId} failed (retrying next sweep): ` +
+          toLogFormat(error)
+      );
+    }
   }
 }
 
@@ -699,60 +753,60 @@ export function startPhantomDistribution(): void {
   }, DISTRIBUTION_INTERVAL_MS);
 }
 
-// The phantom trust root public key (base64), for the receiver's trust-root set.
-// undefined until this member holds a bundle.
-export function getPhantomTrustRootBase64(): string | undefined {
-  return material?.trustRootPublicBase64;
+// Every held bundle's trust root (base64), for the receiver's trust-root set.
+export function getPhantomTrustRootsBase64(): ReadonlyArray<string> {
+  return [...held.values()].map(({ mat }) => mat.trustRootPublicBase64);
 }
 
-// Load a stored bundle at boot, before MessageReceiver construction reads trust roots.
+// Load stored bundles at boot, before MessageReceiver construction reads trust roots.
 export async function warmPhantomMaterial(): Promise<void> {
-  await ensurePhantomMaterial();
+  await loadHeld();
 }
 
-// Build the phantom identity store for the sealed-sender local identity, delegating
-// recipient identity lookups to Desktop's real identity store (which already holds
-// the group members' identities).
+// Build the phantom identity store for a group's sealed-sender local identity,
+// delegating recipient identity lookups to Desktop's real identity store (which already
+// holds the group members' identities).
 export function buildPhantomIdentityStore(
+  groupId: string | undefined,
   delegate: IdentityKeyStore
 ): PhantomIdentityStore | undefined {
-  if (!material) {
+  const mat = groupId ? held.get(groupId)?.mat : undefined;
+  if (!mat) {
     return undefined;
   }
-  return new PhantomIdentityStore(material.phantomIdentity, delegate);
+  return new PhantomIdentityStore(mat.phantomIdentity, delegate);
 }
 
 const phantomQualifiedAddress = (ourAci: ServiceIdString): QualifiedAddress =>
   new QualifiedAddress(ourAci, Address.create(PHANTOM_ACI, PHANTOM_DEVICE_ID));
 
-// THE SHARED PHANTOM CHAIN, ONE COPY PER MEMBER.
+// THE SHARED PHANTOM CHAIN, ONE COPY PER MEMBER (per group).
 //
-// Every member holds its own copy of the shared sender-key chain: the FULL private
-// SenderKeyRecord, signing key included, in Desktop's sender-key store under the phantom
-// address. The same record serves both directions:
+// Every member holds its own copy of each group's shared sender-key chain: the FULL
+// private SenderKeyRecord, signing key included, in Desktop's sender-key store under the
+// phantom address and that group's distribution id. The same record serves both
+// directions:
 //
 //   receive  groupDecrypt walks the copy forward past every post it sees
 //            (MessageReceiver's sealed-sender path, keyed by the phantom address);
 //   send     groupEncrypt continues from the step after the newest post seen
 //            (phantomGroupEncrypt below, queued on the same address).
 //
-// So members stay in step with no shared state: nothing is read from or written to the
-// roster dir. Proven against libsignal: turn-taking posts all arrive, and a member that
-// missed posts still decrypts later ones (it skips forward).
-//
 // THE ACCEPTED LIMITATION (design doc §4, Phase A1): two members posting at the same
 // step, before either has seen the other's post, encrypt under the same message key.
 // Recipients keep the first and drop the second as `DuplicatedMessage: old counter`.
-// Posting is effectively serial; A2 (personas-group-crypto) is what lifts this.
-//
-// The old design kept separate chains: a send chain in a roster-dir file, and a
-// receive-only chain installed from the bundle's SKDM. Receiving never advanced the
-// send chain, which is what forced every member to share that file.
-export async function installPhantomChain(): Promise<void> {
-  const mat = await ensurePhantomMaterial();
-  if (!mat) {
-    return;
+export async function installPhantomChain(groupId?: string): Promise<void> {
+  await loadHeld();
+  const targets = groupId
+    ? [held.get(groupId)?.mat].filter((m): m is PhantomMaterial => m != null)
+    : allPhantomMaterial();
+  for (const mat of targets) {
+    // oxlint-disable-next-line no-await-in-loop
+    await installOneChain(mat);
   }
+}
+
+async function installOneChain(mat: PhantomMaterial): Promise<void> {
   const ourAci = itemStorage.user.getAci();
   if (!ourAci) {
     log.warn('installPhantomChain: no ACI yet; skipping');
@@ -765,7 +819,12 @@ export async function installPhantomChain(): Promise<void> {
     zone: GLOBAL_ZONE,
   });
   const marker = `${bundleFingerprint(mat)}:${CHAIN_MARKER_VERSION}`;
-  const installedFrom = itemStorage.get('personasPhantomChain');
+  // Markers of chains installed so far; the old single-chain marker counts too.
+  const installed = new Set(itemStorage.get('personasPhantomChains') ?? []);
+  const legacy = itemStorage.get('personasPhantomChain');
+  if (legacy) {
+    installed.add(legacy);
+  }
 
   try {
     await signalProtocolStore.enqueueSenderKeyJob(
@@ -776,17 +835,15 @@ export async function installPhantomChain(): Promise<void> {
           mat.distributionId
         );
         // Keep a chain that has walked forward, but only when it provably came from
-        // this bundle in the current format. `SHARED_DISTRIBUTION_ID` is a constant,
-        // so a record from another bundle LOOKS valid while holding the wrong chain
-        // key, and every phantom post would be dropped at this receiver.
-        if (existing && installedFrom === marker) {
+        // this bundle in the current format: a record under the same distribution id
+        // from another bundle LOOKS valid while holding the wrong chain key, and every
+        // phantom post would be dropped at this receiver.
+        if (existing && installed.has(marker)) {
           log.info(`installPhantomChain: keeping chain ${marker}`);
           return;
         }
         if (existing) {
-          log.warn(
-            `installPhantomChain: replacing chain ${installedFrom ?? 'unknown'} with ${marker}`
-          );
+          log.warn(`installPhantomChain: replacing a stale chain with ${marker}`);
           // Delete first: saving over an existing record can leave a stale state
           // behind under the same chain id, and decryption keeps resolving to it.
           await signalProtocolStore.removeSenderKey(address, mat.distributionId);
@@ -797,7 +854,8 @@ export async function installPhantomChain(): Promise<void> {
           SenderKeyRecord.deserialize(mat.initialSendKeyRecord)
         );
         // Only after a successful install: a crash leaves no marker, read as stale.
-        await itemStorage.put('personasPhantomChain', marker);
+        installed.add(marker);
+        await itemStorage.put('personasPhantomChains', [...installed]);
         log.info(`installPhantomChain: installed chain ${marker}`);
       },
       GLOBAL_ZONE
@@ -807,16 +865,18 @@ export async function installPhantomChain(): Promise<void> {
   }
 }
 
-// Encrypt a persona post under this member's copy of the shared phantom chain. Queued on
-// the phantom address, the same key MessageReceiver decrypts phantom posts under, so a
-// send and a receive in this process never interleave on the record.
+// Encrypt a persona post under this member's copy of a group's shared phantom chain.
+// Queued on the phantom address, the same key MessageReceiver decrypts phantom posts
+// under, so a send and a receive in this process never interleave on the record.
 export async function phantomGroupEncrypt(
+  groupId: string | undefined,
   message: Uint8Array<ArrayBuffer>
 ): Promise<CiphertextMessage> {
-  if (!material) {
-    throw new Error('phantomGroupEncrypt: phantom material not loaded');
+  const mat = groupId ? held.get(groupId)?.mat : undefined;
+  if (!mat) {
+    throw new Error('phantomGroupEncrypt: no phantom bundle for this group');
   }
-  const { distributionId } = material;
+  const { distributionId } = mat;
   const ourAci = itemStorage.user.getCheckedAci();
   const store = new SenderKeys({
     signalProtocolStore,

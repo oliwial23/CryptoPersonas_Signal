@@ -6,8 +6,8 @@
 // The engine used to live only in memory, so every restart, crash or server reset left
 // the member with a brand-new object and an empty replica. Its later posts then built on
 // a history nobody else had, and every peer held them back forever: persona posts
-// silently stopped working for that member. Two things are saved, per group (keyed by the
-// phantom bundle, so a new group starts fresh):
+// silently stopped working for that member. Two things are saved, PER PERSONAS GROUP (in a
+// folder named by the group's phantom bundle, so a new bundle starts fresh):
 //
 //   state.bin    ENCRYPTED. The member's zk object (Engine.exportMemberState) — its
 //                persona secret — plus the pseudonym and topic lists. AES-256-GCM under a
@@ -45,6 +45,10 @@ import { ipcRenderer } from 'electron';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
+import {
+  getPersonasGroupIds,
+  getPhantomBundleFingerprint,
+} from './personasPhantom.preload.ts';
 
 const log = createLogger('personasPersistence');
 
@@ -56,19 +60,26 @@ type Storage = { key: Buffer<ArrayBuffer>; dir: string };
 
 let storage: Storage | undefined;
 let initialized = false;
-let group: string | undefined;
-let lastMemberState: Buffer<ArrayBuffer> | undefined;
 
-// Small app-side lists that belong with the member (pseudonym nonces, topic contexts).
-// Their modules register here, so this module does not import them.
-type Extra = { snapshot: () => unknown; restore: (value: unknown) => void };
+// One per personas group: the folder its state lives in (named by the group's bundle),
+// and the member state most recently saved for it.
+type GroupState = { folder: string; lastMemberState?: Buffer<ArrayBuffer> };
+const groups = new Map<string, GroupState>();
+
+// Small app-side lists that belong with a group's member (pseudonym nonces, topic
+// contexts, ...). Their modules register here, so this module does not import them; each
+// keeps its own per-group values.
+type Extra = {
+  snapshot: (groupId: string) => unknown;
+  restore: (groupId: string, value: unknown) => void;
+};
 const extras = new Map<string, Extra>();
 
 export function registerPersistedExtra(name: string, extra: Extra): void {
   extras.set(name, extra);
 }
 
-/** Fetch the state key from the main process. Call (and await) before building the engine. */
+/** Fetch the state key from the main process. Call (and await) before building an engine. */
 export async function initPersonasPersistence(): Promise<void> {
   if (initialized) {
     return;
@@ -82,56 +93,67 @@ export async function initPersonasPersistence(): Promise<void> {
       storage = { key: Buffer.from(result.key, 'hex'), dir: result.dir };
       log.info('state persistence enabled (encrypted)');
     } else {
-      log.warn('no state key available: the ZK engine stays in memory only');
+      log.warn('no state key available: the ZK engines stay in memory only');
     }
   } catch (error) {
     log.error(`state persistence unavailable: ${toLogFormat(error)}`);
   }
 }
 
-function groupDir(): string | undefined {
-  if (!storage || !group) {
+function groupDir(groupId: string): string | undefined {
+  const state = groups.get(groupId);
+  if (!storage || !state) {
     return undefined;
   }
-  return join(storage.dir, group);
+  return join(storage.dir, state.folder);
 }
 
 /**
- * Select the group (phantom bundle fingerprint) and return its journal path, creating
- * the directory. Saved state of any OTHER group is deleted: those groups are gone (a
- * server reset, a new bundle), and their persona secrets should not linger on disk.
+ * Select a group's state folder (named by its phantom bundle and protocol version) and
+ * return its journal path, creating the folder. Folders of bundles this member no longer
+ * holds are deleted: those groups are gone (a server reset, a new bundle), and their
+ * persona secrets should not linger on disk.
  */
 export function openPersonasGroupState(
-  fingerprint: string
+  groupId: string,
+  folder: string
 ): { journalPath: string } | undefined {
   if (!storage) {
     return undefined;
   }
-  group = fingerprint;
-  const dir = join(storage.dir, fingerprint);
+  groups.set(groupId, { folder });
+  const dir = join(storage.dir, folder);
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const keep = new Set(
+      getPersonasGroupIds()
+        .map(id => getPhantomBundleFingerprint(id))
+        .filter((fp): fp is string => fp != null)
+        .map(fp => `${fp}-v3`)
+    );
+    keep.add(folder);
     for (const entry of readdirSync(storage.dir)) {
-      if (entry !== fingerprint) {
+      if (!keep.has(entry)) {
         rmSync(join(storage.dir, entry), { recursive: true, force: true });
-        log.info(`removed saved state of a previous group (${entry})`);
+        log.info(`removed saved state of a group we no longer hold (${entry})`);
       }
     }
   } catch (error) {
     log.error(`could not prepare ${dir}: ${toLogFormat(error)}`);
-    group = undefined;
+    groups.delete(groupId);
     return undefined;
   }
   return { journalPath: join(dir, 'journal.bin') };
 }
 
 /**
- * The saved member state for the selected group, restoring the registered extras along
- * the way. undefined when there is none (a new member) or it cannot be read.
+ * The saved member state for a group, restoring the registered extras along the way.
+ * undefined when there is none (a new member) or it cannot be read.
  */
-export function loadPersonasState(): Buffer<ArrayBuffer> | undefined {
-  const dir = groupDir();
-  if (!storage || !dir || !group) {
+export function loadPersonasState(groupId: string): Buffer<ArrayBuffer> | undefined {
+  const dir = groupDir(groupId);
+  const state = groups.get(groupId);
+  if (!storage || !dir || !state) {
     return undefined;
   }
   const path = join(dir, 'state.bin');
@@ -149,7 +171,7 @@ export function loadPersonasState(): Buffer<ArrayBuffer> | undefined {
     const iv = raw.subarray(4, 4 + IV_BYTES);
     const tag = raw.subarray(4 + IV_BYTES, 4 + IV_BYTES + TAG_BYTES);
     const decipher = createDecipheriv('aes-256-gcm', storage.key, iv);
-    decipher.setAAD(Buffer.from(`personas-state|${group}`));
+    decipher.setAAD(Buffer.from(`personas-state|${state.folder}`));
     decipher.setAuthTag(tag);
     const plain = Buffer.concat([
       decipher.update(raw.subarray(4 + IV_BYTES + TAG_BYTES)),
@@ -161,14 +183,14 @@ export function loadPersonasState(): Buffer<ArrayBuffer> | undefined {
     };
     for (const [name, extra] of extras) {
       if (parsed.extras && name in parsed.extras) {
-        extra.restore(parsed.extras[name]);
+        extra.restore(groupId, parsed.extras[name]);
       }
     }
-    lastMemberState = parsed.member
+    state.lastMemberState = parsed.member
       ? Buffer.from(parsed.member, 'base64')
       : undefined;
     log.info('loaded saved member state');
-    return lastMemberState;
+    return state.lastMemberState;
   } catch (error) {
     // Unreadable (wrong key after a keychain reset, or damage). Move it aside rather than
     // overwrite it silently; the engine starts a new member, which is safe — a new object
@@ -186,18 +208,20 @@ export function loadPersonasState(): Buffer<ArrayBuffer> | undefined {
 }
 
 /**
- * Save the member state (and the extras), durably, before the record it belongs to is
- * sent. Returns false if it could not be saved — the caller must then NOT send. With no
- * state key there is nothing on disk to go stale, so this succeeds trivially.
+ * Save a group's member state (and the extras), durably, before the record it belongs to
+ * is sent. Returns false if it could not be saved — the caller must then NOT send. With
+ * no state key there is nothing on disk to go stale, so this succeeds trivially.
  */
 export function savePersonasState(
+  groupId: string,
   memberState: Buffer<ArrayBuffer> | undefined | null
 ): boolean {
-  if (memberState) {
-    lastMemberState = memberState;
+  const state = groups.get(groupId);
+  if (state && memberState) {
+    state.lastMemberState = memberState;
   }
-  const dir = groupDir();
-  if (!storage || !dir || !group) {
+  const dir = groupDir(groupId);
+  if (!storage || !dir || !state) {
     return true;
   }
   const path = join(dir, 'state.bin');
@@ -205,16 +229,16 @@ export function savePersonasState(
   try {
     const payload = Buffer.from(
       JSON.stringify({
-        member: lastMemberState?.toString('base64'),
+        member: state.lastMemberState?.toString('base64'),
         extras: Object.fromEntries(
-          [...extras].map(([name, extra]) => [name, extra.snapshot()])
+          [...extras].map(([name, extra]) => [name, extra.snapshot(groupId)])
         ),
       }),
       'utf8'
     );
     const iv = randomBytes(IV_BYTES);
     const cipher = createCipheriv('aes-256-gcm', storage.key, iv);
-    cipher.setAAD(Buffer.from(`personas-state|${group}`));
+    cipher.setAAD(Buffer.from(`personas-state|${state.folder}`));
     const body = Buffer.concat([cipher.update(payload), cipher.final()]);
     const fd = openSync(tmp, 'w', 0o600);
     try {
@@ -237,9 +261,9 @@ export function savePersonasState(
   }
 }
 
-/** Re-save after an extra (pseudonyms, topics) changed. */
-export function personasExtrasChanged(): void {
-  if (lastMemberState) {
-    savePersonasState(undefined);
+/** Re-save a group after one of its extras (pseudonyms, topics, ...) changed. */
+export function personasExtrasChanged(groupId: string | undefined): void {
+  if (groupId && groups.get(groupId)?.lastMemberState) {
+    savePersonasState(groupId, undefined);
   }
 }

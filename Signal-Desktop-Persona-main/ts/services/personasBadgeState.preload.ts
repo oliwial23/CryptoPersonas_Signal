@@ -83,12 +83,15 @@ export function getSelectedBadge(): PersonaBadge | undefined {
  * would be noise, and the composer already shows `Badge: none held`; the log line is
  * there for the case where someone is wondering where their badge went.
  */
-export function getSelectedBadgeIfHeld(): PersonaBadge | undefined {
+export function getSelectedBadgeIfHeld(
+  groupId: string | undefined
+): PersonaBadge | undefined {
   const selected = getSelectedBadge();
   if (!selected) {
     return undefined;
   }
-  const held = heldBadges();
+  // Held in THIS group: badges are granted per group, by that group's admins.
+  const held = heldBadges(groupId);
   if (held.includes(selected)) {
     return selected;
   }

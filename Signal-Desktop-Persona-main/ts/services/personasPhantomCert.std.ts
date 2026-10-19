@@ -1,8 +1,8 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Personas demo: the phantom sender's identity, and the ONE certificate this member
-// accepts for it.
+// Personas demo: the phantom sender's identity, and the certificates (one per personas
+// group) this member accepts for it.
 //
 // Lives apart from personasPhantom so MessageReceiver can check incoming phantom
 // messages without importing the phantom module's stores.
@@ -15,17 +15,33 @@
 
 export const PHANTOM_SENDER_ACI = '9f9f9f9f-0000-4000-8000-00000000face';
 
-let expected: Uint8Array<ArrayBuffer> | undefined;
+// One certificate per personas group this member holds a bundle for.
+const expected: Array<Uint8Array<ArrayBuffer>> = [];
 
-export function setExpectedPhantomCertificate(
-  bytes: Uint8Array<ArrayBuffer>
-): void {
-  expected = bytes;
+export function addExpectedPhantomCertificate(bytes: Uint8Array<ArrayBuffer>): void {
+  if (!expected.some(known => equalBytes(known, bytes))) {
+    expected.push(bytes);
+  }
 }
 
-// undefined until this member holds a bundle; a phantom message before then is dropped.
-export function getExpectedPhantomCertificate():
-  | Uint8Array<ArrayBuffer>
-  | undefined {
-  return expected;
+// Whether `bytes` is exactly the certificate of one of our bundles. False before this
+// member holds any; such a phantom message is dropped.
+export function isExpectedPhantomCertificate(bytes: Uint8Array<ArrayBuffer>): boolean {
+  return expected.some(known => equalBytes(known, bytes));
+}
+
+export function hasAnyPhantomCertificate(): boolean {
+  return expected.length > 0;
+}
+
+function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
 }

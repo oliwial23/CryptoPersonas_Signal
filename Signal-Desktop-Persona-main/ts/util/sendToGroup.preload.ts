@@ -1335,21 +1335,25 @@ async function encryptForSenderKey({
   // with our REAL sender key and certificate and goes out attributably — not refused,
   // DELIVERED and de-anonymised. That makes a silent false here worse than the fallback
   // case, so it is logged the same way.
+  // The phantom of THIS group: each personas group has its own.
   const phantom = isPersonaContent(contentMessage, 'encryptForSenderKey')
-    ? await ensurePhantomMaterial()
+    ? await ensurePhantomMaterial(groupId)
     : undefined;
 
   if (phantom) {
     // This member's own copy of the shared chain; receiving walks it forward, so
     // no cross-instance state is read or written (personasPhantom.preload.ts).
-    const ciphertextMessage = await phantomGroupEncrypt(message);
+    const ciphertextMessage = await phantomGroupEncrypt(groupId, message);
     const content = UnidentifiedSenderMessageContent.new(
       ciphertextMessage,
       phantom.phantomCert,
       contentHint,
       groupIdBuffer
     );
-    const phantomIdentityStore = buildPhantomIdentityStore(identityKeyStore);
+    const phantomIdentityStore = buildPhantomIdentityStore(
+      groupId,
+      identityKeyStore
+    );
     if (!phantomIdentityStore) {
       throw new Error(
         'encryptForSenderKey: phantom identity store unavailable'

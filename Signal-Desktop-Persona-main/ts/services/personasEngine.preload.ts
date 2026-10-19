@@ -84,50 +84,84 @@ function getKeysDir(): string {
   return process.env.PERSONAS_KEYS_DIR?.trim() || DEFAULT_KEYS_DIR;
 }
 
-let engine: Engine | undefined;
-let constructionFailed = false;
-// With a pinned key hash, the engine is built only once the downloaded keys verified.
+// ONE ENGINE PER PERSONAS GROUP. Each group has its own phantom bundle, barrier schedule,
+// member object, replica and saved state; nothing is shared between them. Every function
+// below takes the Signal group id (GroupV2 id) it acts in.
+type GroupRuntime = {
+  engine?: Engine;
+  constructionFailed: boolean;
+  readyWaiters: Array<() => void>;
+};
+const runtimes = new Map<string, GroupRuntime>();
+
+function runtimeFor(groupId: string): GroupRuntime {
+  let runtime = runtimes.get(groupId);
+  if (!runtime) {
+    runtime = { constructionFailed: false, readyWaiters: [] };
+    runtimes.set(groupId, runtime);
+  }
+  return runtime;
+}
+
+// The group id of a conversation (undefined for a 1:1 chat).
+export function groupIdOf(
+  conversation: { get(key: 'groupId'): string | undefined } | undefined
+): string | undefined {
+  return conversation?.get('groupId') ?? undefined;
+}
+
+// With a pinned key hash, an engine is built only once the downloaded keys verified.
 let keysReady = false;
 let keysRetry: NodeJS.Timeout | undefined;
-// The state key must be fetched (async) before the engine is built, so a saved member
+// The state key must be fetched (async) before an engine is built, so a saved member
 // can be restored rather than replaced by a new one.
 let persistenceReady = false;
-const readyWaiters: Array<() => void> = [];
 
-// For the receive path: a record that arrives while the engine is still starting (the
-// queue drained right after launch, i.e. everything sent while this member was offline)
-// must WAIT for it. Dropping it would leave this replica without that record, and every
-// later post builds on it — the member would fork off the group again. Returns at once
-// when the engine exists or is not coming (disabled, failed, or no group bundle yet).
-export async function waitForPersonasEngineIfStarting(timeoutMs = 120_000): Promise<void> {
-  if (engine || constructionFailed || !isPersonasEngineEnabled() || !hasPhantomMaterial()) {
+// For the receive path: a record that arrives while its group's engine is still starting
+// (the queue drained right after launch, i.e. everything sent while this member was
+// offline) must WAIT for it. Dropping it would leave the replica without that record, and
+// every later post builds on it — the member would fork off the group. Returns at once
+// when the engine exists or is not coming (disabled, failed, or no bundle for the group).
+export async function waitForPersonasEngineIfStarting(
+  groupId: string | undefined,
+  timeoutMs = 120_000
+): Promise<void> {
+  if (!groupId || !isPersonasEngineEnabled() || !hasPhantomMaterial(groupId)) {
+    return;
+  }
+  const runtime = runtimeFor(groupId);
+  if (runtime.engine || runtime.constructionFailed) {
     return;
   }
   await Promise.race([
     sleep(timeoutMs),
     new Promise<void>(resolve => {
-      readyWaiters.push(resolve);
+      runtime.readyWaiters.push(resolve);
     }),
   ]);
 }
 const KEYS_RETRY_MS = 30_000;
 
-// The engine singleton for this instance (one Member per process). Built lazily on
-// first use; construction reads the ~51MB key bundle and mints this member's
-// keypair. Returns undefined if disabled or if construction failed (so callers
-// never crash the message pipeline).
-export function getPersonasEngine(): Engine | undefined {
-  if (engine || constructionFailed || !isPersonasEngineEnabled()) {
-    return engine;
-  }
-  // Wait for the phantom bundle: it carries the barrier schedule every member must
-  // share, and the replica's schedule is fixed at construction. Background warms the
-  // engine again the moment the bundle is minted or adopted.
-  if (!hasPhantomMaterial()) {
+// A group's engine (one Member per group per process). Built lazily on first use;
+// construction reads the ~51MB key bundle and mints this member's keypair for the group.
+// Returns undefined if disabled, if the group has no bundle, or if construction failed
+// (so callers never crash the message pipeline).
+export function getPersonasEngine(groupId: string | undefined): Engine | undefined {
+  if (!groupId || !isPersonasEngineEnabled()) {
     return undefined;
   }
-  // And for the group's proving keys when they come from our server (personasKeys):
-  // built before they arrive, the engine would generate a private, incompatible set.
+  const runtime = runtimeFor(groupId);
+  if (runtime.engine || runtime.constructionFailed) {
+    return runtime.engine;
+  }
+  // Wait for the group's phantom bundle: it carries the barrier schedule every member
+  // must share, and the replica's schedule is fixed at construction. Background warms
+  // the engine again the moment the bundle is minted or adopted.
+  if (!hasPhantomMaterial(groupId)) {
+    return undefined;
+  }
+  // And for the proving keys when they come from our server (personasKeys): built
+  // before they arrive, the engine would generate a private, incompatible set.
   if (getPinnedKeysSha256() && !keysReady) {
     return undefined;
   }
@@ -135,22 +169,26 @@ export function getPersonasEngine(): Engine | undefined {
     return undefined;
   }
   const dataDir = getKeysDir();
-  // Phase 6: put the replica on the SHARED barrier schedule when there is a roster
-  // dir to agree through. Every member then buckets an ingest by the record's
-  // service timestamp rather than local arrival order, so replicas stay converged
-  // AND settlement barriers actually pass — which is what lets a ban poll close and
-  // a revoked persona's posts flag. Without a schedule we keep the old local-barrier
-  // cadence (a lone instance has nobody to agree with).
-  const schedule = getBarrierSchedule();
+  // The group's SHARED barrier schedule: every member buckets an ingest by the record's
+  // timestamp rather than local arrival order, so replicas stay converged AND settlement
+  // barriers actually pass — which is what lets a ban poll close and a ban bite.
+  const schedule = getBarrierSchedule(groupId);
   // Continue as the saved member, on the saved replica (personasPersistence). Without a
-  // state key both are undefined and the engine starts fresh, in memory, as before.
-  const fingerprint = getPhantomBundleFingerprint();
+  // state key both are undefined and the engine starts fresh, in memory.
+  const fingerprint = getPhantomBundleFingerprint(groupId);
   // Keyed by protocol version too: a version-3 replica cannot read version-2 records,
   // and a member saved under version 2 joined without a proof, so both start fresh.
-  const groupState = fingerprint ? openPersonasGroupState(`${fingerprint}-v3`) : undefined;
-  const memberState = groupState ? loadPersonasState() : undefined;
+  const groupState = fingerprint
+    ? openPersonasGroupState(groupId, `${fingerprint}-v3`)
+    : undefined;
+  const memberState = groupState ? loadPersonasState(groupId) : undefined;
+  const wakeAll = () => {
+    for (const wake of runtime.readyWaiters.splice(0)) {
+      wake();
+    }
+  };
   try {
-    engine = new Engine({
+    const engine = new Engine({
       dataDir,
       conversation: PERSONAS_CONVERSATION,
       ...(schedule
@@ -162,6 +200,7 @@ export function getPersonasEngine(): Engine | undefined {
       ...(memberState ? { memberState } : {}),
       ...(groupState ? { journalPath: groupState.journalPath } : {}),
     });
+    runtime.engine = engine;
     if (memberState) {
       log.info(
         `restored the saved member (${
@@ -171,12 +210,12 @@ export function getPersonasEngine(): Engine | undefined {
     } else {
       // A new member: save it now, before its join can be sent.
       const state = engine.exportMemberState();
-      savePersonasState(state ? Buffer.from(state) : undefined);
+      savePersonasState(groupId, state ? Buffer.from(state) : undefined);
     }
     // A new member has an empty replica: it needs the group's history first.
-    initPersonasCatchUp({ fresh: !memberState });
+    initPersonasCatchUp(groupId, { fresh: !memberState });
     log.info(
-      `constructed engine (keys: ${dataDir}; ${
+      `constructed an engine (keys: ${dataDir}; ${
         schedule
           ? `shared barrier schedule anchor=${schedule.anchorMs} period=${schedule.periodMs}ms`
           : 'local-barrier cadence'
@@ -184,23 +223,31 @@ export function getPersonasEngine(): Engine | undefined {
     );
     // Advance the replica along the schedule so settlement happens on time even in a
     // silent group. No-op when there is no shared schedule.
-    startBarrierTicker(nowMs => engine?.tick(nowMs));
-    for (const wake of readyWaiters.splice(0)) {
-      wake();
-    }
+    startBarrierTicker(groupId, nowMs => runtime.engine?.tick(nowMs));
+    wakeAll();
   } catch (error) {
-    constructionFailed = true;
-    log.error(`failed to construct engine: ${toLogFormat(error)}`);
-    for (const wake of readyWaiters.splice(0)) {
-      wake();
-    }
+    runtime.constructionFailed = true;
+    log.error(`failed to construct an engine: ${toLogFormat(error)}`);
+    wakeAll();
   }
-  return engine;
+  return runtime.engine;
 }
 
-// Warm the engine at boot so first send/receive is instant and so a failure is
-// visible early. Safe to call unconditionally; a no-op when disabled.
-export function warmPersonasEngine(): void {
+// Every engine built so far, by group id — for the loops that tend all groups (flags,
+// scans, catch-up, resets).
+export function builtPersonasEngines(): ReadonlyArray<[string, Engine]> {
+  const out: Array<[string, Engine]> = [];
+  for (const [groupId, runtime] of runtimes) {
+    if (runtime.engine) {
+      out.push([groupId, runtime.engine]);
+    }
+  }
+  return out;
+}
+
+// Warm a group's engine (or, with no group, prepare for engines) so the first
+// send/receive is instant and a failure is visible early. A no-op when disabled.
+export function warmPersonasEngine(groupId?: string): void {
   if (!isPersonasEngineEnabled()) {
     return;
   }
@@ -211,13 +258,15 @@ export function warmPersonasEngine(): void {
       persistenceReady = true;
       keysReady = await ensureProvingKeys(getKeysDir());
       if (keysReady) {
-        getPersonasEngine();
+        if (groupId) {
+          getPersonasEngine(groupId);
+        }
       } else if (!keysRetry) {
         // Server unreachable or a bad download: try again shortly rather than leaving
         // this member without an engine until the next restart.
         keysRetry = setTimeout(() => {
           keysRetry = undefined;
-          warmPersonasEngine();
+          warmPersonasEngine(groupId);
         }, KEYS_RETRY_MS);
       }
     })()
@@ -259,6 +308,7 @@ export type RecordIngestResult =
 // (see personasBarrier). Never throws. A record body is always kept out of the raw
 // timeline (`not-record` is returned only for genuine non-records).
 export function ingestRecordForTimeline(
+  groupId: string | undefined,
   body: string | undefined | null,
   serverTimestampMs: number
 ): RecordIngestResult {
@@ -266,7 +316,7 @@ export function ingestRecordForTimeline(
   if (!record) {
     return { kind: 'not-record' };
   }
-  const currentEngine = getPersonasEngine();
+  const currentEngine = getPersonasEngine(groupId);
   if (!currentEngine) {
     log.warn('ingestRecordForTimeline: record arrived but engine unavailable');
     return { kind: 'ingested' };
@@ -274,7 +324,7 @@ export function ingestRecordForTimeline(
   try {
     const status: IngestStatus = currentEngine.ingest(
       record,
-      ingestTimestampFor(serverTimestampMs)
+      ingestTimestampFor(groupId, serverTimestampMs)
     );
     log.info(
       `ingested record: ${status.status}${status.reason ? ` (${status.reason})` : ''}`
@@ -336,17 +386,17 @@ export function ingestRecordForTimeline(
 
 // Fold our own record into our replica at the timestamp it will be SENT with, so every
 // replica — ours included — places it on the same barrier (personasRegistry).
-function selfIngest(currentEngine: Engine, emitted: Emitted): void {
+function selfIngest(groupId: string, currentEngine: Engine, emitted: Emitted): void {
   const sentAt = stampOwnRecord(Buffer.from(emitted.bytes).toString('base64'));
-  currentEngine.ingest(emitted.bytes, ingestTimestampFor(sentAt));
+  currentEngine.ingest(emitted.bytes, ingestTimestampFor(groupId, sentAt));
 }
 
 // THE ORDERING RULE (personasPersistence): the member state an emit produced is saved,
 // durably, before the record is sent — never after. Throws if it cannot be saved; every
 // caller treats that as "do not send".
-function persistAfterEmit(currentEngine: Engine): void {
+function persistAfterEmit(groupId: string, currentEngine: Engine): void {
   const state = currentEngine.exportMemberState();
-  if (!savePersonasState(state ? Buffer.from(state) : undefined)) {
+  if (!savePersonasState(groupId, state ? Buffer.from(state) : undefined)) {
     throw new Error('could not save the member state; not sending');
   }
 }
@@ -355,18 +405,19 @@ function persistAfterEmit(currentEngine: Engine): void {
 // returning the record ready to carry. Used for protocol records (join/rate/vote/scan)
 // and dev helpers where the whole body is the record.
 export function emitAndSelfIngest(
+  groupId: string | undefined,
   produce: (engine: Engine) => Emitted
 ): { emitted: Emitted; body: string } | undefined {
-  const currentEngine = getPersonasEngine();
-  if (!currentEngine) {
+  const currentEngine = getPersonasEngine(groupId);
+  if (!groupId || !currentEngine) {
     return undefined;
   }
   const emitted = produce(currentEngine);
-  persistAfterEmit(currentEngine);
+  persistAfterEmit(groupId, currentEngine);
   // Our own record never went to the server, so there is no service timestamp;
   // ingestTimestampFor falls back to local wall-clock on the shared schedule (and to
   // the local-barrier 0 when there is no schedule).
-  selfIngest(currentEngine, emitted);
+  selfIngest(groupId, currentEngine, emitted);
   return { emitted, body: encodeRecordBody(emitted.bytes) };
 }
 
@@ -386,11 +437,12 @@ export type PersonaPostSend = {
 // while the wire carries the record — the send path swaps them via
 // `personaRecordBase64`. Returns undefined if the engine is unavailable.
 export function composePersonaPost(
+  groupId: string | undefined,
   text: string,
   choice: PersonaChoice
 ): PersonaPostSend | undefined {
-  const currentEngine = getPersonasEngine();
-  if (!currentEngine) {
+  const currentEngine = getPersonasEngine(groupId);
+  if (!groupId || !currentEngine) {
     return undefined;
   }
   let emitted: Emitted;
@@ -412,13 +464,13 @@ export function composePersonaPost(
       // unlinkable petname.
       emitted = currentEngine.emitPostPseudo(text, choice.nonce);
     }
-    persistAfterEmit(currentEngine);
+    persistAfterEmit(groupId, currentEngine);
   } catch (error) {
     log.error(`composePersonaPost: emit failed: ${toLogFormat(error)}`);
     return undefined;
   }
   // Our own record; no service timestamp exists yet (see emitAndSelfIngest).
-  selfIngest(currentEngine, emitted);
+  selfIngest(groupId, currentEngine, emitted);
   return {
     body: text,
     persona: emitted.persona ?? undefined,
@@ -443,22 +495,23 @@ export function composePersonaPost(
 // nonce, giving one rating per member per target, unlinkable across targets. So it
 // rides the phantom: an attributable envelope would name the rater outright.
 export function composePersonaRate(
+  groupId: string | undefined,
   targetEh: string,
   delta: number
 ): { eh: string; body: string } | undefined {
-  const currentEngine = getPersonasEngine();
-  if (!currentEngine) {
+  const currentEngine = getPersonasEngine(groupId);
+  if (!groupId || !currentEngine) {
     return undefined;
   }
   let emitted: Emitted;
   try {
     emitted = currentEngine.emitRate(targetEh, delta);
-    persistAfterEmit(currentEngine);
+    persistAfterEmit(groupId, currentEngine);
   } catch (error) {
     log.error(`composePersonaRate: emit failed: ${toLogFormat(error)}`);
     return undefined;
   }
-  selfIngest(currentEngine, emitted);
+  selfIngest(groupId, currentEngine, emitted);
   return { eh: emitted.eh, body: encodeRateBody(emitted.bytes) };
 }
 
@@ -467,11 +520,12 @@ export function composePersonaRate(
 // body carries the display descriptor alongside the record so recipients can label
 // the options — see `encodePollBody`.
 export function composePersonaPoll(
+  groupId: string | undefined,
   descriptor: PersonaPollDescriptor,
   targetEh?: string
 ): { eh: string; body: string; descriptor: PersonaPollDescriptor } | undefined {
-  const currentEngine = getPersonasEngine();
-  if (!currentEngine) {
+  const currentEngine = getPersonasEngine(groupId);
+  if (!groupId || !currentEngine) {
     return undefined;
   }
   let emitted: Emitted;
@@ -482,12 +536,12 @@ export function composePersonaPoll(
       descriptor.kind,
       descriptor.kind === 'ban' ? targetEh : undefined
     );
-    persistAfterEmit(currentEngine);
+    persistAfterEmit(groupId, currentEngine);
   } catch (error) {
     log.error(`composePersonaPoll: emit failed: ${toLogFormat(error)}`);
     return undefined;
   }
-  selfIngest(currentEngine, emitted);
+  selfIngest(groupId, currentEngine, emitted);
   return {
     eh: emitted.eh,
     body: encodePollBody(emitted.bytes, descriptor),
@@ -507,11 +561,12 @@ export function composePersonaPoll(
 // The body is VOTE-marked so it rides the phantom, hiding the real Signal sender.
 // Without that, the pseudonym would be pointless — the envelope would name the voter.
 export function composePersonaVote(
+  groupId: string | undefined,
   pollEh: string,
   optionIndex: number
 ): { eh: string; body: string } | undefined {
-  const currentEngine = getPersonasEngine();
-  if (!currentEngine) {
+  const currentEngine = getPersonasEngine(groupId);
+  if (!groupId || !currentEngine) {
     return undefined;
   }
   let emitted: Emitted;
@@ -521,12 +576,12 @@ export function composePersonaVote(
     // `H(sk, context)`, with no nonce. One pseudonym per poll, hence one vote per
     // member. Nothing else needs passing.
     emitted = currentEngine.emitVote(pollEh, optionIndex);
-    persistAfterEmit(currentEngine);
+    persistAfterEmit(groupId, currentEngine);
   } catch (error) {
     log.error(`composePersonaVote: emit failed: ${toLogFormat(error)}`);
     return undefined;
   }
-  selfIngest(currentEngine, emitted);
+  selfIngest(groupId, currentEngine, emitted);
   return { eh: emitted.eh, body: encodeVoteBody(emitted.bytes) };
 }
 
@@ -536,28 +591,30 @@ export function composePersonaVote(
 // Messenger::prepare_scan in the engine): prepare (prove; nothing released), check
 // `personaScanStillValid` close to sending, then commit — which is the only way to get
 // the record to send — or discard. Throws "nothing to scan" when nothing is outstanding.
-export function preparePersonaScan(): string | undefined {
-  const currentEngine = getPersonasEngine();
+export function preparePersonaScan(groupId: string | undefined): string | undefined {
+  const currentEngine = getPersonasEngine(groupId);
   return currentEngine ? currentEngine.prepareScan() : undefined;
 }
 
-export function personaScanStillValid(): boolean {
-  return getPersonasEngine()?.scanStillValid() ?? false;
+export function personaScanStillValid(groupId: string | undefined): boolean {
+  return getPersonasEngine(groupId)?.scanStillValid() ?? false;
 }
 
-export function discardPersonaScan(): void {
-  getPersonasEngine()?.discardScan();
+export function discardPersonaScan(groupId: string | undefined): void {
+  getPersonasEngine(groupId)?.discardScan();
 }
 
 // Release the prepared scan and save the state it produced, before it is sent.
-export function commitPersonaScan(): { eh: string; body: string } | undefined {
-  const currentEngine = getPersonasEngine();
-  if (!currentEngine) {
+export function commitPersonaScan(
+  groupId: string | undefined
+): { eh: string; body: string } | undefined {
+  const currentEngine = getPersonasEngine(groupId);
+  if (!groupId || !currentEngine) {
     return undefined;
   }
   const emitted = currentEngine.commitScan();
-  persistAfterEmit(currentEngine);
-  selfIngest(currentEngine, emitted);
+  persistAfterEmit(groupId, currentEngine);
+  selfIngest(groupId, currentEngine, emitted);
   return { eh: emitted.eh, body: encodeRecordBody(emitted.bytes) };
 }
 
@@ -574,20 +631,22 @@ export const BADGE_SLOTS: ReadonlyArray<{ slot: number; name: string }> = [
  * is not a claim that can be made anonymously.
  */
 export function composeBadgeRequest(
+  groupId: string | undefined,
   slot: number
 ): { eh: string; body: string } | undefined {
   // `encodeBadgeBody`, not the default attributable encoding `emitAndSelfIngest`
   // applies. The marker is the only thing the send splice looks at, so the choice of
   // encoder here IS the choice of whether the requester is named on the wire.
-  return emitBadgeRecord(engine => engine.emitBadgeRequest(slot));
+  return emitBadgeRecord(groupId, engine => engine.emitBadgeRequest(slot));
 }
 
 /** Approve a badge request by its envelope hash (admin action). Phantom-routed. */
 export function composeBadgeApprove(
+  groupId: string | undefined,
   requestEh: string,
   slot: number
 ): { eh: string; body: string } | undefined {
-  return emitBadgeRecord(engine => engine.emitBadgeApprove(requestEh, slot));
+  return emitBadgeRecord(groupId, engine => engine.emitBadgeApprove(requestEh, slot));
 }
 
 /**
@@ -599,15 +658,16 @@ export function composeBadgeApprove(
  * the pair would narrow the anonymity set to "whoever the admin replied to".
  */
 function emitBadgeRecord(
+  groupId: string | undefined,
   produce: (engine: Engine) => Emitted
 ): { eh: string; body: string } | undefined {
-  const currentEngine = getPersonasEngine();
-  if (!currentEngine) {
+  const currentEngine = getPersonasEngine(groupId);
+  if (!groupId || !currentEngine) {
     return undefined;
   }
   const emitted = produce(currentEngine);
-  persistAfterEmit(currentEngine);
-  selfIngest(currentEngine, emitted);
+  persistAfterEmit(groupId, currentEngine);
+  selfIngest(groupId, currentEngine, emitted);
   return { eh: emitted.eh, body: encodeBadgeBody(emitted.bytes) };
 }
 
@@ -618,8 +678,8 @@ function emitBadgeRecord(
  * is the safe one: it under-claims rather than over-claims, so a build that cannot tell
  * sends no badge instead of asserting an unverified one.
  */
-export function heldBadges(): ReadonlyArray<string> {
-  const engine = getPersonasEngine();
+export function heldBadges(groupId: string | undefined): ReadonlyArray<string> {
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.getBadges !== 'function') {
     return [];
   }
@@ -632,11 +692,11 @@ export function heldBadges(): ReadonlyArray<string> {
 }
 
 /** Badge requests awaiting approval, read from the replica's own log. */
-export function listPendingBadgeRequests(): ReadonlyArray<{
+export function listPendingBadgeRequests(groupId: string | undefined): ReadonlyArray<{
   eh: string;
   slot: number;
 }> {
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.pendingBadgeRequests !== 'function') {
     return [];
   }
@@ -652,8 +712,11 @@ export function listPendingBadgeRequests(): ReadonlyArray<{
  * Prove we hold `badge`, by name. Undefined if we do not hold it — the proof is simply
  * unsatisfiable, which is the point: a badge label can be typed, a badge proof cannot.
  */
-export function composeBadgeProof(badge: string): Uint8Array | undefined {
-  const engine = getPersonasEngine();
+export function composeBadgeProof(
+  groupId: string | undefined,
+  badge: string
+): Uint8Array | undefined {
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.emitBadgeProof !== 'function') {
     log.error('composeBadgeProof: addon has no emitBadgeProof binding');
     return undefined;
@@ -672,8 +735,11 @@ export function composeBadgeProof(badge: string): Uint8Array | undefined {
  * Render this, never a label from the message — otherwise a valid Student proof could
  * be displayed as Faculty and the checkmark would be true while the label lied.
  */
-export function verifyBadgeProof(proof: Uint8Array): string | undefined {
-  const engine = getPersonasEngine();
+export function verifyBadgeProof(
+  groupId: string | undefined,
+  proof: Uint8Array
+): string | undefined {
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.verifyBadgeProof !== 'function') {
     return undefined;
   }
@@ -697,10 +763,11 @@ export function verifyBadgeProof(proof: Uint8Array): string | undefined {
  * and there is no echo to absorb.
  */
 export function composePersonaAuthorship(
+  groupId: string | undefined,
   contextA: number,
   contextB: number
 ): { body: string; proof: Uint8Array } | undefined {
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.emitAuthorship !== 'function') {
     log.error('composePersonaAuthorship: addon has no emitAuthorship binding');
     return undefined;
@@ -727,9 +794,10 @@ export function composePersonaAuthorship(
  * accept rule applies. Same shape as `composePersonaAuthorship`.
  */
 export function composePersonaBadgeProof(
+  groupId: string | undefined,
   badge: string
 ): { body: string; proof: Uint8Array } | undefined {
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.emitBadgeProof !== 'function') {
     log.error('composePersonaBadgeProof: addon has no emitBadgeProof binding');
     return undefined;
@@ -753,9 +821,10 @@ export function composePersonaBadgeProof(
  * rather than a plausible-looking guess.
  */
 export function verifyPersonaBadgeProof(
+  groupId: string | undefined,
   proof: Uint8Array
 ): string | undefined {
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.verifyBadgeProof !== 'function') {
     return undefined;
   }
@@ -776,9 +845,10 @@ export function verifyPersonaBadgeProof(
  * true while the statement was false.
  */
 export function verifyPersonaAuthorship(
+  groupId: string | undefined,
   proof: Uint8Array
 ): { first: string; second: string } | undefined {
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.verifyAuthorship !== 'function') {
     return undefined;
   }
@@ -809,20 +879,26 @@ export function verifyPersonaAuthorship(
 //     short window — long enough to collapse a burst of renders, short enough that a
 //     moving tally still updates promptly.
 const POLL_STATUS_TTL_MS = 500;
-let pollStatusCache: { atMs: number; lines: ReadonlyArray<string> } | undefined;
+const pollStatusCache = new Map<string, { atMs: number; lines: ReadonlyArray<string> }>();
 
-export function getPollStatusLine(pollEh: string): string | undefined {
+export function getPollStatusLine(
+  groupId: string | undefined,
+  pollEh: string
+): string | undefined {
   // Deliberately NOT getPersonasEngine(): peek at what is already built, never build.
-  if (!engine) {
+  const engine = groupId ? runtimes.get(groupId)?.engine : undefined;
+  if (!groupId || !engine) {
     return undefined;
   }
   try {
     const now = Date.now();
-    if (!pollStatusCache || now - pollStatusCache.atMs > POLL_STATUS_TTL_MS) {
-      pollStatusCache = { atMs: now, lines: engine.renderPolls() };
+    let cached = pollStatusCache.get(groupId);
+    if (!cached || now - cached.atMs > POLL_STATUS_TTL_MS) {
+      cached = { atMs: now, lines: engine.renderPolls() };
+      pollStatusCache.set(groupId, cached);
     }
     const shortEh = pollEh.slice(0, 12);
-    return pollStatusCache.lines.find(
+    return cached.lines.find(
       line => line.includes(pollEh) || line.includes(shortEh)
     );
   } catch (error) {
@@ -835,8 +911,11 @@ export function getPollStatusLine(pollEh: string): string | undefined {
 // revoked). The receive path stamps `personaFlagged` at ingest time, but a ban that
 // settles LATER has to be re-read from the engine — this is what the flag refresher
 // polls. Returns undefined when the engine has no entry for `eh`.
-export function isPostFlagged(eh: string): boolean | undefined {
-  const currentEngine = getPersonasEngine();
+export function isPostFlagged(
+  groupId: string | undefined,
+  eh: string
+): boolean | undefined {
+  const currentEngine = getPersonasEngine(groupId);
   if (!currentEngine) {
     return undefined;
   }

@@ -65,7 +65,7 @@ export async function sendBadgeProof(
       };
     }
 
-    const claim = composePersonaBadgeProof(badge);
+    const claim = composePersonaBadgeProof(conversation.get('groupId'), badge);
     if (!claim) {
       // The expected failure, and worth wording precisely: the proof is not "broken",
       // it is UNSATISFIABLE, because the witness does not exist. That is the security
@@ -80,7 +80,7 @@ export async function sendBadgeProof(
     // Verify our OWN proof before sending it, and render from the verifier's answer.
     // Catches a malformed proof here instead of at every recipient, and guarantees the
     // sender's bubble is built from the same source of truth as everyone else's.
-    const verified = verifyPersonaBadgeProof(claim.proof);
+    const verified = verifyPersonaBadgeProof(conversation.get('groupId'), claim.proof);
     if (!verified) {
       log.error(
         'sendBadgeProof: our own proof failed to verify; refusing to send it'

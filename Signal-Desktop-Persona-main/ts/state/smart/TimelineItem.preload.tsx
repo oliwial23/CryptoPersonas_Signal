@@ -332,7 +332,9 @@ export const SmartTimelineItem = memo(function SmartTimelineItem(
       personaBanPoll={personaBanPoll}
       personaBanNow={personaBanNow}
       approvePersonaBadge={approveBadgeHere}
-      dismissPersonaBadgeRequest={dismissPersonaBadgeRequest}
+      dismissPersonaBadgeRequest={(requestEh: string) =>
+        dismissPersonaBadgeRequest(conversationId, requestEh)
+      }
       renderItem={renderItem}
       returnToActiveCall={returnToActiveCall}
       saveAttachment={saveAttachment}

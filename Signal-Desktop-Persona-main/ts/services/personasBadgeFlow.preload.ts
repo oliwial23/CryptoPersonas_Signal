@@ -126,7 +126,7 @@ export async function requestBadge(
           'could not join the bulletin (sealed sender may not be ready yet) — try again in a moment',
       };
     }
-    const request = composeBadgeRequest(slot);
+    const request = composeBadgeRequest(conversation.get('groupId'), slot);
     if (!request) {
       log.error('requestBadge: could not emit the request record');
       return {
@@ -186,7 +186,7 @@ export async function approveBadge(
     // So refuse here rather than relying on the button being hidden: the UI's `pending`
     // flag is recomputed on render, which is exactly the kind of guarantee that lapses
     // under a fast double-click.
-    if (!isBadgeRequestPending(requestEh)) {
+    if (!isBadgeRequestPending(conversation.get('groupId'), requestEh)) {
       log.warn(
         `approveBadge: ${requestEh.slice(0, 12)}… is not pending (already approved, ` +
         'dismissed, or unknown); refusing to emit a second approval'
@@ -207,7 +207,7 @@ export async function approveBadge(
           'could not join the bulletin (sealed sender may not be ready yet) — try again in a moment',
       };
     }
-    const approval = composeBadgeApprove(requestEh, slot);
+    const approval = composeBadgeApprove(conversation.get('groupId'), requestEh, slot);
     if (!approval) {
       log.error('approveBadge: could not emit the approval record');
       return {
@@ -263,8 +263,11 @@ const dismissed = new Set<string>();
  * Returns false if it was not pending in the first place, so the caller can tell
  * "dismissed it" from "there was nothing to dismiss".
  */
-export function dismissBadgeRequest(requestEh: string): boolean {
-  if (!isBadgeRequestPending(requestEh)) {
+export function dismissBadgeRequest(
+  groupId: string | undefined,
+  requestEh: string
+): boolean {
+  if (!isBadgeRequestPending(groupId, requestEh)) {
     return false;
   }
   dismissed.add(requestEh);
@@ -283,20 +286,23 @@ export function dismissBadgeRequest(requestEh: string): boolean {
  * receive time would have left a button that still worked and did nothing, on every
  * admin's screen except the one who clicked it.
  */
-export function isBadgeRequestPending(requestEh: string): boolean {
+export function isBadgeRequestPending(
+  groupId: string | undefined,
+  requestEh: string
+): boolean {
   if (dismissed.has(requestEh)) {
     return false;
   }
-  return listPendingBadgeRequests().some(r => r.eh === requestEh);
+  return listPendingBadgeRequests(groupId).some(r => r.eh === requestEh);
 }
 
-/** Pending requests, newest last, as the admin UI should list them. */
-export function pendingBadgeRequests(): ReadonlyArray<{
+/** A group's pending requests, newest last, as the admin UI should list them. */
+export function pendingBadgeRequests(groupId: string | undefined): ReadonlyArray<{
   eh: string;
   slot: number;
   name: string;
 }> {
-  return listPendingBadgeRequests()
+  return listPendingBadgeRequests(groupId)
     .filter(r => !dismissed.has(r.eh))
     .map(r => ({
       ...r,

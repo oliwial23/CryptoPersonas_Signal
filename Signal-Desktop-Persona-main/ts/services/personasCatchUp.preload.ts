@@ -65,30 +65,43 @@ export type CatchUpState = 'done' | 'needed' | 'requested';
 
 type Saved = {
   state: CatchUpState;
-  conversationId?: string;
   requestedAt?: number;
 };
 
-let saved: Saved | undefined;
-let lastRequestSentAt = 0;
-// Settled once the copy is in; records waiting for it race it against their deadline.
-let arrived: Promise<void> | undefined;
-let signalArrived: (() => void) | undefined;
-function copyArrived(): Promise<void> {
-  arrived ??= new Promise<void>(resolve => {
-    signalArrived = resolve;
+// Per personas group: where its catch-up stands, when we last asked, and the signal the
+// held records wait on.
+type GroupCatchUp = {
+  saved?: Saved;
+  lastRequestSentAt: number;
+  arrived?: Promise<void>;
+  signalArrived?: () => void;
+};
+const byGroup = new Map<string, GroupCatchUp>();
+
+function catchUpOf(groupId: string): GroupCatchUp {
+  let entry = byGroup.get(groupId);
+  if (!entry) {
+    entry = { lastRequestSentAt: 0 };
+    byGroup.set(groupId, entry);
+  }
+  return entry;
+}
+
+// Settled once the group's copy is in; records waiting for it race it against a deadline.
+function copyArrived(entry: GroupCatchUp): Promise<void> {
+  entry.arrived ??= new Promise<void>(resolve => {
+    entry.signalArrived = resolve;
   });
-  return arrived;
+  return entry.arrived;
 }
 
 registerPersistedExtra('catchUp', {
-  snapshot: () => saved ?? null,
-  restore: value => {
+  snapshot: groupId => byGroup.get(groupId)?.saved ?? null,
+  restore: (groupId, value) => {
     const v = value as Partial<Saved> | null;
     if (v && (v.state === 'done' || v.state === 'needed' || v.state === 'requested')) {
-      saved = {
+      catchUpOf(groupId).saved = {
         state: v.state,
-        ...(typeof v.conversationId === 'string' ? { conversationId: v.conversationId } : {}),
         ...(typeof v.requestedAt === 'number' ? { requestedAt: v.requestedAt } : {}),
       };
     }
@@ -96,44 +109,46 @@ registerPersistedExtra('catchUp', {
 });
 
 /**
- * Called once the engine is built. `fresh`: no saved member state was restored, so this
- * replica is empty and needs the group's history. A member restored from an older build
- * (saved state, no catch-up entry) already has it.
+ * Called once a group's engine is built. `fresh`: no saved member state was restored, so
+ * the replica is empty and needs the group's history. A member restored from an older
+ * build (saved state, no catch-up entry) already has it.
  */
-export function initPersonasCatchUp({ fresh }: { fresh: boolean }): void {
-  if (saved) {
+export function initPersonasCatchUp(groupId: string, { fresh }: { fresh: boolean }): void {
+  const entry = catchUpOf(groupId);
+  if (entry.saved) {
     return;
   }
-  saved = { state: fresh ? 'needed' : 'done' };
+  entry.saved = { state: fresh ? 'needed' : 'done' };
   // Saved straight away: the member state was just saved without it, and a restart
   // would otherwise read "has saved state" as "already caught up".
-  personasExtrasChanged();
-  log.info(`initPersonasCatchUp: ${saved.state}`);
+  personasExtrasChanged(groupId);
+  log.info(`initPersonasCatchUp: ${entry.saved.state}`);
 }
 
-export function catchUpState(): CatchUpState {
-  return saved?.state ?? 'done';
+export function catchUpState(groupId: string | undefined): CatchUpState {
+  return (groupId ? byGroup.get(groupId)?.saved?.state : undefined) ?? 'done';
 }
 
-/** Why persona actions are refused for now, or undefined if they are not. */
-export function catchUpBlockReason(): string | undefined {
-  if (catchUpState() === 'done') {
+/** Why persona actions are refused in a group for now, or undefined if they are not. */
+export function catchUpBlockReason(groupId: string | undefined): string | undefined {
+  if (catchUpState(groupId) === 'done') {
     return undefined;
   }
   return (
-    'Waiting for a group admin to send you the group’s state. Persona messages ' +
-    'work once it arrives (the admin’s app sends it automatically while it is open).'
+    'Waiting for a group admin to send you the group\u2019s state. Persona messages ' +
+    'work once it arrives (the admin\u2019s app sends it automatically while it is open).'
   );
 }
 
-function markDone(how: string): void {
-  saved = { state: 'done' };
+function markDone(groupId: string, how: string): void {
+  const entry = catchUpOf(groupId);
+  entry.saved = { state: 'done' };
   // Persist now: a fresh member has emitted nothing yet, so nothing else would save.
-  const state = getPersonasEngine()?.exportMemberState();
-  savePersonasState(state ? Buffer.from(state) : undefined);
-  personasExtrasChanged();
+  const state = getPersonasEngine(groupId)?.exportMemberState();
+  savePersonasState(groupId, state ? Buffer.from(state) : undefined);
+  personasExtrasChanged(groupId);
   log.info(`catch-up done (${how})`);
-  signalArrived?.();
+  entry.signalArrived?.();
 }
 
 const ourAci = (): string | undefined => itemStorage.user.getAci();
@@ -149,20 +164,20 @@ function otherAdmins(conversation: ConversationModel): Array<string> {
     );
 }
 
-async function sendRequest(conversation: ConversationModel): Promise<void> {
-  lastRequestSentAt = Date.now();
-  saved = {
+async function sendRequest(groupId: string, conversation: ConversationModel): Promise<void> {
+  const entry = catchUpOf(groupId);
+  entry.lastRequestSentAt = Date.now();
+  entry.saved = {
     state: 'requested',
-    conversationId: conversation.id,
-    requestedAt: saved?.requestedAt ?? lastRequestSentAt,
+    requestedAt: entry.saved?.requestedAt ?? entry.lastRequestSentAt,
   };
-  personasExtrasChanged();
+  personasExtrasChanged(groupId);
   try {
     await conversation.enqueueMessageForSend(
       { body: encodeCatchUpRequest(), attachments: [] },
       { hideFromTimeline: true }
     );
-    log.info('catch-up requested from the group’s admins');
+    log.info('catch-up requested from the group\u2019s admins');
   } catch (error) {
     log.error(`catch-up request failed to send: ${toLogFormat(error)}`);
   }
@@ -174,40 +189,44 @@ async function sendRequest(conversation: ConversationModel): Promise<void> {
  * wait.
  */
 export async function ensureCaughtUp(conversation: ConversationModel): Promise<boolean> {
-  if (catchUpState() === 'done') {
+  const groupId = conversation.get('groupId');
+  if (catchUpState(groupId) === 'done') {
     return true;
   }
-  if (!getPersonasEngine()) {
+  if (!groupId || !getPersonasEngine(groupId)) {
     return false;
   }
   if (conversation.areWeAdmin() && otherAdmins(conversation).length === 0) {
-    markDone('we are the only admin');
+    markDone(groupId, 'we are the only admin');
     return true;
   }
-  if (Date.now() - lastRequestSentAt >= REQUEST_EVERY_MS) {
-    await sendRequest(conversation);
+  if (Date.now() - catchUpOf(groupId).lastRequestSentAt >= REQUEST_EVERY_MS) {
+    await sendRequest(groupId, conversation);
   }
   return false;
 }
 
-/** On every flag-loop tick: repeat an unanswered request, and the admin fallback. */
+/** On every flag-loop tick: repeat unanswered requests, and the admin fallback. */
 export async function maybeContinueCatchUp(): Promise<void> {
-  if (saved?.state !== 'requested' || !saved.conversationId) {
-    return;
-  }
-  const conversation = window.ConversationController.get(saved.conversationId);
-  if (!conversation) {
-    return;
-  }
-  if (
-    conversation.areWeAdmin() &&
-    Date.now() - (saved.requestedAt ?? Date.now()) >= ADMIN_FALLBACK_MS
-  ) {
-    markDone('no other admin answered; starting from our own state');
-    return;
-  }
-  if (Date.now() - lastRequestSentAt >= REQUEST_EVERY_MS) {
-    await sendRequest(conversation);
+  for (const [groupId, entry] of [...byGroup]) {
+    if (entry.saved?.state !== 'requested') {
+      continue;
+    }
+    const conversation = window.ConversationController.get(groupId);
+    if (!conversation) {
+      continue;
+    }
+    if (
+      conversation.areWeAdmin() &&
+      Date.now() - (entry.saved.requestedAt ?? Date.now()) >= ADMIN_FALLBACK_MS
+    ) {
+      markDone(groupId, 'no other admin answered; starting from our own state');
+      continue;
+    }
+    if (Date.now() - entry.lastRequestSentAt >= REQUEST_EVERY_MS) {
+      // oxlint-disable-next-line no-await-in-loop
+      await sendRequest(groupId, conversation);
+    }
   }
 }
 
@@ -218,20 +237,25 @@ export async function maybeContinueCatchUp(): Promise<void> {
  * yet, and is only applied — not shown — when the copy lands.
  */
 export async function holdRecordForCatchUp(conversation: ConversationModel): Promise<void> {
-  if (catchUpState() === 'done') {
+  const groupId = conversation.get('groupId');
+  if (!groupId || catchUpState(groupId) === 'done') {
     return;
   }
-  if (catchUpState() === 'needed') {
+  if (catchUpState(groupId) === 'needed') {
     await ensureCaughtUp(conversation);
   }
-  const deadline = (saved?.requestedAt ?? Date.now()) + HOLD_RECORDS_MS;
+  const entry = catchUpOf(groupId);
+  const deadline = (entry.saved?.requestedAt ?? Date.now()) + HOLD_RECORDS_MS;
   const wait = deadline - Date.now();
-  if (catchUpState() === 'done' || wait <= 0) {
+  if (catchUpState(groupId) === 'done' || wait <= 0) {
     return;
   }
   // Whichever comes first: the copy, or the deadline.
   const abort = new AbortController();
-  await Promise.race([copyArrived(), sleep(wait, abort.signal).catch(() => undefined)]);
+  await Promise.race([
+    copyArrived(entry),
+    sleep(wait, abort.signal).catch(() => undefined),
+  ]);
   abort.abort();
 }
 
@@ -258,14 +282,15 @@ export async function answerCatchUpRequest(
     log.info('answerCatchUpRequest: our own state is not complete yet; not answering');
     return;
   }
-  const last = answeredAt.get(sender) ?? 0;
+  const groupId = conversation.get('groupId');
+  const key = `${groupId}:${sender}`;
+  const last = answeredAt.get(key) ?? 0;
   if (Date.now() - last < ANSWER_EVERY_MS) {
     return;
   }
-  answeredAt.set(sender, Date.now());
+  answeredAt.set(key, Date.now());
 
-  const engine = getPersonasEngine();
-  const groupId = conversation.get('groupId');
+  const engine = getPersonasEngine(groupId);
   const recipient = window.ConversationController.get(sender);
   if (!engine || !groupId || !recipient) {
     return;
@@ -287,7 +312,7 @@ export async function answerCatchUpRequest(
     }
   } catch (error) {
     log.error(`answerCatchUpRequest: sending failed: ${toLogFormat(error)}`);
-    answeredAt.delete(sender);
+    answeredAt.delete(key);
   }
 }
 
@@ -296,24 +321,25 @@ export async function answerCatchUpRequest(
 type Copy = { parts: Array<string | undefined>; have: number; chars: number };
 const copies = new Map<string, Copy>();
 
-/** Receive seam: one part of a copy, 1:1 from `sender`. */
+/** Receive seam: one part of a copy for group `wire.g`, 1:1 from `sender`. */
 export function ingestCatchUpPart(
   wire: PersonaCatchUpPartWire,
   sender: string | undefined
 ): void {
-  if (catchUpState() === 'done') {
+  const groupId = wire.g;
+  if (catchUpState(groupId) === 'done') {
     return;
   }
-  const group = window.ConversationController.get(wire.g);
+  const group = window.ConversationController.get(groupId);
   if (!isPersonasGroup(group)) {
-    log.warn('ingestCatchUpPart: for a group that is not our personas group; dropped');
+    log.warn('ingestCatchUpPart: for a group that is not one of our personas groups; dropped');
     return;
   }
   if (!sender || !group || !group.isAdmin(sender as ServiceIdString)) {
     log.warn('ingestCatchUpPart: not from an admin of that group; dropped');
     return;
   }
-  const key = `${sender}:${wire.s}`;
+  const key = `${groupId}:${sender}:${wire.s}`;
   let copy = copies.get(key);
   if (!copy) {
     copy = { parts: new Array<string | undefined>(wire.n), have: 0, chars: 0 };
@@ -335,14 +361,18 @@ export function ingestCatchUpPart(
   }
   copies.delete(key);
 
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupId);
   if (!engine) {
     return;
   }
   try {
     const added = engine.importCatchUp(Buffer.from(copy.parts.join(''), 'base64'));
-    copies.clear();
-    markDone(`${added} record(s) from an admin`);
+    for (const other of [...copies.keys()]) {
+      if (other.startsWith(`${groupId}:`)) {
+        copies.delete(other);
+      }
+    }
+    markDone(groupId, `${added} record(s) from an admin`);
   } catch (error) {
     log.error(`ingestCatchUpPart: the copy could not be taken in: ${toLogFormat(error)}`);
   }

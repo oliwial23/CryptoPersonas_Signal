@@ -1,6 +1,12 @@
 // Copyright 2019 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { PersonaContactsPanel } from '../../components/PersonaContactsPanel.dom.tsx';
+import {
+  addContactByCode,
+  getMyContactCode,
+  renewMyContactCode,
+} from '../../textsecure/personaRoster.preload.ts';
 import { personasGroupStanding } from '../../services/personasPhantom.preload.ts';
 import { useCallback, useMemo, useState, memo } from 'react';
 import { ipcRenderer } from 'electron';
@@ -84,6 +90,12 @@ function renderSmartCompositionRecordingDraft(
 
 // Personas demo: File > Open Extra Member, from the status panel. The main process only
 // honors this in the installable build (app/personas.main.ts).
+// Stable empties, so a group with no topics or pseudonyms does not re-render the
+// composer on every store update.
+const NO_TOPICS: ReadonlyArray<{ name: string; context: number }> = [];
+const NO_PSEUDONYMS: ReadonlyArray<{ nonce: number; petname?: string; index: number }> =
+  [];
+
 function openPersonasExtraMember(slot: 1 | 2): void {
   void ipcRenderer.invoke('personas:open-extra-member', slot);
 }
@@ -259,14 +271,21 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
   } = useComposerActions();
   // Personas demo: topics (and their random contexts) known to this instance. Held
   // in redux because this component's renderer half cannot import preload modules.
+  // Per personas group: this conversation's own topics and pseudonyms.
   const personaTopics = useSelector(
-    (state: StateType) => state.composer.personaTopics
+    (state: StateType) =>
+      (conversation.groupId
+        ? state.composer.personaTopics[conversation.groupId]
+        : undefined) ?? NO_TOPICS
   );
   const personaStatus = useSelector(
     (state: StateType) => state.composer.personaStatus
   );
   const personaPseudonyms = useSelector(
-    (state: StateType) => state.composer.personaPseudonyms
+    (state: StateType) =>
+      (conversation.groupId
+        ? state.composer.personaPseudonyms[conversation.groupId]
+        : undefined) ?? NO_PSEUDONYMS
   );
   const {
     discardEditMessage,
@@ -455,7 +474,9 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
       // why it is not ready.
       personaJoined={personaStatus?.joined ?? false}
       requestPersonaBadge={requestPersonaBadge}
-      dismissPersonaBadgeRequest={dismissPersonaBadgeRequest}
+      dismissPersonaBadgeRequest={(requestEh: string) =>
+        dismissPersonaBadgeRequest(id, requestEh)
+      }
       requestPersonaReset={requestPersonaReset}
       // Personas are per group, and on in ONE group per app for now: this says whether
       // this is that group. Read on every render (the bundle can arrive at any time).
@@ -464,15 +485,22 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
       )}
       turnOnPersonas={turnOnPersonas}
       approvePersonaReset={approvePersonaReset}
-      dismissPersonaReset={dismissPersonaReset}
+      dismissPersonaReset={(account: string) => dismissPersonaReset(id, account)}
       provePersonaBadge={provePersonaBadge}
       joinPersonaBulletin={joinPersonaBulletin}
       approvePersonaBadge={approvePersonaBadge}
       refreshPersonaStatus={refreshPersonaStatus}
       personaPseudonyms={personaPseudonyms}
-      createPersonaPseudonym={createPersonaPseudonym}
+      createPersonaPseudonym={() => createPersonaPseudonym(id)}
       scanPersonaCallbacksNow={scanPersonaCallbacksNow}
       openPersonasExtraMember={openPersonasExtraMember}
+      personaContactsPanel={
+        <PersonaContactsPanel
+          loadCode={getMyContactCode}
+          renewCode={renewMyContactCode}
+          addByCode={addContactByCode}
+        />
+      }
       sendPersonaAuthorshipClaim={sendPersonaAuthorshipClaim}
       selectedBadge={selectedBadge}
       setPersonaBadge={setPersonaBadge}

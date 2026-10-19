@@ -241,6 +241,8 @@ export type OwnProps = Readonly<{
   scanPersonaCallbacksNow: (conversationId: string) => unknown;
   // Personas demo: open extra member 1 or 2 (installable build only).
   openPersonasExtraMember?: (slot: 1 | 2) => unknown;
+  // Personas demo: the contact-code panel, shown in Persona status.
+  personaContactsPanel?: React.ReactNode;
   // Personas demo: admin-approved reset (personasReset).
   requestPersonaReset: (conversationId: string) => unknown;
   // Personas demo: whether this conversation is the app's personas group (one per app
@@ -248,7 +250,7 @@ export type OwnProps = Readonly<{
   personaGroupStanding?:
     | { kind: 'this' }
     | { kind: 'none' }
-    | { kind: 'other'; name: string };
+    | { kind: 'full'; names: ReadonlyArray<string> };
   turnOnPersonas?: (conversationId: string) => unknown;
   approvePersonaReset: (conversationId: string, account: string) => unknown;
   dismissPersonaReset: (account: string) => unknown;
@@ -383,6 +385,7 @@ export const CompositionArea = memo(function CompositionArea({
   createPersonaPseudonym,
   scanPersonaCallbacksNow,
   openPersonasExtraMember,
+  personaContactsPanel,
   requestPersonaReset,
   personaGroupStanding = { kind: 'this' },
   turnOnPersonas,
@@ -1127,10 +1130,11 @@ export const CompositionArea = memo(function CompositionArea({
             </AxoDropdownMenu.Trigger>
           </div>
           <AxoDropdownMenu.Content>
-            {personaGroupStanding.kind === 'other' && (
+            {personaGroupStanding.kind === 'full' && (
               <AxoDropdownMenu.Label>
-                {`Personas are on in \u201c${personaGroupStanding.name}\u201d. This app uses ` +
-                  'personas in one group for now.'}
+                {`Personas are already on in ${personaGroupStanding.names.length} groups ` +
+                  `for this account (${personaGroupStanding.names.join(', ')}), the most ` +
+                  'there can be for now.'}
               </AxoDropdownMenu.Label>
             )}
             {personaGroupStanding.kind === 'none' && (
@@ -1525,7 +1529,7 @@ export const CompositionArea = memo(function CompositionArea({
             value={newTopicName}
             onChange={event => setNewTopicName(event.target.value)}
             className={tw(
-              'border-border-primary bg-fill-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
+              'border-primary bg-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
             )}
           />
         </AxoDialog.Body>
@@ -1562,14 +1566,14 @@ export const CompositionArea = memo(function CompositionArea({
         </AxoDialog.Header>
         <AxoDialog.Body>
           <div className={tw('flex flex-col gap-3')}>
-            <div className={tw('text-label-secondary type-body-small')}>
+            <div className={tw('text-secondary type-body-small')}>
               {AUTHORSHIP_EXPLANATION}
             </div>
             <select
               value={authorshipFirst}
               onChange={event => setAuthorshipFirst(event.target.value)}
               className={tw(
-                'border-border-primary bg-fill-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
+                'border-primary bg-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
               )}
             >
               <option value="">First persona…</option>
@@ -1583,7 +1587,7 @@ export const CompositionArea = memo(function CompositionArea({
               value={authorshipSecond}
               onChange={event => setAuthorshipSecond(event.target.value)}
               className={tw(
-                'border-border-primary bg-fill-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
+                'border-primary bg-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
               )}
             >
               <option value="">Second persona…</option>
@@ -2127,6 +2131,7 @@ export const CompositionArea = memo(function CompositionArea({
             approvePersonaReset(conversationId, account)
           }
           onDismissReset={dismissPersonaReset}
+          contactsPanel={personaContactsPanel}
           status={personaStatus}
           i18n={i18n}
           onClose={() => setIsStatusDialogOpen(false)}

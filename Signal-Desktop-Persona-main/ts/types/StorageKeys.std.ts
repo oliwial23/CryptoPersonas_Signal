@@ -61,11 +61,19 @@ export type StorageAccessType = {
   // Personas demo: which phantom bundle/format this member's chain was installed from.
   personasPhantomChain: string;
   // Personas demo: the shared phantom bundle this member minted or adopted (key material).
+  // Superseded by personasPhantomBundles; read once to migrate.
   personasPhantomBundle: string;
+  // Personas demo: up to three bundles, one per personas group, as JSON
+  // `{ [groupId]: bundleJson }` (key material).
+  personasPhantomBundles: string;
+  // Personas demo: one `${fingerprint}:${format}` marker per installed phantom chain.
+  personasPhantomChains: Array<string>;
   // Personas demo: `${bundleFingerprint}:${serviceId}` for each member already sent it.
   personasPhantomSentTo: Array<string>;
   // Personas demo: owns our entry in the member directory (personaRoster).
   personasDirectorySecret: string;
+  // Personas demo: our contact code, which lets a tester we give it to add us.
+  personasContactCode: string;
   'always-relay-calls': boolean;
   'audio-notification': boolean;
   'auto-download-update': boolean;
@@ -344,6 +352,8 @@ export const STORAGE_KEYS_TO_PRESERVE_AFTER_UNLINK = [
   // Personas demo: kept across an unlink so the same install can move its directory
   // entry to the account it re-registers (deploy/play/directory.js).
   'personasDirectorySecret',
+  // And the contact code testers were given: it should keep finding us.
+  'personasContactCode',
   // UI & user-setting-related keys
   'always-relay-calls',
   'audio-notification',
@@ -455,6 +465,8 @@ const STORAGE_KEYS_TO_REMOVE_AFTER_UNLINK = [
   // Describes a chain in the account's sender-key store, which unlinking wipes.
   'personasPhantomChain',
   'personasPhantomBundle',
+  'personasPhantomBundles',
+  'personasPhantomChains',
   'personasPhantomSentTo',
   'lastCallQualitySurveyTime',
   'lastCallQualityFailureSurveyTime',

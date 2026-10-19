@@ -40,6 +40,7 @@ import {
   preparePersonaScan,
   isPersonasEngineEnabled,
   getPersonasEngine,
+  groupIdOf,
   emitAndSelfIngest,
   type PersonaPollDescriptor,
 } from './personasEngine.preload.ts';
@@ -79,7 +80,7 @@ export async function sendPersonaRate(
       log.warn('sendPersonaRate: not joined; refusing to rate');
       return false;
     }
-    const rate = composePersonaRate(targetEh, delta);
+    const rate = composePersonaRate(groupIdOf(conversation), targetEh, delta);
     if (!rate) {
       return false;
     }
@@ -125,7 +126,7 @@ export async function sendPersonaPoll(
       log.warn('sendPersonaPoll: not joined; refusing to open a poll');
       return undefined;
     }
-    const poll = composePersonaPoll(descriptor, targetEh);
+    const poll = composePersonaPoll(groupIdOf(conversation), descriptor, targetEh);
     if (!poll) {
       return undefined;
     }
@@ -226,7 +227,9 @@ export async function sendPersonaBan(
       log.warn('sendPersonaBan: not joined; refusing to ban');
       return false;
     }
-    const result = emitAndSelfIngest(engine => engine.emitBan(targetEh));
+    const result = emitAndSelfIngest(groupIdOf(conversation), engine =>
+      engine.emitBan(targetEh)
+    );
     if (!result) {
       return false;
     }
@@ -256,7 +259,7 @@ export async function sendPersonaVote(
       log.warn('sendPersonaVote: not joined; refusing to vote');
       return false;
     }
-    const vote = composePersonaVote(pollEh, optionIndex);
+    const vote = composePersonaVote(groupIdOf(conversation), pollEh, optionIndex);
     if (!vote) {
       return false;
     }
@@ -490,8 +493,8 @@ const SETTLE_MS = 1_500;
 const MAX_SCAN_ATTEMPTS = 3;
 let lastScanProofMs = 4_000;
 
-function msToNextBarrier(): number | undefined {
-  const schedule = getBarrierSchedule();
+function msToNextBarrier(groupId: string): number | undefined {
+  const schedule = getBarrierSchedule(groupId);
   if (!schedule) {
     return undefined;
   }
@@ -501,9 +504,13 @@ function msToNextBarrier(): number | undefined {
 
 // If a barrier boundary is less than `needMs` away, wait until just past it and bring the
 // replica onto the new barrier (settling whatever falls due there).
-async function clearOfBarrier(needMs: number, settleMs = 0): Promise<void> {
-  const schedule = getBarrierSchedule();
-  const left = msToNextBarrier();
+async function clearOfBarrier(
+  groupId: string,
+  needMs: number,
+  settleMs = 0
+): Promise<void> {
+  const schedule = getBarrierSchedule(groupId);
+  const left = msToNextBarrier(groupId);
   if (left == null || !schedule) {
     return;
   }
@@ -515,33 +522,35 @@ async function clearOfBarrier(needMs: number, settleMs = 0): Promise<void> {
   } else {
     return;
   }
-  getPersonasEngine()?.tick(Date.now());
+  getPersonasEngine(groupId)?.tick(Date.now());
 }
 
 // Prove, check and release one scan. Returns the record to send, or undefined if every
 // attempt went stale. Throws "nothing to scan" when nothing is outstanding.
-async function produceValidScan(): Promise<{ eh: string; body: string } | undefined> {
+async function produceValidScan(
+  groupId: string
+): Promise<{ eh: string; body: string } | undefined> {
   for (let attempt = 1; attempt <= MAX_SCAN_ATTEMPTS; attempt += 1) {
     // oxlint-disable-next-line no-await-in-loop
-    await clearOfBarrier(lastScanProofMs + SEND_MARGIN_MS, SETTLE_MS);
+    await clearOfBarrier(groupId, lastScanProofMs + SEND_MARGIN_MS, SETTLE_MS);
     const started = Date.now();
-    if (preparePersonaScan() === undefined) {
+    if (preparePersonaScan(groupId) === undefined) {
       return undefined;
     }
     lastScanProofMs = Date.now() - started;
     try {
       // oxlint-disable-next-line no-await-in-loop
-      await clearOfBarrier(SEND_MARGIN_MS);
+      await clearOfBarrier(groupId, SEND_MARGIN_MS);
     } catch (error) {
       // Never leave a prepared scan pending: it blocks every other persona action.
       // Discarding is safe — nothing has been released.
-      discardPersonaScan();
+      discardPersonaScan(groupId);
       throw error;
     }
-    if (personaScanStillValid()) {
-      return commitPersonaScan();
+    if (personaScanStillValid(groupId)) {
+      return commitPersonaScan(groupId);
     }
-    discardPersonaScan();
+    discardPersonaScan(groupId);
     log.warn(`produceValidScan: attempt ${attempt} went stale at a settlement; discarded unsent`);
   }
   return undefined;
@@ -553,8 +562,8 @@ async function produceValidScan(): Promise<{ eh: string; body: string } | undefi
  * (observer, or an addon without the binding) — deliberately tri-state, so callers can
  * avoid treating "don't know" as "not banned".
  */
-export function isPersonaBanned(): boolean | undefined {
-  const engine = getPersonasEngine();
+export function isPersonaBanned(groupId: string | undefined): boolean | undefined {
+  const engine = getPersonasEngine(groupId);
   if (!engine || typeof engine.isBanned !== 'function') {
     return undefined;
   }
@@ -591,7 +600,7 @@ export function isPersonaBanned(): boolean | undefined {
  * its "not banned" proof requires the object's last action to be a finished sweep.
  */
 export async function runFullPersonaSweep(conversation: ConversationModel): Promise<boolean> {
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupIdOf(conversation));
   if (!engine) {
     return false;
   }
@@ -622,7 +631,7 @@ export async function ensureReadyForPersonaAction(
   if (!(await ensurePersonaJoined(conversation))) {
     return false;
   }
-  if (getPersonasEngine()?.isScanning()) {
+  if (getPersonasEngine(groupIdOf(conversation))?.isScanning()) {
     return drainPersonaScans(conversation);
   }
   return true;
@@ -635,7 +644,7 @@ export async function drainPersonaScans(
   if (!isPersonasEngineEnabled()) {
     return true;
   }
-  const engine = getPersonasEngine();
+  const engine = getPersonasEngine(groupIdOf(conversation));
   if (!engine || typeof engine.scanNeeded !== 'function') {
     // An older addon cannot tell us; fall back to the single speculative scan, which is
     // what the behaviour was before this existed.
@@ -706,11 +715,15 @@ export async function sendPersonaScan(
     markFinished = resolve;
   });
   // Read BEFORE the scan: this is what makes the notification fire on the transition.
-  const bannedBefore = isPersonaBanned();
+  const groupId = groupIdOf(conversation);
+  const bannedBefore = isPersonaBanned(groupId);
   try {
+    if (!groupId) {
+      return false;
+    }
     // A scan is only meaningful once we are a member, but unlike the others it should
     // not CAUSE a join — a lurking instance that never posted has nothing to absorb.
-    const scan = await produceValidScan();
+    const scan = await produceValidScan(groupId);
     if (!scan) {
       return false;
     }
@@ -726,7 +739,7 @@ export async function sendPersonaScan(
     //
     // Compared against the value from BEFORE the scan so the toast fires once, on the
     // transition, rather than on every scan for the rest of the member's life.
-    if (bannedBefore !== true && isPersonaBanned() === true) {
+    if (bannedBefore !== true && isPersonaBanned(groupId) === true) {
       log.warn('sendPersonaScan: this scan absorbed a BAN — notifying the member');
       window.reduxActions?.toast?.showToast({
         toastType: ToastType.PersonaBanned,

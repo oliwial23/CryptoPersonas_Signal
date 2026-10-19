@@ -7,10 +7,12 @@
 //   GET  /personas/directory            -> [entry, ...]   (only what the caller may see)
 //        header x-personas-household: <household secret>   (optional)
 //   GET  /personas/directory/number/<e164> -> {taken: bool}
+//   GET  /personas/directory/code/<contact code> -> entry   (rate-limited per address)
 //   PUT  /personas/directory/<aci>      <- {pni?, e164, name, profileKey?}
 //        header x-personas-directory-secret: <random per-install secret>
 //        header x-personas-household: <household secret>   (optional)
 //        header x-personas-directory-public: <DIRECTORY_PUBLIC_TOKEN>   (optional)
+//        header x-personas-contact-code: <the member's contact code>   (optional)
 //
 // WHO SEES WHOM. A tester sees only
 //   - PUBLIC entries: the browser members (alice, bob, carol, ...). An entry is public
@@ -19,6 +21,9 @@
 //   - its own HOUSEHOLD: the main account and the extra members opened from it on the
 //     same Mac, which share a random secret kept there (app/user_config.main.ts). The
 //     server keeps only its hash.
+//   - anyone whose CONTACT CODE it was given: each member picks a random code (shown
+//     in its app) and publishes only its hash; /code/<code> returns that one entry. Codes
+//     carry ~40 bits and lookups are rate-limited, so they cannot be guessed or listed.
 // Nobody else's name, number or profile key is handed out. A new install checks that its
 // number is free with /number/<e164>, which says nothing else about the entry.
 //
@@ -104,7 +109,40 @@ function visibleTo(householdHash) {
   return Object.values(entries)
     .filter(entry => entry.updatedAt >= activeSince)
     .filter(entry => entry.public || (householdHash && entry.householdHash === householdHash))
-    .map(({ secretHash, householdHash: _household, ...rest }) => rest);
+    .map(({ secretHash, householdHash: _household, codeHash: _code, ...rest }) => rest);
+}
+
+// A contact code, as typed: case and separators do not matter.
+const normalizeCode = raw =>
+  typeof raw === 'string' ? raw.toUpperCase().replace(/[^A-Z0-9]/g, '') : '';
+const codeHashOf = raw => {
+  const code = normalizeCode(raw);
+  return code.length >= 8 && code.length <= 32 ? hash(`code:${code}`) : undefined;
+};
+
+// Code lookups, per caller address (the gateway's X-Forwarded-For): a few dozen per ten
+// minutes is plenty for a person and useless for guessing.
+const LOOKUP_WINDOW_MS = 10 * 60 * 1000;
+const LOOKUPS_PER_WINDOW = 30;
+const lookups = new Map();
+function lookupAllowed(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  const who =
+    (typeof forwarded === 'string' && forwarded.split(',')[0].trim()) ||
+    req.socket.remoteAddress ||
+    'unknown';
+  const now = Date.now();
+  const recent = (lookups.get(who) || []).filter(at => now - at < LOOKUP_WINDOW_MS);
+  if (recent.length >= LOOKUPS_PER_WINDOW) {
+    lookups.set(who, recent);
+    return false;
+  }
+  recent.push(now);
+  lookups.set(who, recent);
+  if (lookups.size > 10000) {
+    lookups.clear();
+  }
+  return true;
 }
 
 const isPublicCaller = header =>
@@ -158,6 +196,18 @@ const server = http.createServer((req, res) => {
     return send(res, 200, visibleTo(householdOf(req.headers['x-personas-household'])));
   }
 
+  // A contact code: the one entry it belongs to.
+  if (req.method === 'GET' && parts.length === 4 && parts[2] === 'code') {
+    if (!lookupAllowed(req)) {
+      return send(res, 429, { error: 'too many lookups; try again in a few minutes' });
+    }
+    const codeHash = codeHashOf(decodeURIComponent(parts[3]));
+    const found = codeHash && Object.values(entries).find(e => e.codeHash === codeHash);
+    if (!found) return send(res, 404, { error: 'no member has that code' });
+    const { secretHash, householdHash: _household, codeHash: _code, ...rest } = found;
+    return send(res, 200, rest);
+  }
+
   // Is this number in use? A new install asks before registering one (registering a
   // taken number would take over that tester's account on the test server).
   if (req.method === 'GET' && parts.length === 4 && parts[2] === 'number') {
@@ -206,6 +256,10 @@ const server = http.createServer((req, res) => {
     if (!existing && Object.keys(entries).length >= MAX_ENTRIES) {
       return send(res, 507, { error: 'directory full' });
     }
+    const codeHash = codeHashOf(req.headers['x-personas-contact-code']);
+    if (codeHash && Object.values(entries).some(e => e.codeHash === codeHash && e.aci !== aci)) {
+      return send(res, 409, { error: 'contact code in use; pick another' });
+    }
     const takenNumber = Object.values(entries).find(
       e => e.e164 === body.e164 && e.aci !== aci && Date.now() - e.updatedAt <= TAKEOVER_AFTER
     );
@@ -227,6 +281,8 @@ const server = http.createServer((req, res) => {
       profileKey: body.profileKey,
       public: isPublicCaller(req.headers['x-personas-directory-public']),
       householdHash: householdOf(req.headers['x-personas-household']),
+      // A new code replaces the old one, which then finds nobody.
+      codeHash,
       updatedAt: Date.now(),
       secretHash: hash(secret),
     };

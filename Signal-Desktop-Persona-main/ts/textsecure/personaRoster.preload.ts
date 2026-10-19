@@ -163,6 +163,10 @@ function directoryRequest(
         headers: {
           ...(payload ? { 'content-type': 'application/json' } : {}),
           ...(secret ? { 'x-personas-directory-secret': secret } : {}),
+          // Our contact code, on our own entry only: whoever we give it to can add us.
+          ...(method === 'PUT' && itemStorage.get('personasContactCode')
+            ? { 'x-personas-contact-code': itemStorage.get('personasContactCode') }
+            : {}),
           // Who we are grouped with: the directory shows us only public members plus
           // our own household (the extra members on this Mac), and files our entry
           // under it (deploy/play/directory.js).
@@ -227,10 +231,15 @@ async function publishToDirectory(): Promise<void> {
     return;
   }
   try {
+    await ensureContactCode();
     const { aci, ...rest } = entry;
     await directoryRequest('PUT', `/${aci}`, rest, await directorySecret());
     log.info(`publishToDirectory: published ${entry.name} (${aci})`);
   } catch (error) {
+    if (String(error).includes('contact code in use')) {
+      // Someone else drew the same code (about one in a trillion): draw another.
+      await itemStorage.put('personasContactCode', drawContactCode());
+    }
     log.warn(
       `publishToDirectory: ${toLogFormat(error)}; retrying in ${PUBLISH_RETRY_MS / 1000}s`
     );
@@ -249,20 +258,114 @@ async function readDirectoryEntries(): Promise<Array<RosterEntry>> {
     if (!Array.isArray(list)) {
       return [];
     }
-    // Untrusted input: keep only well-formed entries.
-    return list.filter(
-      (entry): entry is RosterEntry =>
-        typeof entry?.aci === 'string' &&
-        isAciString(entry.aci) &&
-        typeof entry.e164 === 'string' &&
-        (entry.profileKey === undefined ||
-          typeof entry.profileKey === 'string') &&
-        (entry.name === undefined || typeof entry.name === 'string')
-    );
+    return validEntries(list);
   } catch (error) {
     log.warn(`readDirectoryEntries: ${toLogFormat(error)}`);
     return [];
   }
+}
+
+// Untrusted input: keep only well-formed entries.
+function validEntries(list: ReadonlyArray<unknown>): Array<RosterEntry> {
+  return (list as Array<Partial<RosterEntry> | null>).filter(
+    (entry): entry is RosterEntry =>
+      typeof entry?.aci === 'string' &&
+      isAciString(entry.aci) &&
+      typeof entry.e164 === 'string' &&
+      (entry.profileKey === undefined || typeof entry.profileKey === 'string') &&
+      (entry.name === undefined || typeof entry.name === 'string')
+  );
+}
+
+// --- contact codes -------------------------------------------------------------------
+//
+// The directory shows a tester only the shared demo members and its own extra members,
+// so testers cannot find each other by browsing. Instead each member has a CONTACT
+// CODE, shown in its app (Settings, and Persona status) for its owner to hand out. Typing
+// someone's code adds them as a contact; the directory returns that one entry and
+// nothing else. ~40 random bits plus a rate limit on lookups make codes unguessable, and
+// drawing a new code retires the old one.
+
+// No 0/O, 1/I/L: the code is read aloud and retyped.
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const CODE_LENGTH = 8;
+
+function drawContactCode(): string {
+  const bytes = randomBytes(CODE_LENGTH);
+  let code = '';
+  for (const byte of bytes) {
+    // 256 is not a multiple of 31; the tiny bias is irrelevant for a lookup code.
+    code += CODE_ALPHABET[byte % CODE_ALPHABET.length];
+  }
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
+}
+
+async function ensureContactCode(): Promise<string> {
+  const existing = itemStorage.get('personasContactCode');
+  if (existing) {
+    return existing;
+  }
+  const code = drawContactCode();
+  await itemStorage.put('personasContactCode', code);
+  return code;
+}
+
+/** Our contact code, for the Settings page and Persona status. */
+export async function getMyContactCode(): Promise<string | undefined> {
+  if (!getRosterDir() || process.env.PERSONAS_ROSTER_DIR) {
+    return undefined;
+  }
+  return ensureContactCode();
+}
+
+/** Retire our code for a new one (the old one then finds nobody). */
+export async function renewMyContactCode(): Promise<string> {
+  const code = drawContactCode();
+  await itemStorage.put('personasContactCode', code);
+  await publishToDirectory();
+  log.info('renewMyContactCode: drew a new contact code');
+  return code;
+}
+
+export type AddByCodeResult = { ok: true; name: string } | { ok: false; reason: string };
+
+/** Add the member whose contact code this is, and open a chat with them. */
+export async function addContactByCode(rawCode: string): Promise<AddByCodeResult> {
+  const code = rawCode.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length !== CODE_LENGTH) {
+    return { ok: false, reason: 'A contact code has 8 letters and digits, like K7PQ-2MXD.' };
+  }
+  if (code === (itemStorage.get('personasContactCode') ?? '').replace('-', '')) {
+    return { ok: false, reason: 'That is your own code.' };
+  }
+  let entry: unknown;
+  try {
+    entry = await directoryRequest('GET', `/code/${code}`);
+  } catch (error) {
+    const message = String(error);
+    if (message.includes('HTTP 404')) {
+      return { ok: false, reason: 'No one has that code. Check it, or ask them for a new one.' };
+    }
+    if (message.includes('HTTP 429')) {
+      return { ok: false, reason: 'Too many lookups. Try again in a few minutes.' };
+    }
+    log.warn(`addContactByCode: ${toLogFormat(error)}`);
+    return { ok: false, reason: 'Could not reach the server. Try again shortly.' };
+  }
+  const [valid] = validEntries([entry]);
+  if (!valid) {
+    return { ok: false, reason: 'The server sent back something unexpected.' };
+  }
+  seededAcis.delete(valid.aci);
+  await seedPeers([valid]);
+  const conversation = window.ConversationController.get(valid.aci);
+  if (conversation) {
+    window.reduxActions.conversations.showConversation({
+      conversationId: conversation.id,
+    });
+  }
+  log.info(`addContactByCode: added ${valid.name ?? valid.e164}`);
+  return { ok: true, name: valid.name ?? valid.e164 };
 }
 
 // --- seeding (both backends) --------------------------------------------------------

@@ -50,6 +50,15 @@ import {
   sendPersonaVote,
 } from '../../services/personasActions.preload.ts';
 
+// The engine of the selected conversation's personas group (debug helpers only).
+function selectedEngine(): ReturnType<typeof getPersonasEngine> {
+  return getPersonasEngine(
+    window.ConversationController.get(
+      getSelectedConversationId(window.reduxStore.getState())
+    )?.get('groupId')
+  );
+}
+
 const log = createLogger('start');
 
 window.addEventListener('contextmenu', e => {
@@ -211,7 +220,7 @@ if (
       if (!(await ensurePersonaJoined(conversation))) {
         return 'join failed; refusing to post attributably';
       }
-      const post = composePersonaPost(text, choice);
+      const post = composePersonaPost(conversation.get('groupId'), text, choice);
       if (!post) {
         return 'personas engine disabled or unavailable';
       }
@@ -272,14 +281,14 @@ if (
         ? 'scan sent'
         : 'scan failed (see log)';
     },
-    personasRender: () => getPersonasEngine()?.render() ?? 'engine unavailable',
-    personasPolls: () =>
-      getPersonasEngine()?.renderPolls() ?? 'engine unavailable',
-    personasLog: () => getPersonasEngine()?.log() ?? 'engine unavailable',
+    // These read the engine of the SELECTED conversation's group.
+    personasRender: () => selectedEngine()?.render() ?? 'engine unavailable',
+    personasPolls: () => selectedEngine()?.renderPolls() ?? 'engine unavailable',
+    personasLog: () => selectedEngine()?.log() ?? 'engine unavailable',
     personasBarrier: () =>
-      getPersonasEngine()?.currentBarrier() ?? 'engine unavailable',
+      selectedEngine()?.currentBarrier() ?? 'engine unavailable',
     personasFingerprint: () =>
-      getPersonasEngine()?.fingerprint() ?? 'engine unavailable',
+      selectedEngine()?.fingerprint() ?? 'engine unavailable',
     ...(window.SignalContext.config.ciMode === 'benchmark'
       ? {
           benchmarkConversationOpen,

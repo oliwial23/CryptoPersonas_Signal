@@ -57,14 +57,23 @@ const log = createLogger('personasTopics');
 // different persona and silently breaks linkability within the topic.
 const CONTEXT_BYTES = 6; // 48 bits
 
-// name -> context, for this process. Rebuilt from announcements as they arrive.
-const contextByTopic = new Map<string, number>();
+// Per personas group: name -> context. Rebuilt from announcements as they arrive.
+const byGroup = new Map<string, Map<string, number>>();
+
+function topicsOf(groupId: string): Map<string, number> {
+  let topics = byGroup.get(groupId);
+  if (!topics) {
+    topics = new Map();
+    byGroup.set(groupId, topics);
+  }
+  return topics;
+}
 
 // Saved with the member state (personasPersistence): a topic's context is announced once,
 // so a restart would otherwise lose every topic (and its rate-limited personas).
 registerPersistedExtra('topics', {
-  snapshot: () => listTopics(),
-  restore: value => {
+  snapshot: groupId => listTopics(groupId),
+  restore: (groupId, value) => {
     if (!Array.isArray(value)) {
       return;
     }
@@ -74,7 +83,7 @@ registerPersistedExtra('topics', {
         typeof topic?.context === 'number' &&
         Number.isSafeInteger(topic.context)
       ) {
-        rememberTopic({ name: topic.name, context: topic.context });
+        rememberTopic(groupId, { name: topic.name, context: topic.context });
       }
     }
   },
@@ -92,9 +101,9 @@ export function drawRandomContext(): number {
   return value === 0 ? 1 : value;
 }
 
-/** Every topic this instance knows about, for the composer's picker. */
-export function listTopics(): Array<{ name: string; context: number }> {
-  return [...contextByTopic.entries()]
+/** Every topic this instance knows about in a group, for the composer's picker. */
+export function listTopics(groupId: string): Array<{ name: string; context: number }> {
+  return [...topicsOf(groupId).entries()]
     .map(([name, context]) => ({ name, context }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -108,20 +117,21 @@ export function listTopics(): Array<{ name: string; context: number }> {
 // instance has heard its announcement. Used when SENDING, to label a post with the
 // context it was made under so recipients can show it even before their own registry has
 // caught up.
-export function nameForContext(context: number): string | undefined {
-  return listTopics().find(topic => topic.context === context)?.name;
+export function nameForContext(groupId: string, context: number): string | undefined {
+  return listTopics(groupId).find(topic => topic.context === context)?.name;
 }
 
-export function resolveTopicContext(name: string): number | undefined {
-  return contextByTopic.get(name.trim());
+export function resolveTopicContext(groupId: string, name: string): number | undefined {
+  return topicsOf(groupId).get(name.trim());
 }
 
 /** Record a topic we learned about, from an announcement or from creating it. */
-function rememberTopic(announcement: PersonaTopicAnnouncement): void {
+function rememberTopic(groupId: string, announcement: PersonaTopicAnnouncement): void {
   const name = announcement.name.trim();
   if (!name) {
     return;
   }
+  const contextByTopic = topicsOf(groupId);
   const existing = contextByTopic.get(name);
   if (existing != null) {
     if (existing !== announcement.context) {
@@ -133,23 +143,29 @@ function rememberTopic(announcement: PersonaTopicAnnouncement): void {
         `rememberTopic: conflicting contexts for "${name}" (${existing} vs ${announcement.context}); keeping ${winner}`
       );
       contextByTopic.set(name, winner);
-      personasExtrasChanged();
+      personasExtrasChanged(groupId);
+      window.reduxActions?.composer?.personaTopicLearned(groupId, name, winner);
     }
     return;
   }
   contextByTopic.set(name, announcement.context);
-  personasExtrasChanged();
+  personasExtrasChanged(groupId);
   log.info(`rememberTopic: "${name}" -> context ${announcement.context}`);
   // Surface it to the composer's picker. The renderer cannot import this module
   // (preload), so redux is the bridge.
-  window.reduxActions?.composer?.personaTopicLearned(name, announcement.context);
+  window.reduxActions?.composer?.personaTopicLearned(
+    groupId,
+    name,
+    announcement.context
+  );
 }
 
-/** Receive seam: fold an announcement that arrived over Signal. */
+/** Receive seam: fold an announcement that arrived over Signal in group `groupId`. */
 export function ingestTopicAnnouncement(
+  groupId: string,
   announcement: PersonaTopicAnnouncement
 ): void {
-  rememberTopic(announcement);
+  rememberTopic(groupId, announcement);
 }
 
 /**
@@ -164,12 +180,13 @@ export async function createTopic(
   rawName: string
 ): Promise<number | undefined> {
   const name = rawName.trim();
-  if (!name) {
+  const groupId = conversation.get('groupId');
+  if (!name || !groupId) {
     return undefined;
   }
 
-  const context = contextByTopic.get(name) ?? drawRandomContext();
-  rememberTopic({ name, context });
+  const context = topicsOf(groupId).get(name) ?? drawRandomContext();
+  rememberTopic(groupId, { name, context });
 
   try {
     await conversation.enqueueMessageForSend(

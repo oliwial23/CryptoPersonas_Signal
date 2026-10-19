@@ -187,14 +187,18 @@ export type ComposerStateType = {
   // announcements broadcast over the group, so all members converge on one context
   // per topic. Kept in redux purely so the composer (a renderer component that cannot
   // import preload modules) can render the picker.
-  personaTopics: ReadonlyArray<{ name: string; context: number }>;
+  // Per personas group (GroupV2 id): each group has its own topics.
+  personaTopics: Readonly<
+    Record<string, ReadonlyArray<{ name: string; context: number }>>
+  >;
   // Personas demo: the latest status snapshot, refreshed when the panel is opened.
   // Undefined until first read.
   personaStatus?: PersonaStatus;
   // Personas demo: unlimited pseudonyms this member has minted. Each is a nonce the
   // user can re-select, so a persona can post more than once instead of being a fresh
   // stranger every time.
-  personaPseudonyms: ReadonlyArray<PersonaPseudonym>;
+  // Per personas group (GroupV2 id), like the topics.
+  personaPseudonyms: Readonly<Record<string, ReadonlyArray<PersonaPseudonym>>>;
 };
 
 function getEmptyComposerState(): ComposerStateByConversationType {
@@ -325,14 +329,15 @@ type ComposerActionType =
 // Personas demo: note a topic (created here or announced by a peer).
 export type PersonaTopicLearnedActionType = ReadonlyDeep<{
   type: typeof PERSONA_TOPIC_LEARNED;
-  payload: { name: string; context: number };
+  payload: { groupId: string; name: string; context: number };
 }>;
 
 export function personaTopicLearned(
+  groupId: string,
   name: string,
   context: number
 ): PersonaTopicLearnedActionType {
-  return { type: PERSONA_TOPIC_LEARNED, payload: { name, context } };
+  return { type: PERSONA_TOPIC_LEARNED, payload: { groupId, name, context } };
 }
 
 // Create a topic: draws a random context, announces it to the group, and records it
@@ -347,8 +352,9 @@ function createPersonaTopic(
       return;
     }
     const context = await createTopic(conversation, name);
-    if (context != null) {
-      dispatch(personaTopicLearned(name.trim(), context));
+    const groupId = conversation.get('groupId');
+    if (context != null && groupId) {
+      dispatch(personaTopicLearned(groupId, name.trim(), context));
     }
   };
 }
@@ -384,18 +390,21 @@ function refreshPersonaStatus(
 
 export type PersonaPseudonymsChangedActionType = ReadonlyDeep<{
   type: typeof PERSONA_PSEUDONYMS_CHANGED;
-  payload: ReadonlyArray<PersonaPseudonym>;
+  payload: { groupId: string; pseudonyms: ReadonlyArray<PersonaPseudonym> };
 }>;
 
 export function personaPseudonymsChanged(
+  groupId: string,
   pseudonyms: ReadonlyArray<PersonaPseudonym>
 ): PersonaPseudonymsChangedActionType {
-  return { type: PERSONA_PSEUDONYMS_CHANGED, payload: pseudonyms };
+  return { type: PERSONA_PSEUDONYMS_CHANGED, payload: { groupId, pseudonyms } };
 }
 
 // Mint a new unlimited pseudonym. Its petname is unknown until its first post — the
 // engine only reveals it on the `Emitted` from an actual send.
-function createPersonaPseudonym(): ThunkAction<
+function createPersonaPseudonym(
+  conversationId: string
+): ThunkAction<
   // Returns the NEW pseudonym's nonce. The nonce is the identity, so handing it back is
   // what lets the composer select the thing it just created — previously the caller had
   // no way to name it, so the menu kept whatever was selected before and the user had to
@@ -406,7 +415,8 @@ function createPersonaPseudonym(): ThunkAction<
   PersonaPseudonymsChangedActionType
 > {
   return () => {
-    return createPseudonym().nonce;
+    const groupId = window.ConversationController.get(conversationId)?.get('groupId');
+    return groupId ? createPseudonym(groupId).nonce : 0;
   };
 }
 
@@ -615,8 +625,11 @@ function approvePersonaReset(
   };
 }
 
-function dismissPersonaReset(account: string): NoopActionType {
-  doDismissResetRequest(account);
+function dismissPersonaReset(conversationId: string, account: string): NoopActionType {
+  doDismissResetRequest(
+    window.ConversationController.get(conversationId)?.get('groupId'),
+    account
+  );
   return noopAction('dismissPersonaReset');
 }
 
@@ -624,6 +637,7 @@ function dismissPersonaReset(account: string): NoopActionType {
 // the requester is not told; see `dismissBadgeRequest`. No record is emitted, so this
 // needs no conversation and cannot fail on the wire.
 function dismissPersonaBadgeRequest(
+  conversationId: string,
   requestEh: string
 ): ThunkAction<
   void,
@@ -632,7 +646,10 @@ function dismissPersonaBadgeRequest(
   NoopActionType | ShowToastActionType
 > {
   return async dispatch => {
-    const ok = doDismissBadgeRequest(requestEh);
+    const ok = doDismissBadgeRequest(
+      window.ConversationController.get(conversationId)?.get('groupId'),
+      requestEh
+    );
     dispatch(
       showToast(
         ok
@@ -670,13 +687,14 @@ function scanPersonaCallbacksNow(
     // looking the same, so "approve, then Scan now, and no badge appears" was
     // unexplainable from the UI — the correct behaviour and a broken one looked
     // identical. Reporting the badge set before and after turns it into a fact.
-    const before = heldBadges();
+    const groupId = conversation.get('groupId');
+    const before = heldBadges(groupId);
 
     // Drain, so one press finishes the sweep instead of advancing it by one round.
     // Pressing a button repeatedly until an error stops appearing is not a UI.
     const drained = await drainPersonaScans(conversation);
 
-    const after = heldBadges();
+    const after = heldBadges(groupId);
     const gained = after.filter(b => !before.includes(b));
 
     if (gained.length > 0) {
@@ -1204,7 +1222,8 @@ function sendMultiMediaMessage(
         // Scoped to this group by construction: `banned` lives in the member object for
         // THIS conversation's engine, so a member banned here keeps full persona
         // privileges in every other group.
-        if (isPersonaBanned() === true) {
+        const personasGroupId = conversation.get('groupId');
+        if (isPersonaBanned(personasGroupId) === true) {
           log.warn(
             'sendMultiMediaMessage: refusing a persona post from a banned member'
           );
@@ -1216,7 +1235,9 @@ function sendMultiMediaMessage(
         }
 
         const joined = await ensurePersonaJoined(conversation);
-        const catchUpReason = joined ? undefined : catchUpBlockReason();
+        const catchUpReason = joined
+          ? undefined
+          : catchUpBlockReason(personasGroupId);
         if (catchUpReason) {
           log.warn('sendMultiMediaMessage: persona post waits for the group state');
           dispatch({
@@ -1273,7 +1294,7 @@ function sendMultiMediaMessage(
           return;
         }
 
-        const post = composePersonaPost(message, options.personaChoice);
+        const post = composePersonaPost(personasGroupId, message, options.personaChoice);
         if (!post) {
           log.error(
             'sendMultiMediaMessage: persona post emit failed; refusing to send attributably'
@@ -1287,7 +1308,9 @@ function sendMultiMediaMessage(
         // The engine only tells us a pseudonym's petname when it emits under it, so
         // this is where an unlimited persona's name becomes known.
         if (options.personaChoice.kind === 'pseudo' && post.persona) {
-          recordPetname(options.personaChoice.nonce, post.persona);
+          if (personasGroupId) {
+            recordPetname(personasGroupId, options.personaChoice.nonce, post.persona);
+          }
         }
         personaFields = {
           persona: post.persona,
@@ -1306,7 +1329,7 @@ function sendMultiMediaMessage(
           // reading it directly let a merely-REQUESTED badge ride out on every post.
           // Narrowing the composer menu did not fix that, because the menu is not on
           // this path. The gate has to be here, where the claim reaches the wire.
-          personaBadge: getSelectedBadgeIfHeld(),
+          personaBadge: getSelectedBadgeIfHeld(personasGroupId),
           // Only a RATE-LIMITED persona has a context; an unlimited pseudonym and an
           // anonymous post deliberately have none, and the absence of the chip is what
           // distinguishes them in the timeline.
@@ -1315,7 +1338,8 @@ function sendMultiMediaMessage(
           personaContextName:
             options.personaContextName ??
             (options.personaChoice.kind === 'rate'
-              ? nameForContext(options.personaChoice.context)
+              ? personasGroupId &&
+                nameForContext(personasGroupId, options.personaChoice.context)
               : undefined),
         };
       }
@@ -2426,8 +2450,8 @@ function disableViewOnceIfIneligible(
 export function getEmptyState(): ComposerStateType {
   return {
     conversations: {},
-    personaTopics: [],
-    personaPseudonyms: [],
+    personaTopics: {},
+    personaPseudonyms: {},
   };
 }
 
@@ -2481,20 +2505,30 @@ export function reducer(
   // and idempotent — the same announcement can legitimately arrive more than once
   // (a re-announce doubles as a crude backfill for members who missed the first).
   if (action.type === PERSONA_TOPIC_LEARNED) {
-    const { name, context } = action.payload;
-    if (state.personaTopics.some(topic => topic.name === name)) {
+    const { groupId, name, context } = action.payload;
+    const topics = state.personaTopics[groupId] ?? [];
+    if (topics.some(topic => topic.name === name && topic.context === context)) {
       return state;
     }
     return {
       ...state,
-      personaTopics: [...state.personaTopics, { name, context }].sort((a, b) =>
-        a.name.localeCompare(b.name)
-      ),
+      personaTopics: {
+        ...state.personaTopics,
+        // Upsert: a concurrent-creation tie-break can change a known topic's context.
+        [groupId]: [
+          ...topics.filter(topic => topic.name !== name),
+          { name, context },
+        ].sort((a, b) => a.name.localeCompare(b.name)),
+      },
     };
   }
 
   if (action.type === PERSONA_PSEUDONYMS_CHANGED) {
-    return { ...state, personaPseudonyms: action.payload };
+    const { groupId, pseudonyms } = action.payload;
+    return {
+      ...state,
+      personaPseudonyms: { ...state.personaPseudonyms, [groupId]: pseudonyms },
+    };
   }
 
   if (action.type === PERSONA_STATUS_UPDATED) {

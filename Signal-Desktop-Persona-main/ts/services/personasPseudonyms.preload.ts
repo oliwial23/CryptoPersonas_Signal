@@ -46,13 +46,24 @@ export type PersonaPseudonym = {
   index: number;
 };
 
-const pseudonyms: Array<PersonaPseudonym> = [];
+// Per personas group: a member's pseudonyms in one group are its own there, derived from
+// that group's member key, and unlinkable to any other group's.
+const byGroup = new Map<string, Array<PersonaPseudonym>>();
+
+function pseudonymsOf(groupId: string): Array<PersonaPseudonym> {
+  let list = byGroup.get(groupId);
+  if (!list) {
+    list = [];
+    byGroup.set(groupId, list);
+  }
+  return list;
+}
 
 // Saved with the member state (personasPersistence), so a restart keeps every
 // pseudonym: the nonce is the identity, and losing it means never posting as it again.
 registerPersistedExtra('pseudonyms', {
-  snapshot: () => pseudonyms.map(p => ({ ...p })),
-  restore: value => {
+  snapshot: groupId => pseudonymsOf(groupId).map(p => ({ ...p })),
+  restore: (groupId, value) => {
     if (!Array.isArray(value)) {
       return;
     }
@@ -63,8 +74,9 @@ registerPersistedExtra('pseudonyms', {
         typeof p?.index === 'number' &&
         (p.petname === undefined || typeof p.petname === 'string')
     );
+    const pseudonyms = pseudonymsOf(groupId);
     pseudonyms.splice(0, pseudonyms.length, ...restored);
-    notify();
+    notify(groupId);
   },
 });
 
@@ -80,20 +92,21 @@ function drawNonce(): number {
   return value === 0 ? 1 : value;
 }
 
-export function listPseudonyms(): ReadonlyArray<PersonaPseudonym> {
-  return pseudonyms;
+export function listPseudonyms(groupId: string): ReadonlyArray<PersonaPseudonym> {
+  return pseudonymsOf(groupId);
 }
 
-/** Mint a new unlimited pseudonym. Its petname appears after its first post. */
-export function createPseudonym(): PersonaPseudonym {
+/** Mint a new unlimited pseudonym in a group. Its petname appears after its first post. */
+export function createPseudonym(groupId: string): PersonaPseudonym {
+  const pseudonyms = pseudonymsOf(groupId);
   const entry: PersonaPseudonym = {
     nonce: drawNonce(),
     index: pseudonyms.length + 1,
   };
   pseudonyms.push(entry);
   log.info(`createPseudonym: minted #${entry.index}`);
-  notify();
-  personasExtrasChanged();
+  notify(groupId);
+  personasExtrasChanged(groupId);
   return entry;
 }
 
@@ -102,8 +115,8 @@ export function createPseudonym(): PersonaPseudonym {
  * Idempotent — the same nonce always derives the same persona, so a second sighting
  * should agree, and a disagreement means the engine's key changed underneath us.
  */
-export function recordPetname(nonce: number, petname: string): void {
-  const entry = pseudonyms.find(p => p.nonce === nonce);
+export function recordPetname(groupId: string, nonce: number, petname: string): void {
+  const entry = pseudonymsOf(groupId).find(p => p.nonce === nonce);
   if (!entry || entry.petname === petname) {
     return;
   }
@@ -113,26 +126,27 @@ export function recordPetname(nonce: number, petname: string): void {
     );
   }
   entry.petname = petname;
-  notify();
-  personasExtrasChanged();
+  notify(groupId);
+  personasExtrasChanged(groupId);
 }
 
-/** Forget every pseudonym — after a reset, the new secret key derives different ones. */
-export function clearPseudonyms(): void {
-  pseudonyms.splice(0);
-  notify();
-  personasExtrasChanged();
+/** Forget a group's pseudonyms — after a reset, the new secret key derives different ones. */
+export function clearPseudonyms(groupId: string): void {
+  pseudonymsOf(groupId).splice(0);
+  notify(groupId);
+  personasExtrasChanged(groupId);
 }
 
-/** Ensure at least one pseudonym exists, so the picker is never empty. */
-export function ensureOnePseudonym(): PersonaPseudonym {
-  return pseudonyms[0] ?? createPseudonym();
+/** Ensure a group has at least one pseudonym, so the picker is never empty. */
+export function ensureOnePseudonym(groupId: string): PersonaPseudonym {
+  return pseudonymsOf(groupId)[0] ?? createPseudonym(groupId);
 }
 
-function notify(): void {
+function notify(groupId: string): void {
   // The composer is a renderer component and cannot import this module, so redux is
   // the bridge — same arrangement as the topic registry.
   window.reduxActions?.composer?.personaPseudonymsChanged(
-    pseudonyms.map(p => ({ ...p }))
+    groupId,
+    pseudonymsOf(groupId).map(p => ({ ...p }))
   );
 }

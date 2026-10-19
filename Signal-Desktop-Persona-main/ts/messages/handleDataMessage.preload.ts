@@ -192,15 +192,17 @@ export async function handleDataMessage(
     // A PHANTOM BUNDLE (1:1, key material): adopt it if it comes from a fellow member of
     // one of our groups, then drop the message before anything saves its body. First
     // checked, so no other path ever sees the key material.
-    // ONE PERSONAS GROUP PER APP (for now). Personas traffic in any other group — its
-    // records, topics, proofs, requests — belongs to an engine this app does not run, so
-    // it is dropped rather than ingested here or shown as raw text.
+    // PERSONAS ARE PER GROUP. Each personas group has its own engine; personas traffic
+    // in a group this app has no bundle for — its records, topics, proofs, requests —
+    // belongs to an engine this app does not run, so it is dropped rather than ingested
+    // here or shown as raw text.
+    const personasGroupId = conversation.get('groupId');
     if (
       isGroupV2(conversation.attributes) &&
       isPersonasCarriage(initialMessage.body) &&
       !isPersonasGroup(conversation)
     ) {
-      log.info(`${idLog}: personas traffic outside this app's personas group; dropped`);
+      log.info(`${idLog}: personas traffic in a group personas are not on in; dropped`);
       confirm();
       return;
     }
@@ -221,7 +223,7 @@ export async function handleDataMessage(
 
     const authorshipProof = decodeAuthorshipProof(initialMessage.body);
     if (authorshipProof) {
-      const verified = verifyPersonaAuthorship(authorshipProof);
+      const verified = verifyPersonaAuthorship(personasGroupId, authorshipProof);
       if (!verified) {
         log.warn(
           `${idLog}: authorship proof FAILED verification; dropping the message`
@@ -254,7 +256,7 @@ export async function handleDataMessage(
     // valid Industry proof must not be able to render it as Faculty.
     const badgeProof = decodeBadgeProof(initialMessage.body);
     if (badgeProof) {
-      const provenBadge = verifyPersonaBadgeProof(badgeProof);
+      const provenBadge = verifyPersonaBadgeProof(personasGroupId, badgeProof);
       if (!provenBadge) {
         log.warn(
           `${idLog}: badge proof FAILED verification; dropping the message`
@@ -273,8 +275,8 @@ export async function handleDataMessage(
     }
 
     const topicAnnouncement = decodeTopicAnnouncement(initialMessage.body);
-    if (topicAnnouncement) {
-      ingestTopicAnnouncement(topicAnnouncement);
+    if (topicAnnouncement && personasGroupId) {
+      ingestTopicAnnouncement(personasGroupId, topicAnnouncement);
       log.info(`${idLog}: personas topic announcement ingested`);
       confirm();
       return;
@@ -284,14 +286,15 @@ export async function handleDataMessage(
     // the group (an admin's app answers it), and the parts of an admin's answer, 1:1.
     // Coordination only, never rendered.
     if (isCatchUpRequest(initialMessage.body)) {
-      await waitForPersonasEngineIfStarting();
+      await waitForPersonasEngineIfStarting(personasGroupId);
       await answerCatchUpRequest(conversation, sourceServiceId);
       confirm();
       return;
     }
     const catchUpPart = decodeCatchUpPart(initialMessage.body);
     if (catchUpPart) {
-      await waitForPersonasEngineIfStarting();
+      // 1:1, so the group comes from the part itself.
+      await waitForPersonasEngineIfStarting(catchUpPart.g);
       ingestCatchUpPart(catchUpPart, sourceServiceId);
       confirm();
       return;
@@ -300,8 +303,8 @@ export async function handleDataMessage(
     // A RESET REQUEST (personasReset): coordination for admins, never rendered.
     const resetRequest = decodeResetRequest(initialMessage.body);
     if (resetRequest) {
-      await waitForPersonasEngineIfStarting();
-      ingestResetRequest(resetRequest, sourceServiceId);
+      await waitForPersonasEngineIfStarting(personasGroupId);
+      ingestResetRequest(personasGroupId, resetRequest, sourceServiceId);
       confirm();
       return;
     }
@@ -309,7 +312,7 @@ export async function handleDataMessage(
     // A record that arrives while the engine is still starting waits for it rather
     // than being dropped (a dropped record forks this member off the group).
     if (decodeRecordBody(initialMessage.body)) {
-      await waitForPersonasEngineIfStarting();
+      await waitForPersonasEngineIfStarting(personasGroupId);
       // A member added late waits for the group state, so this record can be shown.
       await holdRecordForCatchUp(conversation);
       // A join must come from the account it names, and a re-join approval from a
@@ -326,6 +329,7 @@ export async function handleDataMessage(
       }
     }
     const personasRecord = ingestRecordForTimeline(
+      personasGroupId,
       initialMessage.body,
       recordTimestamp(message.get('sent_at'), message.get('serverTimestamp'))
     );

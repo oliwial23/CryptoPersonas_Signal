@@ -110,6 +110,9 @@ type CheckboxChangeHandlerType = (value: boolean) => unknown;
 type SelectChangeHandlerType<T = string | number> = (value: T) => unknown;
 
 export type PropsDataType = {
+  // Personas demo: the contact-code panel (your code, and adding someone by theirs),
+  // shown at the top of General. Absent outside a personas build.
+  personasContacts?: ReactNode;
   // Settings
   backupKey: string | undefined;
   backupKeyHash: string | undefined;
@@ -410,6 +413,7 @@ const DEFAULT_ZOOM_FACTORS = [
 ];
 
 export function Preferences({
+  personasContacts,
   addCustomColor,
   autoDownloadAttachment,
   availableCameras,
@@ -816,6 +820,11 @@ export function Preferences({
   } else if (settingsLocation.page === SettingsPage.General) {
     const pageContents = (
       <>
+        {personasContacts != null && (
+          <SettingsRow title="Signal Personas contacts">
+            <div className="Preferences__padding">{personasContacts}</div>
+          </SettingsRow>
+        )}
         <SettingsRow>
           <FlowingControl>
             <div className="Preferences__half-flow">

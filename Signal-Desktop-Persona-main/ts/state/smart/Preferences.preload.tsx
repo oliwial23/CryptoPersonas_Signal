@@ -122,6 +122,13 @@ import { isLocalBackupsEnabled } from '../../util/isLocalBackupsEnabled.preload.
 import { getBackupKeyHash } from '../../services/backups/crypto.preload.ts';
 import { Emoji } from '../../axo/emoji.std.ts';
 import { AppProvider } from '../../windows/AppProvider.dom.tsx';
+import { PersonaContactsPanel } from '../../components/PersonaContactsPanel.dom.tsx';
+import { isPersonasEngineEnabled } from '../../services/personasEngine.preload.ts';
+import {
+  addContactByCode,
+  getMyContactCode,
+  renewMyContactCode,
+} from '../../textsecure/personaRoster.preload.ts';
 
 const DEFAULT_NOTIFICATION_SETTING = 'message';
 
@@ -890,6 +897,15 @@ export function SmartPreferences(): JSX.Element | null {
   return (
     <AppProvider>
       <Preferences
+        personasContacts={
+          isPersonasEngineEnabled() ? (
+            <PersonaContactsPanel
+              loadCode={getMyContactCode}
+              renewCode={renewMyContactCode}
+              addByCode={addContactByCode}
+            />
+          ) : undefined
+        }
         backupKey={backupKey}
         backupKeyHash={backupKeyHash}
         addCustomColor={addCustomColor}
