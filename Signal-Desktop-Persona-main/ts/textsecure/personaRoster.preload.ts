@@ -118,7 +118,9 @@ function readFolderEntries(dir: string): Array<RosterEntry> {
   const entries: Array<RosterEntry> = [];
   for (const name of files) {
     try {
-      entries.push(JSON.parse(readFileSync(join(dir, name), 'utf8')) as RosterEntry);
+      entries.push(
+        JSON.parse(readFileSync(join(dir, name), 'utf8')) as RosterEntry
+      );
     } catch (error) {
       log.warn(`readFolderEntries: bad entry ${name}: ${toLogFormat(error)}`);
     }
@@ -161,6 +163,20 @@ function directoryRequest(
         headers: {
           ...(payload ? { 'content-type': 'application/json' } : {}),
           ...(secret ? { 'x-personas-directory-secret': secret } : {}),
+          // Who we are grouped with: the directory shows us only public members plus
+          // our own household (the extra members on this Mac), and files our entry
+          // under it (deploy/play/directory.js).
+          ...(process.env.PERSONAS_HOUSEHOLD
+            ? { 'x-personas-household': process.env.PERSONAS_HOUSEHOLD }
+            : {}),
+          // Only the browser-member containers have this: it makes them visible to
+          // every tester.
+          ...(method === 'PUT' && process.env.PERSONAS_DIRECTORY_PUBLIC_TOKEN
+            ? {
+                'x-personas-directory-public':
+                  process.env.PERSONAS_DIRECTORY_PUBLIC_TOKEN,
+              }
+            : {}),
         },
       },
       res => {
@@ -174,7 +190,9 @@ function directoryRequest(
           let parsed: unknown;
           let failure: Error | undefined;
           if (status >= 400) {
-            failure = new Error(`directory ${method} ${path || '/'}: HTTP ${status} ${raw}`);
+            failure = new Error(
+              `directory ${method} ${path || '/'}: HTTP ${status} ${raw}`
+            );
           } else {
             try {
               parsed = raw ? JSON.parse(raw) : undefined;
@@ -190,7 +208,9 @@ function directoryRequest(
         });
       }
     );
-    req.on('timeout', () => req.destroy(new Error('directory request timed out')));
+    req.on('timeout', () =>
+      req.destroy(new Error('directory request timed out'))
+    );
     req.on('error', reject);
     if (payload) {
       req.write(payload);
@@ -235,7 +255,8 @@ async function readDirectoryEntries(): Promise<Array<RosterEntry>> {
         typeof entry?.aci === 'string' &&
         isAciString(entry.aci) &&
         typeof entry.e164 === 'string' &&
-        (entry.profileKey === undefined || typeof entry.profileKey === 'string') &&
+        (entry.profileKey === undefined ||
+          typeof entry.profileKey === 'string') &&
         (entry.name === undefined || typeof entry.name === 'string')
     );
   } catch (error) {

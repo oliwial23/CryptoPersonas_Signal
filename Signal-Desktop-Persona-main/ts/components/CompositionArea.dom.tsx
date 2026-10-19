@@ -1153,6 +1153,16 @@ export const CompositionArea = memo(function CompositionArea({
             )}
             {personaGroupStanding.kind === 'this' && (
               <>
+                {/* First, not last: the status panel is where extra members, resets,
+                    badge and reset approvals and "am I banned?" live, and at the bottom of
+                    a long menu it had to be scrolled to. */}
+                <AxoDropdownMenu.Item
+                  symbol="info"
+                  onSelect={() => setIsStatusDialogOpen(true)}
+                >
+                  Persona status…
+                </AxoDropdownMenu.Item>
+                <AxoDropdownMenu.Separator />
                 {/* Membership, stated at the top rather than discovered through a failure.
               Shown only while NOT joined: a permanent "joined" banner would be noise,
               but its absence while joining explains why an option may refuse for a
@@ -1476,13 +1486,6 @@ export const CompositionArea = memo(function CompositionArea({
                     )}
                   </AxoDropdownMenu.SubContent>
                 </AxoDropdownMenu.Sub>
-
-                <AxoDropdownMenu.Item
-                  symbol="info"
-                  onSelect={() => setIsStatusDialogOpen(true)}
-                >
-                  Persona status…
-                </AxoDropdownMenu.Item>
               </>
             )}
           </AxoDropdownMenu.Content>

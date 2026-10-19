@@ -166,6 +166,37 @@ function listDirectoryNumbers(port: number, ca: string): Promise<Set<string>> {
   });
 }
 
+// Whether `e164` is in use, asked without seeing anyone's entry (the directory shows a
+// tester only public members and its own household). undefined when the server is older
+// and cannot answer, so the caller falls back to the list.
+function isNumberTaken(port: number, ca: string, e164: string): Promise<boolean | undefined> {
+  return new Promise(resolve => {
+    const path = `/personas/directory/number/${encodeURIComponent(e164)}`;
+    const req = request(
+      { host: '127.0.0.1', port, path, ca, servername: 'localhost', timeout: 10_000 },
+      res => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(raw) as { taken?: unknown };
+            const ok = res.statusCode === 200 && typeof parsed.taken === 'boolean';
+            resolve(ok ? Boolean(parsed.taken) : undefined);
+          } catch {
+            resolve(undefined);
+          }
+        });
+      }
+    );
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(undefined));
+    req.end();
+  });
+}
+
 // This install's demo identity, chosen once. The number is fake: the test server does
 // not send SMS, and registration uses its stub code. It is drawn from the fictional
 // +1 202 555 range and checked against the directory, because registering a number that
@@ -174,11 +205,19 @@ async function ensureIdentity(path: string, port: number, ca: string): Promise<I
   if (existsSync(path)) {
     return JSON.parse(readFileSync(path, 'utf8')) as Identity;
   }
-  const taken = await listDirectoryNumbers(port, ca);
+  let listed: Set<string> | undefined;
   let number = '';
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const candidate = `+1202555${String(randomInt(0, 10_000)).padStart(4, '0')}`;
-    if (!taken.has(candidate)) {
+    // oxlint-disable-next-line no-await-in-loop
+    let taken = await isNumberTaken(port, ca, candidate);
+    if (taken === undefined) {
+      // An older directory: fall back to its full list.
+      // oxlint-disable-next-line no-await-in-loop
+      listed ??= await listDirectoryNumbers(port, ca);
+      taken = listed.has(candidate);
+    }
+    if (!taken) {
       number = candidate;
       break;
     }

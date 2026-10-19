@@ -40,6 +40,7 @@ the directory service (`directory.js`).
 ```sh
 cd "$WORK/repos/CryptoPersonas_Signal/deploy/play"
 ./set-password.sh                      # shared login for /play; writes .env
+echo "PERSONAS_DIRECTORY_PUBLIC_TOKEN=$(openssl rand -hex 32)" >> .env   # once: lets alice, bob, ... be seen by every tester
 docker compose build                   # ~20-40 min first time: Rust ZK addon + Desktop bundle
 docker compose up -d gateway alice bob # start small; add carol dave erin if RAM allows
 ```

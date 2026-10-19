@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { app } from 'electron';
 
 import { start } from './base_config.node.ts';
@@ -29,7 +30,9 @@ if (config.has('storagePath')) {
   // tester can run several members on one Mac, each launched with its own name
   //   open -n -a "Signal Personas" --args --personas-profile=second
   // Electron's one-instance lock is per data folder, so the copies run side by side.
-  const profileArg = process.argv.find(arg => arg.startsWith('--personas-profile='));
+  const profileArg = process.argv.find(arg =>
+    arg.startsWith('--personas-profile=')
+  );
   const profile = profileArg
     ?.slice('--personas-profile='.length)
     .toLowerCase()
@@ -42,6 +45,35 @@ if (config.has('storagePath')) {
   // For the window frame (personasWindowFrame.dom.ts): which member this window is. Always
   // assigned, so an extra member never inherits its parent's value.
   process.env.PERSONAS_PROFILE = profile ?? '';
+  // The HOUSEHOLD: one random secret shared by the main member and the extra members on
+  // this Mac (kept in the main member's folder, which they all can read). The member
+  // directory shows a tester only the public demo members plus its own household, so
+  // testers never see each other's accounts (deploy/play/directory.js).
+  try {
+    const mainFolder = join(app.getPath('appData'), 'Signal-Personas');
+    const householdFile = join(mainFolder, 'personas-household');
+    if (!existsSync(householdFile)) {
+      mkdirSync(mainFolder, { recursive: true });
+      writeFileSync(householdFile, randomBytes(32).toString('hex'), {
+        mode: 0o600,
+        flag: 'wx',
+      });
+    }
+    process.env.PERSONAS_HOUSEHOLD = readFileSync(householdFile, 'utf8').trim();
+  } catch (error) {
+    // Two members starting at once can race on `wx`; the loser just reads the file.
+    try {
+      process.env.PERSONAS_HOUSEHOLD = readFileSync(
+        join(app.getPath('appData'), 'Signal-Personas', 'personas-household'),
+        'utf8'
+      ).trim();
+    } catch {
+      // oxlint-disable-next-line no-console
+      console.error(
+        `personas household unavailable: ${Errors.toLogFormat(error)}`
+      );
+    }
+  }
 } else if (OS.isAppImage()) {
   userData = join(app.getPath('appData'), `${app.getName()} AppImage`);
 }

@@ -27,6 +27,9 @@ x-member: &member
     # as installed clients do. Empty: alice generates a set the others share.
     PERSONAS_KEYS_SHA256: ${PERSONAS_KEYS_SHA256:-}
     PERSONAS_RESET: ${PERSONAS_RESET:-0}
+    # Marks these members' directory entries PUBLIC (every tester sees alice, bob, ...).
+    # Testers' own entries are visible only to their own household (directory.js).
+    PERSONAS_DIRECTORY_PUBLIC_TOKEN: ${PERSONAS_DIRECTORY_PUBLIC_TOKEN:?add PERSONAS_DIRECTORY_PUBLIC_TOKEN to .env (see README)}
 
 services:
   gateway:
@@ -50,6 +53,8 @@ services:
     image: node:24.17.0-bookworm-slim
     restart: unless-stopped
     command: ["node", "/srv/directory.js", "8080", "/data"]
+    environment:
+      DIRECTORY_PUBLIC_TOKEN: ${PERSONAS_DIRECTORY_PUBLIC_TOKEN:?add PERSONAS_DIRECTORY_PUBLIC_TOKEN to .env (see README)}
     volumes:
       - ./directory.js:/srv/directory.js:ro
       - directory:/data

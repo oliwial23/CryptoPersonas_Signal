@@ -4,9 +4,23 @@
 // {aci, pni, e164, name, profileKey} here after registering and polls the list to seed
 // its contacts. It replaces the shared roster folder, which only worked on one machine.
 //
-//   GET  /personas/directory            -> [entry, ...]
+//   GET  /personas/directory            -> [entry, ...]   (only what the caller may see)
+//        header x-personas-household: <household secret>   (optional)
+//   GET  /personas/directory/number/<e164> -> {taken: bool}
 //   PUT  /personas/directory/<aci>      <- {pni?, e164, name, profileKey?}
 //        header x-personas-directory-secret: <random per-install secret>
+//        header x-personas-household: <household secret>   (optional)
+//        header x-personas-directory-public: <DIRECTORY_PUBLIC_TOKEN>   (optional)
+//
+// WHO SEES WHOM. A tester sees only
+//   - PUBLIC entries: the browser members (alice, bob, carol, ...). An entry is public
+//     only if its PUT carried the server's DIRECTORY_PUBLIC_TOKEN, which only the member
+//     containers are given (compose.yml);
+//   - its own HOUSEHOLD: the main account and the extra members opened from it on the
+//     same Mac, which share a random secret kept there (app/user_config.main.ts). The
+//     server keeps only its hash.
+// Nobody else's name, number or profile key is handed out. A new install checks that its
+// number is free with /number/<e164>, which says nothing else about the entry.
 //
 // First writer owns an entry: the hash of the secret sent with the first PUT is kept,
 // and later PUTs for that aci must present the same secret. That stops one member from
@@ -50,6 +64,8 @@ const ACTIVE_WINDOW = durationEnv('DIRECTORY_ACTIVE_WINDOW_MS', HOUR);
 const TAKEOVER_AFTER = durationEnv('DIRECTORY_TAKEOVER_AFTER_MS', 24 * HOUR);
 const PRUNE_AFTER = durationEnv('DIRECTORY_PRUNE_AFTER_MS', 30 * 24 * HOUR);
 const MAX_BODY = 4096;
+// Shared with the browser-member containers only: marks their entries as public.
+const PUBLIC_TOKEN = process.env.DIRECTORY_PUBLIC_TOKEN || '';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PNI = /^PNI:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -77,12 +93,25 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function publicView() {
+const householdOf = header =>
+  typeof header === 'string' && header.length >= 32 && header.length <= 128
+    ? hash(`household:${header}`)
+    : undefined;
+
+// The entries a caller may see: the public ones, plus its own household's.
+function visibleTo(householdHash) {
   const activeSince = Date.now() - ACTIVE_WINDOW;
   return Object.values(entries)
     .filter(entry => entry.updatedAt >= activeSince)
-    .map(({ secretHash, ...rest }) => rest);
+    .filter(entry => entry.public || (householdHash && entry.householdHash === householdHash))
+    .map(({ secretHash, householdHash: _household, ...rest }) => rest);
 }
+
+const isPublicCaller = header =>
+  PUBLIC_TOKEN.length >= 16 &&
+  typeof header === 'string' &&
+  header.length === PUBLIC_TOKEN.length &&
+  crypto.timingSafeEqual(Buffer.from(header), Buffer.from(PUBLIC_TOKEN));
 
 function prune() {
   const cutoff = Date.now() - PRUNE_AFTER;
@@ -121,12 +150,22 @@ function validate(aci, body) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://directory');
   const parts = url.pathname.split('/').filter(Boolean); // ['personas', 'directory', aci?]
-  if (parts[0] !== 'personas' || parts[1] !== 'directory' || parts.length > 3) {
+  if (parts[0] !== 'personas' || parts[1] !== 'directory' || parts.length > 4) {
     return send(res, 404, { error: 'not found' });
   }
 
   if (req.method === 'GET' && parts.length === 2) {
-    return send(res, 200, publicView());
+    return send(res, 200, visibleTo(householdOf(req.headers['x-personas-household'])));
+  }
+
+  // Is this number in use? A new install asks before registering one (registering a
+  // taken number would take over that tester's account on the test server).
+  if (req.method === 'GET' && parts.length === 4 && parts[2] === 'number') {
+    const e164 = decodeURIComponent(parts[3]);
+    if (!E164.test(e164)) return send(res, 400, { error: 'e164 must be +digits' });
+    const cutoff = Date.now() - TAKEOVER_AFTER;
+    const taken = Object.values(entries).some(e => e.e164 === e164 && e.updatedAt >= cutoff);
+    return send(res, 200, { taken });
   }
 
   if (req.method !== 'PUT' || parts.length !== 3) {
@@ -186,6 +225,8 @@ const server = http.createServer((req, res) => {
       e164: body.e164,
       name: body.name.trim(),
       profileKey: body.profileKey,
+      public: isPublicCaller(req.headers['x-personas-directory-public']),
+      householdHash: householdOf(req.headers['x-personas-household']),
       updatedAt: Date.now(),
       secretHash: hash(secret),
     };
@@ -206,6 +247,7 @@ setInterval(prune, HOUR).unref();
 server.listen(PORT, () =>
   console.log(
     `directory: listening on :${PORT}, data in ${FILE} ` +
+      `(public entries ${PUBLIC_TOKEN.length >= 16 ? 'enabled' : 'DISABLED: no DIRECTORY_PUBLIC_TOKEN'}) ` +
       `(active ${ACTIVE_WINDOW}ms, takeover ${TAKEOVER_AFTER}ms, prune ${PRUNE_AFTER}ms)`
   )
 );

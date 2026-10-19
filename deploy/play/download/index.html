@@ -184,7 +184,7 @@
         </ul>
         You only need to do this once.
       </li>
-      <li>Choose a <strong>display name</strong>. Other testers see it; it does not have to be your real name.</li>
+      <li>Choose a <strong>display name</strong>. It does not have to be your real name.</li>
       <li>Wait about a minute while it creates a test account (a made-up number, no SMS) and downloads the shared
         cryptographic keys.</li>
     </ol>
@@ -196,8 +196,8 @@
     <ol class="do">
       <li>Click <span class="ui">New chat</span> (the pencil at the top of the chat list), then
         <span class="ui">New group</span>.</li>
-      <li>On <span class="ui">Choose members</span>, pick any other testers you see — or click
-        <span class="ui">Skip</span>. You will add your own second account to this group in step 5.</li>
+      <li>On <span class="ui">Choose members</span>, pick any of the shared demo members (alice, bob, carol) — or
+        click <span class="ui">Skip</span>. You will add your own second account to this group in step 5.</li>
       <li>Give it a name (for example <em>Personas test</em>) and click <span class="ui">Create</span>.</li>
       <li>Wait about <strong>30 seconds</strong>. The app turns personas on for this group automatically and gives
         it its own anonymous identity.</li>
@@ -225,10 +225,12 @@
       <div class="mock-caption">The persona button (highlighted). It turns blue while a persona is selected, so you
         always know when you are not posting as yourself.</div>
     </div>
-    <p>Click it to open the <strong>persona menu</strong>. At the very bottom is
+    <p>Click it to open the <strong>persona menu</strong>. The first item is
       <span class="ui">Persona status…</span> — your control panel (see <a href="#status">below</a>).</p>
     <div class="mock">
       <div class="menu" aria-hidden="true">
+        <div class="item hl">Persona status…</div>
+        <div class="sep"></div>
         <div class="item on"><span class="dot"></span>Normal message</div>
         <div class="item"><span class="dot"></span>Anonymous</div>
         <div class="sep"></div>
@@ -240,8 +242,6 @@
         <div class="sep"></div>
         <div class="item">Request badge… · Prove badge…</div>
         <div class="item">Prove authorship…</div>
-        <div class="sep"></div>
-        <div class="item hl">Persona status…</div>
       </div>
       <div class="mock-caption">A simplified view of the persona menu.</div>
     </div>
@@ -381,7 +381,8 @@
       <li><strong>Persona posts stopped getting through?</strong> Persona status → <span class="ui">Request a
         reset</span>. An admin approves it and you rejoin as a new member (your reputation, badges and personas start
         over).</li>
-      <li><strong>Contacts</strong> list testers whose app was open in the last hour.</li>
+      <li><strong>Who you can see:</strong> your contacts are only the shared demo members (alice, bob, carol) and
+        your own extra members. Other testers can't see your account, and you can't see theirs.</li>
       <li><strong>Server reset:</strong> the app re-registers with the same name on its own; groups have to be made
         again.</li>
       <li><strong>Updates</strong> don't install themselves — you'll be sent a new download.</li>
