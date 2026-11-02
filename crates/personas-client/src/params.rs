@@ -6,7 +6,7 @@
 //! needs, at the moment it needs it.
 
 use ark_serialize::{CanonicalDeserialize, Compress, Validate};
-use personas_core::{circuits::NP, PK};
+use personas_core::{PK, circuits::NP};
 
 use crate::PersonaClient;
 

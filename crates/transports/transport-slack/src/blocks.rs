@@ -158,9 +158,7 @@ mod tests {
             let content = poll(&a_poll(kind), "the message under review");
             let blocks = content.blocks.expect("a poll has blocks");
             assert!(
-                !blocks
-                    .iter()
-                    .any(|b| matches!(b, SlackBlock::Actions(_))),
+                !blocks.iter().any(|b| matches!(b, SlackBlock::Actions(_))),
                 "a vote must not be castable by pressing a Slack button"
             );
         }

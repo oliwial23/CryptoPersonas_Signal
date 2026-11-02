@@ -4,10 +4,10 @@
 //! All read-only, all bulk. None of it goes through `personas-wire`'s envelope — see
 //! `personas_wire::raw` for why compressing a proving key would be a bad trade.
 
+use ark_ff::{BigInteger, PrimeField};
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
-use ark_ff::{BigInteger, PrimeField};
 use personas_core::F;
 use serde::Serialize;
 

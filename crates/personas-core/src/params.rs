@@ -15,32 +15,34 @@ use std::path::Path;
 
 use ark_crypto_primitives::sponge::poseidon::PoseidonConfig;
 use ark_grumpkin::{Fq, Fr};
+use ark_r1cs_std::fields::fp::FpVar;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use blake2::{Blake2s256, Digest};
+use folding_schemes::FoldingScheme;
 use folding_schemes::arith::r1cs::R1CS;
 use folding_schemes::folding::nova::PreprocessorParam;
 use folding_schemes::frontend::FCircuit;
 use folding_schemes::transcript::poseidon::poseidon_canonical_config;
-use folding_schemes::FoldingScheme;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use tracing::info;
-use zk_callbacks::generic::fold::{gen_fold_proof_snark_key, FoldingScan};
-use ark_r1cs_std::fields::fp::FpVar;
-use zk_callbacks::generic::interaction::{generate_keys_for_statement, generate_keys_for_statement_in};
+use zk_callbacks::generic::fold::{FoldingScan, gen_fold_proof_snark_key};
+use zk_callbacks::generic::interaction::{
+    generate_keys_for_statement, generate_keys_for_statement_in,
+};
 use zk_callbacks::generic::object::Time;
 use zk_callbacks::generic::scan::PubScanArgs;
 
 use crate::circuits::{
-    join_pred, not_banned_pred,
+    BadgesArgs, BadgesArgsVar, MsgUser, NF, NP, NUM_SCANS_PER_FOLD, PseudonymArgs,
+    PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, PubScan, ScanInt,
     authorship_pred, badge_pred, get_badge_request_interaction, get_callbacks,
     get_extra_pubdata_for_scan, get_scan_interaction, get_standard_interaction,
-    get_standard_pseudo_interaction, get_standard_pseudo_rate_interaction, pseudonym_pred,
-    BadgesArgs, BadgesArgsVar, MsgUser, PseudonymArgs, PseudonymArgsPair, PseudonymArgsPairVar,
-    PseudonymArgsVar, PseudonymArgsRate, PubScan, ScanInt, NF, NP, NUM_SCANS_PER_FOLD,
+    get_standard_pseudo_interaction, get_standard_pseudo_rate_interaction, join_pred,
+    not_banned_pred, pseudonym_pred,
 };
-use crate::{Args, ArgsVar, CStore, Cr, OStore, Snark, Store, F, H, PK, VK};
+use crate::{Args, ArgsVar, CStore, Cr, F, H, OStore, PK, Snark, Store, VK};
 
 /// Bump to invalidate every previously cached artifact.
 pub const PARAMS_FORMAT_VERSION: u32 = 1;
@@ -158,7 +160,9 @@ pub fn cache_key(db: &Store) -> Result<String, ParamsError> {
     );
     let mut pubkeys = Vec::new();
     db.obj_bul.get_pubkey().serialize_compressed(&mut pubkeys)?;
-    db.callback_bul.get_pubkey().serialize_compressed(&mut pubkeys)?;
+    db.callback_bul
+        .get_pubkey()
+        .serialize_compressed(&mut pubkeys)?;
     db.callback_bul
         .nmemb_bul
         .get_pubkey()
@@ -233,11 +237,11 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
     };
     let (standard_pseudo_proving_key, standard_pseudo_verifying_key) = standard_pseudo_interaction
         .generate_keys::<H, Snark, Cr, OStore>(
-            rng,
-            Some(db.obj_bul.get_pubkey()),
-            dummy_pub_std_pseudo.clone(),
-            false,
-        );
+        rng,
+        Some(db.obj_bul.get_pubkey()),
+        dummy_pub_std_pseudo.clone(),
+        false,
+    );
 
     let standard_pseudo_rate_interaction = get_standard_pseudo_rate_interaction();
     let dummy_pub_std_pseudo_rate = PseudonymArgsRate {
@@ -281,23 +285,22 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
             true,
         );
 
-    let (pseudonym_pred_proving_key, pseudonym_pred_verifying_key) =
-        generate_keys_for_statement_in::<
-            F,
-            H,
-            MsgUser,
-            PseudonymArgs<F>,
-            PseudonymArgsVar<F>,
-            (),
-            (),
-            Snark,
-            OStore,
-        >(
-            rng,
-            pseudonym_pred,
-            Some(db.obj_bul.get_pubkey()),
-            dummy_pub_std_pseudo.clone(),
-        );
+    let (pseudonym_pred_proving_key, pseudonym_pred_verifying_key) = generate_keys_for_statement_in::<
+        F,
+        H,
+        MsgUser,
+        PseudonymArgs<F>,
+        PseudonymArgsVar<F>,
+        (),
+        (),
+        Snark,
+        OStore,
+    >(
+        rng,
+        pseudonym_pred,
+        Some(db.obj_bul.get_pubkey()),
+        dummy_pub_std_pseudo.clone(),
+    );
 
     let dummy_pub_author = PseudonymArgsPair {
         a: dummy_pub_std_pseudo.clone(),
@@ -405,10 +408,11 @@ pub fn generate_folding_material(
     let nova_preprocess_params = PreprocessorParam::new(poseidon_config, f_circ);
     let nova_params = NF::preprocess(&mut *rng, &nova_preprocess_params)?;
 
-    let (fold_proving_key, fold_verifying_key) = gen_fold_proof_snark_key::<F, H, MsgUser, Snark, OStore>(
-        rng,
-        Some(db.obj_bul.get_pubkey()),
-    );
+    let (fold_proving_key, fold_verifying_key) =
+        gen_fold_proof_snark_key::<F, H, MsgUser, Snark, OStore>(
+            rng,
+            Some(db.obj_bul.get_pubkey()),
+        );
 
     Ok((nova_params, fold_proving_key, fold_verifying_key))
 }
@@ -418,7 +422,11 @@ pub fn generate_folding_material(
 /// The R1CS instances and pp hash are recovered from the Nova verifier
 /// params, which is exactly where `Nova::init` sources them — no need to
 /// instantiate a folding scheme here.
-pub fn folding_params(nova_params: NP, fold_pk: PK, fold_vk: VK) -> Result<FoldingParams, ParamsError> {
+pub fn folding_params(
+    nova_params: NP,
+    fold_pk: PK,
+    fold_vk: VK,
+) -> Result<FoldingParams, ParamsError> {
     let pp_hash = nova_params.1.pp_hash()?;
     Ok(FoldingParams {
         nova_c1_r1cs: nova_params.1.r1cs.clone(),
@@ -471,8 +479,7 @@ mod tests {
 
     #[test]
     fn store_genesis_is_deterministic_and_content_addressed() {
-        let dir =
-            std::env::temp_dir().join(format!("personas-params-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("personas-params-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
 
         // Same persisted seed -> same store pubkeys -> same cache key.

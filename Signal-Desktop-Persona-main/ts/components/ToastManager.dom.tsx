@@ -830,6 +830,18 @@ function renderToast({
     );
   }
 
+  if (toastType === ToastType.PersonaViewsDiverged) {
+    // Stays until dismissed, like a ban: it says something about every message in the
+    // group, and a member who missed it would have no other way to learn it.
+    return (
+      <Toast onClose={hideToast}>
+        {'Members of this group are not all seeing the same persona messages. ' +
+          'Signal may have delayed or withheld some. Your app is re-sending the ' +
+          'messages it has to the group.'}
+      </Toast>
+    );
+  }
+
   if (toastType === ToastType.PersonaBanned) {
     // No auto-dismiss timeout is passed, so this stays until dismissed. A ban changes
     // what the member can do in this group; a toast that vanished after four seconds

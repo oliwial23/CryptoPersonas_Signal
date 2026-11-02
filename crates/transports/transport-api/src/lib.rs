@@ -279,8 +279,12 @@ pub trait Transport: Send + Sync + 'static {
     ///
     /// Slack adds a real reaction; Signal's as-a-service path posts the emoji as a quoted
     /// message, because the reaction must come from the phantom bot rather than the rater.
-    async fn react(&self, conversation: &ConversationId, target: &MessageId, emoji: &str)
-    -> Result<()>;
+    async fn react(
+        &self,
+        conversation: &ConversationId,
+        target: &MessageId,
+        emoji: &str,
+    ) -> Result<()>;
 
     /// Everything the group does, as it happens.
     ///

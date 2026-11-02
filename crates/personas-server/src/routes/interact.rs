@@ -18,7 +18,9 @@ use folding_schemes::folding::nova::zk::RandomizedIVCProof;
 
 use ark_bn254::G1Projective as Projective;
 use ark_grumpkin::Projective as Projective2;
-use personas_core::circuits::{FoldingProofData, MsgUser, NUM_SCANS_PER_FOLD, get_extra_pubdata_for_scan};
+use personas_core::circuits::{
+    FoldingProofData, MsgUser, NUM_SCANS_PER_FOLD, get_extra_pubdata_for_scan,
+};
 use personas_core::{Args, CStore, Cr, F, H, OStore, Snark, Store};
 use personas_wire::{Kind, decode};
 use zk_callbacks::generic::bulletin::{JoinableBulletin, UserBul};
@@ -62,7 +64,10 @@ pub async fn join(State(state): State<ServerLock>, body: Bytes) -> AppResult<Sta
 }
 
 /// Post to the bulletin without relaying anything. The benchmark path for a plain post.
-pub async fn standard(State(state): State<ServerLock>, body: Bytes) -> AppResult<impl IntoResponse> {
+pub async fn standard(
+    State(state): State<ServerLock>,
+    body: Bytes,
+) -> AppResult<impl IntoResponse> {
     let mut reader = decode(Kind::Post, &body)?;
     let exec: ExecutedMethod<F, Snark, Args, Cr, 1> = reader.pull()?;
 
@@ -72,7 +77,14 @@ pub async fn standard(State(state): State<ServerLock>, body: Bytes) -> AppResult
 
     // Live epoch, matching every other route (FINDINGS O3) — this is the same anonymous
     // interaction `signal_anon`/`slack_anon` verify, just without a relay.
-    verify_and_store(&mut st.db, &vk, exec, F::from(0), current, bulletin::INTERACTION)?;
+    verify_and_store(
+        &mut st.db,
+        &vk,
+        exec,
+        F::from(0),
+        current,
+        bulletin::INTERACTION,
+    )?;
 
     Ok(ok())
 }
@@ -125,10 +137,10 @@ pub async fn scan(State(state): State<ServerLock>, body: Bytes) -> AppResult<imp
     let (verified, start, millis) = bench::time(|| {
         <OStore as UserBul<F, MsgUser>>::verify_interact_and_append::<PubScan, Snark, 0>(
             &mut st.db.obj_bul,
-            scan_one.new_object.clone(),
-            scan_one.old_nullifier.clone(),
+            scan_one.new_object,
+            scan_one.old_nullifier,
             ps.clone(),
-            scan_one.cb_com_list.clone(),
+            scan_one.cb_com_list,
             scan_one.proof.clone(),
             None,
             &vk,
@@ -194,20 +206,18 @@ pub async fn fold_scan(
         // Three things have to hold, and all three are load-bearing.
         //
         // 1. The Nova proof itself: each folded step was a valid scan.
-        let folded = RandomizedIVCProof::verify::<
-            Pedersen<Projective, true>,
-            Pedersen<Projective2, true>,
-        >(
-            &params.nova_c1_r1cs,
-            &params.nova_c2_r1cs,
-            params.pp_hash,
-            &params.pos_config,
-            proof.i,
-            proof.z_0.clone(),
-            proof.z_i.clone(),
-            &proof.proof,
-        )
-        .is_ok();
+        let folded =
+            RandomizedIVCProof::verify::<Pedersen<Projective, true>, Pedersen<Projective2, true>>(
+                &params.nova_c1_r1cs,
+                &params.nova_c2_r1cs,
+                params.pp_hash,
+                &params.pos_config,
+                proof.i,
+                proof.z_0.clone(),
+                proof.z_i.clone(),
+                &proof.proof,
+            )
+            .is_ok();
 
         // 2. The folding started where it claims to have started, and at *this* epoch — a
         //    fold over a stale epoch would let a member re-absorb callbacks they have already
@@ -240,7 +250,9 @@ pub async fn fold_scan(
 
     if !verified {
         tracing::info!("folded scan failed verification");
-        return Err(AppError::Rejected("Fold scan **failed** verification".into()));
+        return Err(AppError::Rejected(
+            "Fold scan **failed** verification".into(),
+        ));
     }
 
     let ps = scan_pub_args(&st.db);

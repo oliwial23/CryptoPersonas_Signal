@@ -113,16 +113,17 @@ pub fn encode_authorship_proof(
 /// must derive what it displays from these returned values (via `persona::petname`) and
 /// ignore any names on the wire. Returning the inputs rather than a bare bool is what
 /// makes the sound usage the easy one.
-pub fn verify_authorship_proof(vk: &VK, bytes: &[u8]) -> Option<AuthorshipInputs> {
+pub fn verify_authorship_proof(
+    vk: &impl crate::ProofVerifier,
+    bytes: &[u8],
+) -> Option<AuthorshipInputs> {
     use ark_serialize::CanonicalDeserialize;
     use ark_snark::SNARK;
 
     let mut reader = bytes;
     let proof =
-        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(
-            &mut reader,
-        )
-        .ok()?;
+        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(&mut reader)
+            .ok()?;
     let inputs = Vec::<F>::deserialize_uncompressed(&mut reader).ok()?;
 
     // Length-check BEFORE verifying. Groth16 verification against a short input vector
@@ -132,9 +133,10 @@ pub fn verify_authorship_proof(vk: &VK, bytes: &[u8]) -> Option<AuthorshipInputs
         return None;
     }
 
-    match Snark::verify(vk, &inputs, &proof) {
-        Ok(true) => Some([inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]]),
-        Ok(false) | Err(_) => None,
+    if vk.verify_proof(&inputs, &proof) {
+        Some([inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]])
+    } else {
+        None
     }
 }
 
@@ -201,23 +203,22 @@ pub fn encode_badge_proof(
 /// says "some object in the tree with this root holds the badge" — and anyone can build a
 /// tree of their own around an object with any badge in it. The caller MUST check that
 /// the root is one its own replica produced (`Replica::has_produced_root`).
-pub fn verify_badge_proof(vk: &VK, bytes: &[u8]) -> Option<(F, F, F)> {
+pub fn verify_badge_proof(vk: &impl crate::ProofVerifier, bytes: &[u8]) -> Option<(F, F, F)> {
     use ark_serialize::CanonicalDeserialize;
     use ark_snark::SNARK;
 
     let mut reader = bytes;
     let proof =
-        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(
-            &mut reader,
-        )
-        .ok()?;
+        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(&mut reader)
+            .ok()?;
     let inputs = Vec::<F>::deserialize_uncompressed(&mut reader).ok()?;
     if inputs.len() != 3 {
         return None;
     }
-    match Snark::verify(vk, &inputs, &proof) {
-        Ok(true) => Some((inputs[0], inputs[1], inputs[2])),
-        Ok(false) | Err(_) => None,
+    if vk.verify_proof(&inputs, &proof) {
+        Some((inputs[0], inputs[1], inputs[2]))
+    } else {
+        None
     }
 }
 
@@ -237,23 +238,22 @@ pub fn encode_not_banned_proof(
 /// VERIFY a not-banned proof, returning `(account, root)` only if it is sound. As with a
 /// badge proof, the caller MUST check the root is one its replica produced, and that the
 /// account is the one asking.
-pub fn verify_not_banned_proof(vk: &VK, bytes: &[u8]) -> Option<(F, F)> {
+pub fn verify_not_banned_proof(vk: &impl crate::ProofVerifier, bytes: &[u8]) -> Option<(F, F)> {
     use ark_serialize::CanonicalDeserialize;
     use ark_snark::SNARK;
 
     let mut reader = bytes;
     let proof =
-        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(
-            &mut reader,
-        )
-        .ok()?;
+        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(&mut reader)
+            .ok()?;
     let inputs = Vec::<F>::deserialize_uncompressed(&mut reader).ok()?;
     if inputs.len() != 2 {
         return None;
     }
-    match Snark::verify(vk, &inputs, &proof) {
-        Ok(true) => Some((inputs[0], inputs[1])),
-        Ok(false) | Err(_) => None,
+    if vk.verify_proof(&inputs, &proof) {
+        Some((inputs[0], inputs[1]))
+    } else {
+        None
     }
 }
 

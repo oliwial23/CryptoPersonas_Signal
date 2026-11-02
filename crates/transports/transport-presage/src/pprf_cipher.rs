@@ -59,8 +59,7 @@ use aes_gcm_siv::aead::Aead;
 use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce as AeadNonce};
 use anyhow::{Context, Result, bail};
 use personas_group_crypto::{
-    DistributedSecret, GroupSecret, KeyManager, MessageTag, NONCE_LEN, Nonce, OpenError,
-    RekeyError,
+    DistributedSecret, GroupSecret, KeyManager, MessageTag, NONCE_LEN, Nonce, OpenError, RekeyError,
 };
 
 /// `MessageTag`'s wire header size: an 8-byte little-endian epoch plus the PPRF nonce.
@@ -118,7 +117,10 @@ impl PprfContentCipher {
     /// member the same way [`create`](Self::create)'s does. This is only the
     /// mechanism — *deciding when* to call it (epoch boundary, ban, leave, a
     /// time/message-count cadence) is e2d, not this module.
-    pub fn rekey(&mut self, rng: &mut impl rand08::RngCore) -> Result<DistributedSecret, RekeyError> {
+    pub fn rekey(
+        &mut self,
+        rng: &mut impl rand08::RngCore,
+    ) -> Result<DistributedSecret, RekeyError> {
         let next_epoch = self.keys.epoch() + 1;
         let secret = GroupSecret::generate(next_epoch, rng);
         let wire = secret.to_wire();
@@ -159,15 +161,16 @@ impl PprfContentCipher {
     /// exactly as in Phase A1 — this cipher only removes the Signal layer.
     pub fn decrypt(&mut self, wire: &[u8]) -> Result<Vec<u8>> {
         let (tag, ciphertext) = decode_wire(wire)?;
-        let mk = self
-            .keys
-            .open(&tag)
-            .map_err(pprf_open_error_context)?;
+        let mk = self.keys.open(&tag).map_err(pprf_open_error_context)?;
 
         let cipher = Aes256GcmSiv::new(Key::<Aes256GcmSiv>::from_slice(mk.as_bytes()));
         cipher
             .decrypt(AeadNonce::from_slice(&AEAD_NONCE), ciphertext)
-            .map_err(|e| anyhow::anyhow!("AEAD open under mk (tampered, foreign, or wrong-key ciphertext): {e}"))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "AEAD open under mk (tampered, foreign, or wrong-key ciphertext): {e}"
+                )
+            })
     }
 }
 

@@ -31,18 +31,18 @@ use std::fs;
 use std::path::Path;
 
 use batch_zkc::{
-    generate_keys_for_batch_tickets, verify_and_validate, verify_ticket, BatchExecutedMethod,
-    BatchUser, RedeemExecMethod, ValidatedTickets,
+    BatchExecutedMethod, BatchUser, RedeemExecMethod, ValidatedTickets,
+    generate_keys_for_batch_tickets, verify_and_validate, verify_ticket,
 };
 use zk_callbacks::generic::bulletin::PublicUserBul;
 use zk_callbacks::generic::object::{Com, Nul};
 use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
 use crate::circuits::{
-    get_standard_interaction, MsgUser, StandInt, BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG,
+    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, MsgUser, StandInt, get_standard_interaction,
 };
 use crate::params::ParamsError;
-use crate::{Args, ArgsVar, Cr, F, H, OStore, Snark, PK, VK};
+use crate::{Args, ArgsVar, Cr, F, H, OStore, PK, Snark, VK};
 
 /// One anonymized ticket per request (Option A, see module docs) — reuses the
 /// existing post interaction, no new circuit for the interaction itself.
@@ -435,7 +435,9 @@ pub struct BadgeRedemption {
 // than a versioned record.
 // ---------------------------------------------------------------------------------------
 
-pub fn encode_ticket_request(req: &TicketRequest) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+pub fn encode_ticket_request(
+    req: &TicketRequest,
+) -> Result<Vec<u8>, ark_serialize::SerializationError> {
     let mut bytes = Vec::new();
     req.exec_meth.serialize_compressed(&mut bytes)?;
     req.pub_blinded_tickets[0].serialize_compressed(&mut bytes)?;
@@ -443,7 +445,9 @@ pub fn encode_ticket_request(req: &TicketRequest) -> Result<Vec<u8>, ark_seriali
     Ok(bytes)
 }
 
-pub fn decode_ticket_request(bytes: &[u8]) -> Result<TicketRequest, ark_serialize::SerializationError> {
+pub fn decode_ticket_request(
+    bytes: &[u8],
+) -> Result<TicketRequest, ark_serialize::SerializationError> {
     let mut reader = bytes;
     let exec_meth = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
     let ticket: IssuerGroup = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
@@ -478,7 +482,9 @@ pub fn decode_validated_tickets(
     })
 }
 
-pub fn encode_redemption(r: &TicketRedemption) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+pub fn encode_redemption(
+    r: &TicketRedemption,
+) -> Result<Vec<u8>, ark_serialize::SerializationError> {
     let mut bytes = Vec::new();
     r.data.serialize_compressed(&mut bytes)?;
     r.callback.serialize_compressed(&mut bytes)?;
@@ -486,7 +492,9 @@ pub fn encode_redemption(r: &TicketRedemption) -> Result<Vec<u8>, ark_serialize:
     Ok(bytes)
 }
 
-pub fn decode_redemption(bytes: &[u8]) -> Result<TicketRedemption, ark_serialize::SerializationError> {
+pub fn decode_redemption(
+    bytes: &[u8],
+) -> Result<TicketRedemption, ark_serialize::SerializationError> {
     let mut reader = bytes;
     let data = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
     let callback = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
@@ -498,7 +506,9 @@ pub fn decode_redemption(bytes: &[u8]) -> Result<TicketRedemption, ark_serialize
     })
 }
 
-pub fn encode_post_redemption(r: &PostRedemption) -> Result<Vec<u8>, ark_serialize::SerializationError> {
+pub fn encode_post_redemption(
+    r: &PostRedemption,
+) -> Result<Vec<u8>, ark_serialize::SerializationError> {
     let mut bytes = encode_redemption(&r.redemption)?;
     write_string(&mut bytes, &r.message);
     write_string(&mut bytes, &r.channel);

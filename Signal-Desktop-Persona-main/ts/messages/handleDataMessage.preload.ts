@@ -17,6 +17,7 @@ import {
   decodeAuthorshipProof,
   decodeBadgeProof,
   decodeRecordBody,
+  decodeRelayBody,
   decodeResetRequest,
   decodeCatchUpPart,
   isCatchUpRequest,
@@ -311,7 +312,10 @@ export async function handleDataMessage(
 
     // A record that arrives while the engine is still starting waits for it rather
     // than being dropped (a dropped record forks this member off the group).
-    if (decodeRecordBody(initialMessage.body)) {
+    if (
+      decodeRecordBody(initialMessage.body) ||
+      decodeRelayBody(initialMessage.body)
+    ) {
       await waitForPersonasEngineIfStarting(personasGroupId);
       // A member added late waits for the group state, so this record can be shown.
       await holdRecordForCatchUp(conversation);

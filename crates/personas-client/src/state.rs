@@ -1,13 +1,13 @@
 //! On-disk client state: the `User` object, the pseudonym log, and thread contexts.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use ark_std::UniformRand;
 use personas_core::{
+    F, H,
     circuits::MsgUser,
     persona::{self, petname_from_str},
-    F, H,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -158,8 +158,8 @@ impl PersonaClient {
     /// Every `(context, claimed)` pair in the pseudonym log, in order.
     fn pseudo_log_entries(&self) -> Result<Vec<(String, String)>> {
         let path = self.cfg.pseudo_log();
-        let file = File::open(&path)
-            .with_context(|| format!("no pseudonym log at {}", path.display()))?;
+        let file =
+            File::open(&path).with_context(|| format!("no pseudonym log at {}", path.display()))?;
 
         let mut out = Vec::new();
         for line in BufReader::new(file).lines() {
@@ -172,7 +172,12 @@ impl PersonaClient {
 
             match (json["context"].as_str(), json["claimed"].as_str()) {
                 (Some(c), Some(k)) => out.push((c.to_string(), k.to_string())),
-                _ => return Err(anyhow!("line in {} is missing context/claimed", path.display())),
+                _ => {
+                    return Err(anyhow!(
+                        "line in {} is missing context/claimed",
+                        path.display()
+                    ));
+                }
             }
         }
         Ok(out)
@@ -184,10 +189,10 @@ impl PersonaClient {
 
         for line in BufReader::new(file).lines() {
             let line = line.ok()?;
-            if let Ok(entry) = serde_json::from_str::<ContextJson>(&line) {
-                if entry.thread == thread {
-                    return persona::field_from_str(&entry.context);
-                }
+            if let Ok(entry) = serde_json::from_str::<ContextJson>(&line)
+                && entry.thread == thread
+            {
+                return persona::field_from_str(&entry.context);
             }
         }
         None

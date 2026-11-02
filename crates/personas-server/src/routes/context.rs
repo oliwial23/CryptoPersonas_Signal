@@ -43,7 +43,7 @@ pub async fn signal_new_thread(
     // would make the member's *existing* pseudonym in that thread unreachable, and would
     // silently unlink their earlier posts from their later ones.
     if let Some(existing) = st.signal.contexts.by_thread(&input.thread) {
-        return Ok(line(existing)?);
+        return line(existing);
     }
 
     let entry = st.signal.contexts.add(ThreadContext {
@@ -53,7 +53,7 @@ pub async fn signal_new_thread(
         topic_echoed: false,
     })?;
 
-    Ok(line(entry)?)
+    line(entry)
 }
 
 /// Open a thread on Slack: post the topic, and remember the message it was posted as, so
@@ -63,7 +63,7 @@ pub async fn slack_new_thread(
     Json(input): Json<SlackThread>,
 ) -> AppResult<Bytes> {
     if let Some(existing) = state.read().await.slack.contexts.by_thread(&input.thread) {
-        return Ok(line(existing)?);
+        return line(existing);
     }
 
     let transport = state.read().await.slack.transport.clone();
@@ -89,7 +89,7 @@ pub async fn slack_new_thread(
         topic_echoed: false,
     })?;
 
-    Ok(line(entry)?)
+    line(entry)
 }
 
 /// Every thread and its context — the client downloads this wholesale.

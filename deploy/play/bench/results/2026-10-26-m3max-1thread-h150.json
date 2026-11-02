@@ -1,0 +1,422 @@
+{
+  "machine": {
+    "label": "Apple M3 Max, 1 thread",
+    "os": "macos",
+    "arch": "aarch64",
+    "cpu": "Apple M3 Max",
+    "cores": 14,
+    "rayon_threads": "1"
+  },
+  "iterations": 10,
+  "warmup": 2,
+  "history": 150,
+  "constraints": {},
+  "operations": {
+    "anon_post": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 598.2376,
+        "median_ms": 598.114,
+        "stdev_ms": 2.2434294283529277,
+        "p95_ms": 602.501,
+        "min_ms": 596.034,
+        "max_ms": 602.501
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 1.077,
+        "median_ms": 1.099,
+        "stdev_ms": 0.03538675207224061,
+        "p95_ms": 1.12,
+        "min_ms": 1.034,
+        "max_ms": 1.12
+      },
+      "handle": {
+        "n": 10,
+        "mean_ms": 10.3473,
+        "median_ms": 10.365,
+        "stdev_ms": 0.11336573066358684,
+        "p95_ms": 10.519,
+        "min_ms": 10.135,
+        "max_ms": 10.519
+      },
+      "self_ingest": {
+        "n": 10,
+        "mean_ms": 10.523500000000002,
+        "median_ms": 10.521,
+        "stdev_ms": 0.0740964086699061,
+        "p95_ms": 10.634,
+        "min_ms": 10.409,
+        "max_ms": 10.634
+      },
+      "bytes_mean": 566.0
+    },
+    "authorship": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 562.3518000000001,
+        "median_ms": 562.535,
+        "stdev_ms": 1.1529865374563244,
+        "p95_ms": 564.885,
+        "min_ms": 560.966,
+        "max_ms": 564.885
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 1.0316,
+        "median_ms": 1.032,
+        "stdev_ms": 0.012185601704014823,
+        "p95_ms": 1.054,
+        "min_ms": 1.016,
+        "max_ms": 1.054
+      },
+      "handle": null,
+      "self_ingest": null,
+      "bytes_mean": 424.0
+    },
+    "badge_proof": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 557.1646999999999,
+        "median_ms": 554.078,
+        "stdev_ms": 10.697396880134502,
+        "p95_ms": 580.206,
+        "min_ms": 546.637,
+        "max_ms": 580.206
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 0.9767999999999999,
+        "median_ms": 0.973,
+        "stdev_ms": 0.04669237387173388,
+        "p95_ms": 1.091,
+        "min_ms": 0.903,
+        "max_ms": 1.091
+      },
+      "handle": null,
+      "self_ingest": null,
+      "bytes_mean": 360.0
+    },
+    "badge_request": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 599.4731,
+        "median_ms": 598.393,
+        "stdev_ms": 3.857533047312909,
+        "p95_ms": 608.042,
+        "min_ms": 595.644,
+        "max_ms": 608.042
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 1.0702,
+        "median_ms": 1.088,
+        "stdev_ms": 0.027571321654534086,
+        "p95_ms": 1.095,
+        "min_ms": 1.019,
+        "max_ms": 1.095
+      },
+      "handle": {
+        "n": 10,
+        "mean_ms": 11.6309,
+        "median_ms": 11.613,
+        "stdev_ms": 0.13014474847474847,
+        "p95_ms": 11.799,
+        "min_ms": 11.458,
+        "max_ms": 11.799
+      },
+      "self_ingest": {
+        "n": 10,
+        "mean_ms": 11.742,
+        "median_ms": 11.78,
+        "stdev_ms": 0.0831143790207206,
+        "p95_ms": 11.853,
+        "min_ms": 11.63,
+        "max_ms": 11.853
+      },
+      "bytes_mean": 532.0
+    },
+    "join": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 101.8885,
+        "median_ms": 101.955,
+        "stdev_ms": 0.3687622690990928,
+        "p95_ms": 102.588,
+        "min_ms": 101.338,
+        "max_ms": 102.588
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 0.8089000000000001,
+        "median_ms": 0.806,
+        "stdev_ms": 0.012269655432995822,
+        "p95_ms": 0.843,
+        "min_ms": 0.799,
+        "max_ms": 0.843
+      },
+      "handle": {
+        "n": 10,
+        "mean_ms": 46.384499999999996,
+        "median_ms": 51.1,
+        "stdev_ms": 21.702557085642134,
+        "p95_ms": 76.599,
+        "min_ms": 9.803,
+        "max_ms": 76.599
+      },
+      "self_ingest": {
+        "n": 10,
+        "mean_ms": 5.4110000000000005,
+        "median_ms": 5.412,
+        "stdev_ms": 0.026874192494328493,
+        "p95_ms": 5.448,
+        "min_ms": 5.371,
+        "max_ms": 5.448
+      },
+      "bytes_mean": 279.0
+    },
+    "moderation": {
+      "prove": null,
+      "verify": null,
+      "handle": null,
+      "self_ingest": null,
+      "bytes_mean": null,
+      "invoke_per_callback": {
+        "n": 10,
+        "mean_ms": 0.5837,
+        "median_ms": 0.581,
+        "stdev_ms": 0.012202458768625291,
+        "p95_ms": 0.608,
+        "min_ms": 0.565,
+        "max_ms": 0.608
+      },
+      "epoch_update": {
+        "n": 10,
+        "mean_ms": 11.810500000000001,
+        "median_ms": 11.866,
+        "stdev_ms": 0.1659519676157997,
+        "p95_ms": 12.123,
+        "min_ms": 11.58,
+        "max_ms": 12.123
+      }
+    },
+    "not_banned": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 560.2076999999999,
+        "median_ms": 561.529,
+        "stdev_ms": 7.2078549598491595,
+        "p95_ms": 570.584,
+        "min_ms": 549.571,
+        "max_ms": 570.584
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 0.9480000000000001,
+        "median_ms": 0.944,
+        "stdev_ms": 0.02189875694087577,
+        "p95_ms": 0.992,
+        "min_ms": 0.916,
+        "max_ms": 0.992
+      },
+      "handle": null,
+      "self_ingest": null,
+      "bytes_mean": 328.0
+    },
+    "pseudo_post": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 605.5728,
+        "median_ms": 605.588,
+        "stdev_ms": 1.2813127643163653,
+        "p95_ms": 607.969,
+        "min_ms": 603.633,
+        "max_ms": 607.969
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 1.1517000000000002,
+        "median_ms": 1.168,
+        "stdev_ms": 0.030488795756255523,
+        "p95_ms": 1.186,
+        "min_ms": 1.108,
+        "max_ms": 1.186
+      },
+      "handle": {
+        "n": 10,
+        "mean_ms": 10.811500000000002,
+        "median_ms": 10.808,
+        "stdev_ms": 0.09546872670030622,
+        "p95_ms": 10.971,
+        "min_ms": 10.688,
+        "max_ms": 10.971
+      },
+      "self_ingest": {
+        "n": 10,
+        "mean_ms": 10.962,
+        "median_ms": 11.005,
+        "stdev_ms": 0.11365542466400615,
+        "p95_ms": 11.092,
+        "min_ms": 10.725,
+        "max_ms": 11.092
+      },
+      "bytes_mean": 633.0
+    },
+    "rate_limited_post": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 614.446,
+        "median_ms": 614.378,
+        "stdev_ms": 1.722846675321609,
+        "p95_ms": 617.71,
+        "min_ms": 612.761,
+        "max_ms": 617.71
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 1.1479,
+        "median_ms": 1.154,
+        "stdev_ms": 0.0254708984267667,
+        "p95_ms": 1.183,
+        "min_ms": 1.109,
+        "max_ms": 1.183
+      },
+      "handle": {
+        "n": 10,
+        "mean_ms": 11.229300000000002,
+        "median_ms": 11.227,
+        "stdev_ms": 0.08504515140663671,
+        "p95_ms": 11.357,
+        "min_ms": 11.095,
+        "max_ms": 11.357
+      },
+      "self_ingest": {
+        "n": 10,
+        "mean_ms": 11.348699999999997,
+        "median_ms": 11.376,
+        "stdev_ms": 0.11402148920269384,
+        "p95_ms": 11.52,
+        "min_ms": 11.161,
+        "max_ms": 11.52
+      },
+      "bytes_mean": 670.0
+    },
+    "rating": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 554.1033,
+        "median_ms": 554.528,
+        "stdev_ms": 1.1601300741248217,
+        "p95_ms": 555.578,
+        "min_ms": 552.003,
+        "max_ms": 555.578
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 0.9621999999999999,
+        "median_ms": 0.965,
+        "stdev_ms": 0.008202980488145087,
+        "p95_ms": 0.977,
+        "min_ms": 0.949,
+        "max_ms": 0.977
+      },
+      "handle": {
+        "n": 10,
+        "mean_ms": 12.777899999999999,
+        "median_ms": 20.456,
+        "stdev_ms": 8.660341736264735,
+        "p95_ms": 21.641,
+        "min_ms": 3.609,
+        "max_ms": 21.641
+      },
+      "self_ingest": {
+        "n": 10,
+        "mean_ms": 12.972399999999999,
+        "median_ms": 20.551,
+        "stdev_ms": 8.63095648362464,
+        "p95_ms": 21.787,
+        "min_ms": 3.824,
+        "max_ms": 21.787
+      },
+      "bytes_mean": 316.1
+    },
+    "scan": {
+      "prove": {
+        "n": 47,
+        "mean_ms": 1465.0725531914898,
+        "median_ms": 1465.049,
+        "stdev_ms": 2.7164115140039984,
+        "p95_ms": 1469.762,
+        "min_ms": 1457.519,
+        "max_ms": 1471.941
+      },
+      "verify": {
+        "n": 47,
+        "mean_ms": 1.1519574468085105,
+        "median_ms": 1.164,
+        "stdev_ms": 0.03005282121373495,
+        "p95_ms": 1.183,
+        "min_ms": 1.099,
+        "max_ms": 1.211
+      },
+      "handle": {
+        "n": 47,
+        "mean_ms": 44.85489361702128,
+        "median_ms": 46.199,
+        "stdev_ms": 27.789478095005393,
+        "p95_ms": 89.718,
+        "min_ms": 10.588,
+        "max_ms": 97.629
+      },
+      "self_ingest": {
+        "n": 47,
+        "mean_ms": 44.94874468085107,
+        "median_ms": 45.75,
+        "stdev_ms": 27.78685508549124,
+        "p95_ms": 88.882,
+        "min_ms": 10.709,
+        "max_ms": 97.057
+      },
+      "bytes_mean": 387.0
+    },
+    "vote": {
+      "prove": {
+        "n": 10,
+        "mean_ms": 553.905,
+        "median_ms": 553.522,
+        "stdev_ms": 1.78525945826743,
+        "p95_ms": 557.692,
+        "min_ms": 551.494,
+        "max_ms": 557.692
+      },
+      "verify": {
+        "n": 10,
+        "mean_ms": 0.9579999999999999,
+        "median_ms": 0.959,
+        "stdev_ms": 0.0028674417556808778,
+        "p95_ms": 0.962,
+        "min_ms": 0.954,
+        "max_ms": 0.962
+      },
+      "handle": {
+        "n": 10,
+        "mean_ms": 2.8494,
+        "median_ms": 3.641,
+        "stdev_ms": 1.292678029862382,
+        "p95_ms": 3.702,
+        "min_ms": 0.974,
+        "max_ms": 3.702
+      },
+      "self_ingest": {
+        "n": 10,
+        "mean_ms": 3.072,
+        "median_ms": 3.842,
+        "stdev_ms": 1.297599493081145,
+        "p95_ms": 3.935,
+        "min_ms": 1.172,
+        "max_ms": 3.935
+      },
+      "bytes_mean": 314.7
+    }
+  }
+}

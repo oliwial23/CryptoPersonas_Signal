@@ -39,19 +39,18 @@ use rand::{CryptoRng, RngCore};
 use personas_bulletin::merkle::{MerkleCallbackStore, MerkleObjStore};
 use personas_bulletin::replica::record::{Ark, Eh, Flavour, PollKind, Record};
 use personas_core::circuits::{
-    MsgUser, NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate,
-    BadgesArgs, BadgesArgsVar, PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsVar,
-    PubScan, PubScanVar, authorship_pred, join_pred, not_banned_pred, badge_pred, get_badge_request_interaction, get_callbacks,
-    get_scan_interaction,
-    get_standard_interaction, get_standard_pseudo_interaction,
-    get_standard_pseudo_rate_interaction, pseudonym_pred,
+    BadgesArgs, BadgesArgsVar, MsgUser, NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs,
+    PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, PubScan,
+    PubScanVar, authorship_pred, badge_pred, get_badge_request_interaction, get_callbacks,
+    get_scan_interaction, get_standard_interaction, get_standard_pseudo_interaction,
+    get_standard_pseudo_rate_interaction, join_pred, not_banned_pred, pseudonym_pred,
 };
 use personas_core::params::ServerKeys;
 use personas_core::{Args, ArgsVar, Cr, F, H, PK, Snark, persona};
 
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use zk_callbacks::generic::bulletin::PublicUserBul;
 use zk_callbacks::generic::object::Time;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use zk_callbacks::generic::user::User;
 use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
@@ -209,7 +208,13 @@ impl Member {
             return false;
         }
         let cap = F::from((personas_core::circuits::NUM_INTS_BEFORE_SCAN - SCAN_CAP_MARGIN) as u64);
-        if self.user.data.num_interactions_since_last_scan.into_bigint() >= cap.into_bigint() {
+        if self
+            .user
+            .data
+            .num_interactions_since_last_scan
+            .into_bigint()
+            >= cap.into_bigint()
+        {
             return true;
         }
         (0..have).any(|i| {

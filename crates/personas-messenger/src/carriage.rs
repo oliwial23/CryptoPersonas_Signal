@@ -38,6 +38,13 @@ pub const INLINE_MARKER: &str = "PZR2:";
 /// The receiver pulls the named attachment rather than decoding the body.
 pub const ATTACH_MARKER: &str = "PZR2A:";
 
+/// Prefixes a RELAYED record: `PZY2:<barrier>:<base64 record>`, a record another member
+/// re-sends because the views of the group disagree (`SERVERLESS_PROTOCOL.md` §5.5),
+/// with `barrier` the one the relayer placed it at. Kept apart from [`INLINE_MARKER`]
+/// because a relayed record is not placed by its own service timestamp. Signal Desktop
+/// speaks the same format (`personasCarriage.std.ts`).
+pub const RELAY_MARKER: &str = "PZY2:";
+
 /// The content type stamped on a record attachment.
 pub const ATTACH_CONTENT_TYPE: &str = "application/vnd.personas.record";
 
@@ -113,6 +120,18 @@ pub fn decode(body: &str, attachments: &[Attachment]) -> Option<Vec<u8>> {
             .map(|a| a.bytes.clone());
     }
     None
+}
+
+/// Pack a record for relay, with the barrier the relayer placed it at.
+pub fn encode_relay(first_barrier: u64, record: &[u8]) -> String {
+    format!("{RELAY_MARKER}{first_barrier}:{}", B64.encode(record))
+}
+
+/// Recover `(first_barrier, record bytes)` from a relay body, or `None` if the body is
+/// not a well-formed relay.
+pub fn decode_relay(body: &str) -> Option<(u64, Vec<u8>)> {
+    let (barrier, b64) = body.strip_prefix(RELAY_MARKER)?.split_once(':')?;
+    Some((barrier.parse().ok()?, B64.decode(b64.trim()).ok()?))
 }
 
 /// Convenience: pull a record out of an [`Incoming`] event, or `None` for anything
@@ -196,6 +215,17 @@ mod tests {
             decode(&format!("{INLINE_MARKER}!!!not base64!!!"), &[]),
             None
         );
+    }
+
+    #[test]
+    fn relays_round_trip_and_are_not_plain_records() {
+        let body = encode_relay(42, b"some record");
+        assert_eq!(decode_relay(&body), Some((42, b"some record".to_vec())));
+        // A relay is not mistaken for a record placed by its own timestamp, nor the
+        // other way round.
+        assert_eq!(decode(&body, &[]), None);
+        assert_eq!(decode_relay(&encode(b"x").body), None);
+        assert_eq!(decode_relay(&format!("{RELAY_MARKER}!!!")), None);
     }
 
     #[test]

@@ -156,11 +156,9 @@ impl<F: PrimeField + Absorb, const HEIGHT: usize> MerkleObjStore<F, HEIGHT> {
 
     /// Rebuild the tree over the current sorted commitment set.
     fn rebuild(&mut self) {
-        let mut tree = IncrementalMerkleTree::new();
-        for com in self.entries.keys() {
-            tree.append(*com);
-        }
-        self.tree = tree;
+        // Level by level: the same tree as appending each leaf, at ~2 hashes per leaf
+        // instead of HEIGHT (IncrementalMerkleTree::from_leaves).
+        self.tree = IncrementalMerkleTree::from_leaves(self.entries.keys().copied());
     }
 
     /// The sorted position of a registered commitment (its leaf index), or `None`.
@@ -444,6 +442,32 @@ mod tests {
             _: &Self::Proof,
         ) -> Result<bool, Self::Error> {
             unreachable!()
+        }
+    }
+
+    /// MEASUREMENT, not a check: what one insert costs as the set grows. Every insert
+    /// rebuilds the whole tree over the sorted set ([`MerkleObjStore::rebuild`]), so
+    /// this times that rebuild at each size. Run with
+    /// `cargo test -p personas-bulletin --release --lib -- --ignored --nocapture push_cost`.
+    #[test]
+    #[ignore = "a timing measurement; run by hand in release"]
+    fn push_cost_by_set_size() {
+        use ark_bn254::Fr;
+        use ark_std::UniformRand;
+        let mut rng = ark_std::test_rng();
+        println!("objects  ms per insert");
+        for n in [100usize, 300, 1_000, 3_000, 10_000, 30_000, 100_000] {
+            let mut leaves: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+            leaves.sort();
+            const SAMPLES: usize = 3;
+            let started = std::time::Instant::now();
+            for _ in 0..SAMPLES {
+                let tree: IncrementalMerkleTree<Fr, DEFAULT_OBJ_HEIGHT> =
+                    IncrementalMerkleTree::from_leaves(leaves.iter().copied());
+                std::hint::black_box(tree.root());
+            }
+            let ms = started.elapsed().as_secs_f64() * 1e3 / SAMPLES as f64;
+            println!("{n:>7}  {ms:>8.2}");
         }
     }
 }

@@ -123,6 +123,7 @@ impl<U: UserData<F>> BatchUser<U>
 where
     Standard: Distribution<F>,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn batch_issue_tickets<
         H: FieldHash<F>,
         PubArgs: Clone + std::fmt::Debug,
@@ -207,9 +208,8 @@ where
 
         let proof = Snark::prove(pkb, batch_tik_circuit, rng)?;
 
-        for i in 0..BATCHSIZE {
-            self.outstanding_batched_callbacks
-                .push((vec_blinds[i], old + i));
+        for (i, blind) in vec_blinds.iter().enumerate().take(BATCHSIZE) {
+            self.outstanding_batched_callbacks.push((*blind, old + i));
         }
 
         Ok(BatchExecutedMethod {
@@ -519,6 +519,7 @@ pub struct ValidatedTickets<const BATCHSIZE: usize> {
     pub proof: (Fr, Fr),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_and_validate<
     H: FieldHash<F>,
     U: UserData<F>,
@@ -759,7 +760,7 @@ pub(crate) fn verify_dleq_proof<H: FieldHash<F>, const BATCHSIZE: usize>(
         Fr::from_bigint(<Fr as PrimeField>::BigInt::from_bits_le(&digest_bits)).unwrap()
     };
 
-    return cp == tickets.proof.0;
+    cp == tickets.proof.0
 }
 
 pub fn verify_ticket<H: FieldHash<F>, CBArgs: Clone, Crypto: AECipherSigZK<F, CBArgs>>(

@@ -38,6 +38,9 @@ import {
   encodeTopicAnnouncement,
   decodeTopicAnnouncement,
   isPersonaPhantomBody,
+  PERSONAS_RELAY_MARKER,
+  encodeRelayBody,
+  decodeRelayBody,
   encodeResetRequest,
   decodeResetRequest,
   encodeCatchUpRequest,
@@ -522,5 +525,36 @@ describe('personas catch-up carriage', () => {
     assert.isUndefined(decodeCatchUpPart(bad({ g: 'g', s: 's', i: 2, n: 2, d: '' })));
     assert.isUndefined(decodeCatchUpPart(bad({ g: 'g', s: 's', i: 0, n: 0, d: '' })));
     assert.isUndefined(decodeCatchUpPart(bad({ g: 1, s: 's', i: 0, n: 1, d: '' })));
+  });
+});
+
+describe('personas relay carriage', () => {
+  const record = Buffer.from([1, 2, 3, 250]);
+
+  it('round-trips a record with its barrier', () => {
+    const body = encodeRelayBody(42, record);
+    assert.isTrue(body.startsWith(PERSONAS_RELAY_MARKER));
+    const relay = decodeRelayBody(body);
+    assert.equal(relay?.barrier, 42);
+    assert.isTrue(relay?.record.equals(record));
+  });
+
+  it('matches the Rust carriage byte for byte', () => {
+    // carriage.rs: format!("{RELAY_MARKER}{first_barrier}:{}", B64.encode(record))
+    assert.equal(encodeRelayBody(7, record), 'PZY2:7:AQID+g==');
+  });
+
+  it('is not a plain record, and does not ride the phantom', () => {
+    const body = encodeRelayBody(1, record);
+    assert.isUndefined(decodeRecordBody(body));
+    assert.isFalse(isPersonaPhantomBody(body));
+  });
+
+  it('refuses malformed relays', () => {
+    assert.isUndefined(decodeRelayBody('hello'));
+    assert.isUndefined(decodeRelayBody(`${PERSONAS_RELAY_MARKER}AQID`));
+    assert.isUndefined(decodeRelayBody(`${PERSONAS_RELAY_MARKER}-1:AQID`));
+    assert.isUndefined(decodeRelayBody(`${PERSONAS_RELAY_MARKER}x:AQID`));
+    assert.isUndefined(decodeRelayBody(`${PERSONAS_RELAY_MARKER}3:`));
   });
 });

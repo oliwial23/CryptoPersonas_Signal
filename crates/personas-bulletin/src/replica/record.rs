@@ -255,21 +255,19 @@ pub enum Record {
 
     /// An approval of a badge request, naming the request's envelope hash.
     ///
-    /// Carries no proof: it is an admin's say-so, gated client-side on Signal's
-    /// group-admin role. Like the request, it is carried anonymously by the Desktop
-    /// client — an approval that named its sender while the request did not would narrow
-    /// the request's anonymity set to "whoever that admin replied to", so the pair has to
-    /// agree. The accept rule only marks the requester's ticket, and
-    /// the existing barrier machinery does the rest — invoke with the BADGE flag, then
-    /// the requester's own scan writes the badge in-circuit.
+    /// Carries no proof. Like the request, it is carried anonymously (under the phantom
+    /// identity) by the Desktop client: an approval that named its sender while the
+    /// request did not would narrow the request's anonymity set to "whoever that admin
+    /// replied to", so the pair has to agree. The accept rule only marks the requester's
+    /// ticket, and the existing barrier machinery does the rest: invoke with the BADGE
+    /// flag, then the requester's own scan writes the badge in-circuit.
     ///
-    /// NOT ENFORCED at the protocol level: nothing here checks that the sender is an
-    /// admin, so a modified client could approve itself. Closing that needs an admin key
-    /// in this accept rule (PERSONAS_ZK_WORKPLAN.md step 3b).
-    BadgeApprove {
-        target: Eh,
-        slot: u8,
-    },
+    /// NOT AUTHENTICATED. Desktop shows the Approve button only to group admins, but
+    /// because the approval rides the phantom, no receiver can check who sent it, and
+    /// nothing in this accept rule does either: a modified client can approve its own
+    /// request. Closing that needs an authority key in the group config and a signature
+    /// checked here (`SERVERLESS_PROTOCOL.md` §11).
+    BadgeApprove { target: Eh, slot: u8 },
 
     /// A rating of another record. Serverless erases the reacting account, so a
     /// rating must now carry a proof (§10): `pseudonym_pred` under
@@ -339,6 +337,38 @@ impl Record {
             Record::Ban { .. } => "Ban",
         }
     }
+
+    /// Whether another member may relay this record (§5.5). A join, a re-join approval
+    /// and an admin ban are accepted only because of who sent them over the messenger
+    /// (the joining account, a group admin), which a relay would hide; every other
+    /// record stands on its proof or its content alone.
+    pub fn relayable(&self) -> bool {
+        !matches!(
+            self,
+            Record::Join { .. } | Record::RejoinApprove { .. } | Record::Ban { .. }
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The view claim
+// ---------------------------------------------------------------------------------------
+
+/// The sender's view of the group when it sent a record: the replica's
+/// [view digest](super::Replica::view_digest) at `barrier` (`SERVERLESS_PROTOCOL.md`
+/// §5.5).
+///
+/// The digest chains over every record placed at each barrier up to `barrier`, so two
+/// members whose claims for the same barrier agree have seen exactly the same records
+/// up to it. The messenger can delay or drop a record for some members only, and a
+/// receiver that compares claims with its own digest detects that it did. The claim
+/// rides in the envelope, so the record's [`Eh`] covers it. Nobody but the sender can
+/// change it: the payload is end-to-end encrypted, and a member who re-wraps someone
+/// else's proof under a different claim spends the same nullifier twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewClaim {
+    pub barrier: u64,
+    pub digest: [u8; 32],
 }
 
 // ---------------------------------------------------------------------------------------
@@ -346,10 +376,16 @@ impl Record {
 // ---------------------------------------------------------------------------------------
 
 /// The owned form, for decoding.
+///
+/// `view` is optional on the wire both ways: a record without a claim encodes exactly
+/// as it did before claims existed (so its `Eh` is unchanged), and a reader that
+/// predates claims ignores the field.
 #[derive(Deserialize)]
 struct Envelope {
     v: u16,
     record: Record,
+    #[serde(default)]
+    view: Option<ViewClaim>,
 }
 
 /// The borrowed form, for encoding — a `Record` is not `Clone`, so the envelope
@@ -358,6 +394,8 @@ struct Envelope {
 struct EnvelopeRef<'a> {
     v: u16,
     record: &'a Record,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<ViewClaim>,
 }
 
 /// A record failed to encode or decode.
@@ -380,9 +418,18 @@ pub enum CodecError {
 /// bytes, so computing it anywhere other than at encode/decode time invites two
 /// callers hashing subtly different serialisations.
 pub fn encode(record: &Record) -> Result<(Vec<u8>, Eh), CodecError> {
+    encode_with_view(record, None)
+}
+
+/// [`encode`], carrying the sender's [`ViewClaim`].
+pub fn encode_with_view(
+    record: &Record,
+    view: Option<ViewClaim>,
+) -> Result<(Vec<u8>, Eh), CodecError> {
     let envelope = EnvelopeRef {
         v: SERVERLESS_VERSION,
         record,
+        view,
     };
     let mut bytes = Vec::new();
     ciborium::into_writer(&envelope, &mut bytes).map_err(|source| CodecError::Encode {
@@ -397,12 +444,17 @@ pub fn encode(record: &Record) -> Result<(Vec<u8>, Eh), CodecError> {
 /// exactly as read — so a decoded record's identity is what any other replica
 /// would compute for the same bytes, not something the sender could assert.
 pub fn decode(bytes: &[u8]) -> Result<(Record, Eh), CodecError> {
+    decode_with_view(bytes).map(|(record, eh, _)| (record, eh))
+}
+
+/// [`decode`], also returning the sender's [`ViewClaim`] if the record carries one.
+pub fn decode_with_view(bytes: &[u8]) -> Result<(Record, Eh, Option<ViewClaim>), CodecError> {
     let envelope: Envelope = ciborium::from_reader(bytes)
         .map_err(|e| CodecError::Malformed(format!("could not read envelope: {e}")))?;
     if envelope.v != SERVERLESS_VERSION {
         return Err(CodecError::Version { found: envelope.v });
     }
-    Ok((envelope.record, Eh::of_bytes(bytes)))
+    Ok((envelope.record, Eh::of_bytes(bytes), envelope.view))
 }
 
 /// The record re-encoded WITHOUT its private text — a post's body, a poll's question
@@ -414,7 +466,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Record, Eh), CodecError> {
 /// replica derives depends on the removed text: no proof covers it, and ratings and
 /// polls refer to records by their original `Eh`.
 pub fn strip_private_text(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
-    let (mut record, _) = decode(bytes)?;
+    let (mut record, _, view) = decode_with_view(bytes)?;
     match &mut record {
         Record::Post { body, .. } => body.clear(),
         Record::PollOpen {
@@ -425,7 +477,7 @@ pub fn strip_private_text(bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
         }
         _ => {}
     }
-    Ok(encode(&record)?.0)
+    Ok(encode_with_view(&record, view)?.0)
 }
 
 #[cfg(test)]
@@ -505,6 +557,7 @@ mod tests {
             &EnvelopeRef {
                 v: SERVERLESS_VERSION + 1,
                 record: &rec,
+                view: None,
             },
             &mut ahead,
         )
@@ -515,6 +568,55 @@ mod tests {
         ));
         // The well-formed one still decodes.
         assert!(decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn a_view_claim_round_trips_and_is_covered_by_the_eh() {
+        let rec = Record::PollOpen {
+            question: "q".into(),
+            options: vec!["a".into()],
+            kind: PollKind::Standard,
+            target: None,
+        };
+        let claim = ViewClaim {
+            barrier: 7,
+            digest: [9; 32],
+        };
+        let (plain, plain_eh) = encode(&rec).unwrap();
+        let (bytes, eh) = encode_with_view(&rec, Some(claim)).unwrap();
+        assert_ne!(eh, plain_eh, "the claim is part of the record's identity");
+        let (_, eh2, back) = decode_with_view(&bytes).unwrap();
+        assert_eq!((eh2, back), (eh, Some(claim)));
+        // A record without a claim reads back without one, and still decodes plainly.
+        assert_eq!(decode_with_view(&plain).unwrap().2, None);
+        assert!(decode(&bytes).is_ok());
+        // Stripping private text keeps the claim.
+        let stripped = strip_private_text(&bytes).unwrap();
+        assert_eq!(decode_with_view(&stripped).unwrap().2, Some(claim));
+    }
+
+    #[test]
+    fn a_record_without_a_claim_encodes_as_before_claims_existed() {
+        // The pre-claim envelope had exactly two fields. Byte-identical encoding keeps
+        // every journaled record's eh stable.
+        #[derive(Serialize)]
+        struct Old<'a> {
+            v: u16,
+            record: &'a Record,
+        }
+        let rec = Record::Ban {
+            target: Eh([1; 32]),
+        };
+        let mut old = Vec::new();
+        ciborium::into_writer(
+            &Old {
+                v: SERVERLESS_VERSION,
+                record: &rec,
+            },
+            &mut old,
+        )
+        .unwrap();
+        assert_eq!(encode(&rec).unwrap().0, old);
     }
 
     #[test]

@@ -416,8 +416,10 @@ mod tests {
 
     #[test]
     fn serverless_mode_is_rejected() {
-        let mut cfg = Config::default();
-        cfg.mode = Mode::Serverless;
+        let cfg = Config {
+            mode: Mode::Serverless,
+            ..Config::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

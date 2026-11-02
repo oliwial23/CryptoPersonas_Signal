@@ -30,14 +30,14 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
-use futures_util::pin_mut;
+use anyhow::{Context, Result, bail};
 use futures_util::Stream;
 use futures_util::StreamExt;
+use futures_util::pin_mut;
+use presage::Manager;
 use presage::libsignal_service::content::{ContentBody, DataMessage};
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
-use presage::Manager;
 use presage_store_sqlite::SqliteStore;
 use transport_presage::PresageTransport;
 
@@ -102,18 +102,17 @@ async fn receive_one(
 ) -> Result<(uuid::Uuid, Option<Vec<u8>>, String)> {
     tokio::time::timeout(Duration::from_secs(45), async {
         while let Some(event) = messages.next().await {
-            if let Received::Content(content) = event {
-                if let ContentBody::DataMessage(DataMessage {
+            if let Received::Content(content) = event
+                && let ContentBody::DataMessage(DataMessage {
                     body: Some(text), ..
                 }) = &content.body
-                {
-                    let key = content
-                        .metadata
-                        .sender_identity_key
-                        .map(|k| k.public_key_bytes().to_vec());
-                    let sender = content.metadata.sender.raw_uuid();
-                    return Ok((sender, key, text.clone()));
-                }
+            {
+                let key = content
+                    .metadata
+                    .sender_identity_key
+                    .map(|k| k.public_key_bytes().to_vec());
+                let sender = content.metadata.sender.raw_uuid();
+                return Ok((sender, key, text.clone()));
             }
         }
         bail!("queue emptied without a DataMessage arriving")
@@ -155,7 +154,9 @@ async fn main() -> Result<()> {
     println!("      member A aci={member_a_aci:?}");
     println!("      member B aci={member_b_aci:?}");
     if member_a_aci.raw_uuid() == member_b_aci.raw_uuid() {
-        bail!("member A and member B got the SAME uuid — this should never happen (each registers its own independent account, not a linked device)");
+        bail!(
+            "member A and member B got the SAME uuid — this should never happen (each registers its own independent account, not a linked device)"
+        );
     }
     println!("      ✓ different accounts — this is not device linking");
 
@@ -263,7 +264,9 @@ async fn main() -> Result<()> {
     println!("      observer saw B: uuid={b_uuid} identity_key={b_key:?}");
 
     if a_uuid == b_uuid {
-        bail!("A and B reported the SAME uuid on the real sends — that would mean device linking crept back in");
+        bail!(
+            "A and B reported the SAME uuid on the real sends — that would mean device linking crept back in"
+        );
     }
 
     let (Some(a_key), Some(b_key)) = (a_key, b_key) else {

@@ -1,6 +1,6 @@
 use std::{ffi::OsString, net::SocketAddr};
 
-use clap::{crate_version, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum, crate_version};
 
 /// JSON-RPC client for signal-cli
 #[derive(Parser, Debug)]

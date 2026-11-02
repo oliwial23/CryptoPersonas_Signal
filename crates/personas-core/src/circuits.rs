@@ -1,5 +1,3 @@
-
-
 use ark_bn254::Fr as F;
 use ark_bn254::G1Projective as Projective;
 use ark_ff::{PrimeField, ToConstraintField, fields::AdditiveGroup};
@@ -36,8 +34,8 @@ use zk_callbacks::{
     scannable_zk_object,
 };
 
-use lazy_static::lazy_static;
 use blake2::{Blake2s256, Digest};
+use lazy_static::lazy_static;
 
 use crate::{Args, ArgsVar, CStore, Cr, H, OStore, PK, Snark};
 
@@ -120,7 +118,6 @@ macro_rules! dispatch_fold_size {
     }};
 }
 
-
 #[scannable_zk_object(F)]
 #[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct MsgUser {
@@ -132,7 +129,6 @@ pub struct MsgUser {
     pub badge1: F,
     pub badge2: F,
     pub badge3: F,
-   
 }
 
 pub type NF<const N: usize = NUM_SCANS_PER_FOLD> = Nova<
@@ -242,9 +238,9 @@ impl<F: PrimeField> ToConstraintField<F> for PseudonymArgs<F> {
     }
 }
 
-pub fn pseudonym_pred<'a, 'b>(
-    tu: &'a UserVar<F, MsgUser>,
-    _com: &'b FpVar<F>,
+pub fn pseudonym_pred(
+    tu: &UserVar<F, MsgUser>,
+    _com: &FpVar<F>,
     pub_args: PseudonymArgsVar<F>,
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
@@ -305,9 +301,9 @@ impl<F: PrimeField> ToConstraintField<F> for BadgesArgs<F> {
     }
 }
 
-pub fn badge_pred<'a, 'b>(
-    tu: &'a UserVar<F, MsgUser>,
-    _com: &'b FpVar<F>,
+pub fn badge_pred(
+    tu: &UserVar<F, MsgUser>,
+    _com: &FpVar<F>,
     pub_args: BadgesArgsVar<F>,
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
@@ -372,9 +368,9 @@ impl<F: PrimeField> AllocVar<PseudonymArgsPair<F>, F> for PseudonymArgsPairVar<F
     }
 }
 
-pub fn authorship_pred<'a, 'b>(
-    tu: &'a UserVar<F, MsgUser>,
-    _com: &'b FpVar<F>,
+pub fn authorship_pred(
+    tu: &UserVar<F, MsgUser>,
+    _com: &FpVar<F>,
     pub_args: PseudonymArgsPairVar<F>,
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
@@ -416,9 +412,9 @@ fn bind_public_input(value: &FpVar<F>) -> ArkResult<()> {
 /// proof is about exactly the leaf being added. `pub_args` is the joining ACCOUNT (a
 /// field element of the account's ACI), bound so the proof cannot be replayed as
 /// another account's join.
-pub fn join_pred<'a, 'b>(
-    tu: &'a UserVar<F, MsgUser>,
-    com: &'b FpVar<F>,
+pub fn join_pred(
+    tu: &UserVar<F, MsgUser>,
+    com: &FpVar<F>,
     account: FpVar<F>,
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
@@ -440,7 +436,7 @@ pub fn join_pred<'a, 'b>(
         tu.zk_fields.old_in_progress_callback_hash.is_eq(&zero)?,
         tu.zk_fields.is_ingest_over.clone(),
     ];
-    Ok(Boolean::kary_and(&checks)?)
+    Boolean::kary_and(&checks)
 }
 
 /// NOT BANNED, AND JUST SWEPT: the predicate a reset request carries (proved with
@@ -453,9 +449,9 @@ pub fn join_pred<'a, 'b>(
 /// increments it) and `is_ingest_over` (true only once a sweep has visited every
 /// callback). Every ban settled before that sweep was therefore absorbed. `pub_args` is
 /// the requesting ACCOUNT, bound so the proof cannot be presented by another account.
-pub fn not_banned_pred<'a, 'b>(
-    tu: &'a UserVar<F, MsgUser>,
-    _com: &'b FpVar<F>,
+pub fn not_banned_pred(
+    tu: &UserVar<F, MsgUser>,
+    _com: &FpVar<F>,
     account: FpVar<F>,
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
@@ -466,7 +462,7 @@ pub fn not_banned_pred<'a, 'b>(
         tu.data.num_interactions_since_last_scan.is_eq(&zero)?,
         tu.zk_fields.is_ingest_over.clone(),
     ];
-    Ok(Boolean::kary_and(&checks)?)
+    Boolean::kary_and(&checks)
 }
 
 fn standard_method(tu: &User<F, MsgUser>, _args: F, _priv: ()) -> User<F, MsgUser> {
@@ -528,7 +524,7 @@ fn standard_predicate<'a>(
     let x7 = tu_new.data.badge2.is_eq(&tu_old.data.badge2)?;
     let x8 = tu_new.data.badge3.is_eq(&tu_old.data.badge3)?;
 
-    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8) 
+    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8)
 }
 
 fn standard_pseudo_predicate<'a>(
@@ -633,52 +629,53 @@ fn standard_badge_request_predicate<'a>(
     let index = pub_args.i;
     let claimed = pub_args.claimed;
 
-    let is_one =  index.is_eq(&FpVar::Constant(F::from(1)))?;
+    let is_one = index.is_eq(&FpVar::Constant(F::from(1)))?;
     let is_two = index.is_eq(&FpVar::Constant(F::from(2)))?;
     let is_three = index.is_eq(&FpVar::Constant(F::from(3)))?;
 
     let is_claimed_faculty = claimed.is_eq(&FpVar::Constant(*FACULTY_F))?;
-    let is_claimed_student =  claimed.is_eq(&FpVar::Constant(*STUDENT_F))?;
-    let is_claimed_industry =  claimed.is_eq(&FpVar::Constant(*INDUSTRY_F))?;
+    let is_claimed_student = claimed.is_eq(&FpVar::Constant(*STUDENT_F))?;
+    let is_claimed_industry = claimed.is_eq(&FpVar::Constant(*INDUSTRY_F))?;
 
     let is_claimed_zero = claimed.is_eq(&FpVar::Constant(F::from(0)))?;
 
     let x9 = &is_claimed_faculty | &is_claimed_student | &is_claimed_industry | &is_claimed_zero;
 
-       
     // badge1 == 0?
-    let faculty_not_present =
-        tu_new.data.badge1.is_eq(&FpVar::Constant(F::from(0)))?;
+    let faculty_not_present = tu_new.data.badge1.is_eq(&FpVar::Constant(F::from(0)))?;
     // badge2 == 0?
-    let student_not_present =
-        tu_new.data.badge2.is_eq(&FpVar::Constant(F::from(0)))?;
-    
+    let student_not_present = tu_new.data.badge2.is_eq(&FpVar::Constant(F::from(0)))?;
+
     // faculty request antecedent
     let faculty_antecedent = is_one.clone() & is_claimed_faculty.clone();
-    
+
     // faculty implication: (!antecedent) OR student_not_present
-    let faculty_request_ok =
-        !faculty_antecedent | student_not_present.clone();
-    
+    let faculty_request_ok = !faculty_antecedent | student_not_present.clone();
+
     // student antecedent
     let student_antecedent = is_two.clone() & is_claimed_student.clone();
-    
+
     // student implication: (!antecedent) OR faculty_not_present
-    let student_request_ok =
-        !student_antecedent | faculty_not_present.clone();
-    
+    let student_request_ok = !student_antecedent | faculty_not_present.clone();
+
     // industry always ok
     let industry_antecedent = is_three.clone() & is_claimed_industry.clone();
     let industry_request_ok = !industry_antecedent | Boolean::constant(true);
-    
+
     // final result
-    let result =
-            x1 & x2 & x3 & x4 & x5
-        & x6 & x7 & x8 & x9
+    let result = x1
+        & x2
+        & x3
+        & x4
+        & x5
+        & x6
+        & x7
+        & x8
+        & x9
         & faculty_request_ok
         & student_request_ok
-        & industry_request_ok; 
-    
+        & industry_request_ok;
+
     Ok(result)
 }
 
@@ -759,8 +756,7 @@ fn standard_callback_predicate(
 
     // Update reputation
     let new_rep = &user.data.reputation + &argument;
-    u.data.reputation =
-        FpVar::conditionally_select(&is_rep, &new_rep, &user.data.reputation)?;
+    u.data.reputation = FpVar::conditionally_select(&is_rep, &new_rep, &user.data.reputation)?;
 
     // Update banned flag
     u.data.banned =
@@ -779,16 +775,8 @@ fn scan_method<CBul: PublicCallbackBul<F, Args, Cr> + Clone, const N: usize>(
     pub_args: PubScan<CBul, N>,
     priv_args: PrivScan<CBul, N>,
 ) -> User<F, MsgUser> {
-    let interaction = scan::get_scan_interaction::<
-        F,
-        MsgUser,
-        Args,
-        ArgsVar,
-        Cr,
-        CBul,
-        Poseidon<2>,
-        N,
-    >();
+    let interaction =
+        scan::get_scan_interaction::<F, MsgUser, Args, ArgsVar, Cr, CBul, Poseidon<2>, N>();
     let mut out_user = (interaction.meth.0)(tu, pub_args, priv_args);
     out_user.data.num_interactions_since_last_scan = F::ZERO;
     out_user
@@ -800,8 +788,7 @@ fn scan_predicate<CBul: PublicCallbackBul<F, Args, Cr> + Clone, const N: usize>(
     pub_args: PubScanVar<CBul, N>,
     priv_args: PrivScanVar<CBul, N>,
 ) -> ArkResult<Boolean<F>> {
-    let interaction =
-        scan::get_scan_interaction::<F, MsgUser, Args, ArgsVar, Cr, CBul, H, N>();
+    let interaction = scan::get_scan_interaction::<F, MsgUser, Args, ArgsVar, Cr, CBul, H, N>();
     let mut user_new_prime = user_new.clone();
     user_new_prime.data.num_interactions_since_last_scan =
         user_old.data.num_interactions_since_last_scan.clone();
@@ -868,9 +855,12 @@ pub fn get_standard_pseudo_rate_interaction() -> PseudoRateStandInt {
     }
 }
 
-pub fn get_badge_request_interaction() -> BadgeRequestStandInt{
+pub fn get_badge_request_interaction() -> BadgeRequestStandInt {
     Interaction {
-        meth: (standard_badge_request_method, standard_badge_request_predicate),
+        meth: (
+            standard_badge_request_method,
+            standard_badge_request_predicate,
+        ),
         callbacks: get_callbacks().try_into().unwrap(),
     }
 }
@@ -1008,12 +998,8 @@ where
     CBul::MembershipPub: std::fmt::Debug,
     CBul::NonMembershipPub: std::fmt::Debug,
 {
-    let (ps, prs) = user.get_scan_arguments::<_, _, _, _, N>(
-        cbul,
-        (true, true),
-        cur_time,
-        get_callbacks(),
-    );
+    let (ps, prs) =
+        user.get_scan_arguments::<_, _, _, _, N>(cbul, (true, true), cur_time, get_callbacks());
 
     user.interact::<H, _, _, _, _, _, _, Cr, Snark, Bul, 0>(
         rng,
@@ -1076,7 +1062,10 @@ mod fold_size_tests {
                 N => size_of_fold::<N>(),
                 panic!("FOLD_SIZES lists {n}, but dispatch_fold_size! has no arm for it"),
             );
-            assert_eq!(routed, n, "dispatch routed {n} to the wrong monomorphization");
+            assert_eq!(
+                routed, n,
+                "dispatch routed {n} to the wrong monomorphization"
+            );
         }
     }
 
@@ -1158,10 +1147,26 @@ mod callback_consistency_tests {
                 let circuit = standard_callback_predicate(&user_var, arg_var).unwrap();
 
                 let label = format!("held ({b1}, {b2}, {b3}), argument {argument}");
-                assert_eq!(circuit.data.badge1.value().unwrap(), native.data.badge1, "badge1: {label}");
-                assert_eq!(circuit.data.badge2.value().unwrap(), native.data.badge2, "badge2: {label}");
-                assert_eq!(circuit.data.badge3.value().unwrap(), native.data.badge3, "badge3: {label}");
-                assert_eq!(circuit.data.banned.value().unwrap(), native.data.banned, "banned: {label}");
+                assert_eq!(
+                    circuit.data.badge1.value().unwrap(),
+                    native.data.badge1,
+                    "badge1: {label}"
+                );
+                assert_eq!(
+                    circuit.data.badge2.value().unwrap(),
+                    native.data.badge2,
+                    "badge2: {label}"
+                );
+                assert_eq!(
+                    circuit.data.badge3.value().unwrap(),
+                    native.data.badge3,
+                    "badge3: {label}"
+                );
+                assert_eq!(
+                    circuit.data.banned.value().unwrap(),
+                    native.data.banned,
+                    "banned: {label}"
+                );
                 assert_eq!(
                     circuit.data.reputation.value().unwrap(),
                     native.data.reputation,
@@ -1180,11 +1185,10 @@ mod join_and_reset_predicate_tests {
     use ark_relations::r1cs::ConstraintSystem;
     use zk_callbacks::crypto::hash::HasherZK;
 
-    fn satisfied(
-        pred: fn(&UserVar<F, MsgUser>, &FpVar<F>, FpVar<F>, ()) -> ArkResult<Boolean<F>>,
-        user: &User<F, MsgUser>,
-        com: F,
-    ) -> bool {
+    /// A predicate over a user, its commitment and one public field element.
+    type Pred = fn(&UserVar<F, MsgUser>, &FpVar<F>, FpVar<F>, ()) -> ArkResult<Boolean<F>>;
+
+    fn satisfied(pred: Pred, user: &User<F, MsgUser>, com: F) -> bool {
         let cs = ConstraintSystem::<F>::new_ref();
         let user_var = UserVar::new_witness(cs.clone(), || Ok(user.clone())).unwrap();
         let com_var = FpVar::new_input(cs.clone(), || Ok(com)).unwrap();
@@ -1212,11 +1216,14 @@ mod join_and_reset_predicate_tests {
 
     #[test]
     fn a_doctored_object_may_not_join() {
-        let tweaks: [(&str, fn(&mut User<F, MsgUser>)); 6] = [
+        type Tweak = (&'static str, fn(&mut User<F, MsgUser>));
+        let tweaks: [Tweak; 6] = [
             ("badge", |u| u.data.badge1 = *FACULTY_F),
             ("reputation", |u| u.data.reputation = F::from(100u64)),
             ("banned flag", |u| u.data.banned = F::from(1u64)),
-            ("interactions", |u| u.data.num_interactions_since_last_scan = F::from(3u64)),
+            ("interactions", |u| {
+                u.data.num_interactions_since_last_scan = F::from(3u64)
+            }),
             ("callbacks", |u| u.zk_fields.callback_hash = F::from(9u64)),
             ("scan in progress", |u| u.zk_fields.is_ingest_over = false),
         ];
@@ -1234,7 +1241,10 @@ mod join_and_reset_predicate_tests {
     fn a_join_proves_exactly_the_committed_object() {
         let u = fresh();
         let other = <Poseidon<2>>::hash(&[F::from(7u64)]);
-        assert!(!satisfied(join_pred, &u, other), "the proof's commitment is the object");
+        assert!(
+            !satisfied(join_pred, &u, other),
+            "the proof's commitment is the object"
+        );
     }
 
     #[test]
@@ -1244,15 +1254,24 @@ mod join_and_reset_predicate_tests {
 
         let mut posted = fresh();
         posted.data.num_interactions_since_last_scan = F::from(1u64);
-        assert!(!satisfied(not_banned_pred, &posted, F::from(0u64)), "not swept since posting");
+        assert!(
+            !satisfied(not_banned_pred, &posted, F::from(0u64)),
+            "not swept since posting"
+        );
 
         let mut mid_sweep = fresh();
         mid_sweep.zk_fields.is_ingest_over = false;
-        assert!(!satisfied(not_banned_pred, &mid_sweep, F::from(0u64)), "sweep unfinished");
+        assert!(
+            !satisfied(not_banned_pred, &mid_sweep, F::from(0u64)),
+            "sweep unfinished"
+        );
 
         let mut banned = fresh();
         banned.data.banned = F::from(1u64);
-        assert!(!satisfied(not_banned_pred, &banned, F::from(0u64)), "banned");
+        assert!(
+            !satisfied(not_banned_pred, &banned, F::from(0u64)),
+            "banned"
+        );
     }
 }
 

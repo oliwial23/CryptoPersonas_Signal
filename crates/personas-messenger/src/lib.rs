@@ -45,7 +45,9 @@ use transport_api::{ConversationId, Incoming, Sent, Transport, TransportError};
 use personas_bulletin::merkle::callback::{DEFAULT_CB_MEMB_HEIGHT, DEFAULT_CB_NMEMB_HEIGHT};
 use personas_bulletin::merkle::obj::DEFAULT_OBJ_HEIGHT;
 use personas_bulletin::replica::record::{self, Ark, Eh, Flavour, PollKind, Record};
-use personas_bulletin::replica::{Config, Replica, ReplicaKeys, Status};
+use personas_bulletin::replica::{
+    Config, Replica, ReplicaKeys, Status, VIEW_CLAIM_LAG, ViewReport,
+};
 use personas_core::{F, persona};
 
 use rand::{CryptoRng, RngCore};
@@ -127,6 +129,32 @@ pub struct Messenger<
     heartbeat: Heartbeat,
     /// A proved scan not yet released (commit) or abandoned (discard).
     pending_scan: Option<PendingScan>,
+    /// When the operation under way started proving ([`OpTimings`]).
+    op_started: Option<std::time::Instant>,
+    /// How long the last operation took ([`last_op_timings`](Self::last_op_timings)).
+    last_op: OpTimings,
+    /// Records this member has already relayed after a view mismatch (§5.5); each is
+    /// relayed at most once.
+    relayed: std::collections::HashSet<Eh>,
+    /// Whether view checking (§5.5) is on: our records carry view claims, we relay
+    /// on a mismatch, and we accept relays. OFF by default (see
+    /// [`with_view_checks`](Self::with_view_checks)).
+    view_checks: bool,
+}
+
+/// How long the last operation took, split into PROVING (witness generation and the
+/// Groth16 proof) and folding the result into our own replica (verify + apply), plus the
+/// size of what it produced — for benchmarks and in-app experiment logs. Measuring costs
+/// two clock reads per operation and changes nothing else.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OpTimings {
+    pub prove_us: u64,
+    pub self_ingest_us: u64,
+    pub bytes: usize,
+}
+
+fn micros_since(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
@@ -146,7 +174,22 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             member,
             heartbeat: Heartbeat::default(),
             pending_scan: None,
+            op_started: None,
+            last_op: OpTimings::default(),
+            relayed: Default::default(),
+            view_checks: false,
         }
+    }
+
+    /// Turn view checking (§5.5) on or off. It is off by default while a privacy cost
+    /// is reviewed: a view claim reveals which records its sender had seen, so a member
+    /// who sends a record to one victim only can recognise the victim's next records
+    /// until a relay heals the split (§5.5, "Tagging"). With it off, records carry no
+    /// claim and encode exactly as before claims existed, nothing is relayed, received
+    /// relays are ignored and [`view_report`](Self::view_report) is always empty.
+    pub fn with_view_checks(mut self, on: bool) -> Self {
+        self.view_checks = on;
+        self
     }
 
     /// Set the barrier schedule this messenger buckets records against (§14). All
@@ -173,6 +216,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             member,
             heartbeat: Heartbeat::default(),
             pending_scan: None,
+            op_started: None,
+            last_op: OpTimings::default(),
+            relayed: Default::default(),
+            view_checks: false,
         })
     }
 
@@ -199,6 +246,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             member,
             heartbeat: Heartbeat::default(),
             pending_scan: None,
+            op_started: None,
+            last_op: OpTimings::default(),
+            relayed: Default::default(),
+            view_checks: false,
         })
     }
 
@@ -222,6 +273,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             member,
             heartbeat: Heartbeat::default(),
             pending_scan: None,
+            op_started: None,
+            last_op: OpTimings::default(),
+            relayed: Default::default(),
+            view_checks: false,
         }
     }
 
@@ -324,6 +379,12 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         &mut self,
         incoming: &Incoming,
     ) -> Option<Result<Status, record::CodecError>> {
+        if let Incoming::Message { body, .. } = incoming
+            && let Some((first_barrier, bytes)) = carriage::decode_relay(body)
+        {
+            let received_at = carriage::received_at(incoming);
+            return Some(self.ingest_relayed(bytes, first_barrier, received_at));
+        }
         let bytes = carriage::decode_incoming(incoming)?;
         match carriage::received_at(incoming) {
             // No service stamp (`0`, the sentinel): there is no shared clock to bucket by,
@@ -339,6 +400,86 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
                 Some(self.replica.ingest_at(bytes, first_barrier))
             }
         }
+    }
+
+    /// Ingest a record another member relayed (§5.5), placed at the barrier the relay
+    /// names but never later than the relay message itself was serviced
+    /// (`received_at_ms`, or our own barrier when there is no service stamp).
+    pub fn ingest_relayed(
+        &mut self,
+        bytes: Vec<u8>,
+        first_barrier: u64,
+        received_at_ms: u64,
+    ) -> Result<Status, record::CodecError> {
+        if !self.view_checks {
+            return Ok(Status::Rejected("view checks are off; relays are ignored"));
+        }
+        let latest = match received_at_ms {
+            0 => self.replica.current_barrier(),
+            at => self.heartbeat.barrier_at(at),
+        };
+        self.replica
+            .ingest_relayed(bytes, first_barrier.min(latest))
+    }
+
+    // --- Views (§5.5) -----------------------------------------------------------
+
+    /// How the views of the group carried by recent records compare with ours
+    /// ([`Replica::view_report`]).
+    pub fn view_report(&self) -> ViewReport {
+        if !self.view_checks {
+            return ViewReport::default();
+        }
+        self.replica.view_report()
+    }
+
+    /// The records to relay because of view mismatches, as `(first_barrier, bytes)`,
+    /// each at most once.
+    ///
+    /// For a mismatch at barrier `b`, this member relays every relayable record it holds
+    /// that was placed at `b - VIEW_CLAIM_LAG ..= b` (a join, re-join approval or admin
+    /// ban cannot be relayed: see [`Record::relayable`]). Claims are made continuously, so a view that
+    /// first differs at `b` most likely differs because of a record placed shortly
+    /// before it. A member who was missing such a record receives it this way, and a
+    /// member who is the one missing records receives the others' relays in turn. If
+    /// the messenger drops the relays too, the mismatch persists and stays visible.
+    pub fn take_relays(&mut self) -> Vec<(u64, Vec<u8>)> {
+        if !self.view_checks {
+            return Vec::new();
+        }
+        let report = self.replica.view_report();
+        let mut barriers: Vec<u64> = report.mismatches.iter().map(|m| m.barrier).collect();
+        barriers.dedup();
+        let mut out = Vec::new();
+        for b in barriers {
+            for (first_barrier, bytes) in self
+                .replica
+                .relayable_between(b.saturating_sub(VIEW_CLAIM_LAG), b)
+            {
+                if self.relayed.insert(Eh::of_bytes(&bytes)) {
+                    out.push((first_barrier, bytes));
+                }
+            }
+        }
+        out
+    }
+
+    /// The view claim to attach to a record we send now, if view checking is on.
+    fn view_claim(&self) -> Option<record::ViewClaim> {
+        self.view_checks
+            .then(|| self.replica.view_claim())
+            .flatten()
+    }
+
+    /// Relay every record [`take_relays`](Self::take_relays) returns. Returns how many.
+    pub async fn broadcast_relays(&mut self) -> Result<usize, SendError> {
+        let relays = self.take_relays();
+        for (first_barrier, bytes) in &relays {
+            let body = carriage::encode_relay(*first_barrier, bytes);
+            let outgoing = transport_api::Outgoing::new(self.conversation.clone(), body);
+            self.transport.send(outgoing).await?;
+        }
+        Ok(relays.len())
     }
 
     /// Cross exactly one barrier by hand: settle due tickets, close ban polls, re-pin
@@ -398,6 +539,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         if self.pending_scan.is_some() {
             return Err(SendError::ScanPending);
         }
+        self.op_started = Some(std::time::Instant::now());
         let record = self
             .member
             .as_ref()
@@ -415,6 +557,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         if self.member.is_none() {
             return Err(SendError::Observer);
         }
+        // No proof: nothing to time but the fold.
+        self.op_started = None;
         self.emit(Record::Ban { target })
     }
 
@@ -422,6 +566,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         if self.member.is_none() {
             return Err(SendError::Observer);
         }
+        // No proof: nothing to time but the fold.
+        self.op_started = None;
         self.emit(Record::RejoinApprove {
             account: Ark(account),
         })
@@ -439,7 +585,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             let (replica, member) = self.parts_mut()?;
             member.not_banned(rng, replica.obj_store(), account)?
         };
-        Ok(personas_core::encode_not_banned_proof(&proof, &[account, root])?)
+        let out = personas_core::encode_not_banned_proof(&proof, &[account, root])?;
+        self.record_proof_only(out.len());
+        Ok(out)
     }
 
     /// Start over as a brand-new member (fresh object, new secret key), keeping the
@@ -516,6 +664,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         if self.member.is_none() {
             return Err(SendError::Observer);
         }
+        self.op_started = None;
         self.emit(member::open_poll(question, options, kind, target))
     }
 
@@ -586,7 +735,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         // SIGNATURE-based store, which exposes membership differently, so copying its
         // layout into the Merkle path was wrong.
         let inputs = [context_a, claimed_a, context_b, claimed_b, root];
-        Ok(personas_core::encode_authorship_proof(&proof, &inputs)?)
+        let out = personas_core::encode_authorship_proof(&proof, &inputs)?;
+        self.record_proof_only(out.len());
+        Ok(out)
     }
 
     /// Emit a badge REQUEST (files the ticket an approver invokes).
@@ -606,11 +757,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     ///
     /// Needs no member proof — it is an admin's say-so — but still goes through `emit`
     /// so every replica folds it in and reaches the same verdict.
-    pub fn emit_badge_approve(
-        &mut self,
-        target: Eh,
-        slot: u8,
-    ) -> Result<Emitted, SendError> {
+    pub fn emit_badge_approve(&mut self, target: Eh, slot: u8) -> Result<Emitted, SendError> {
+        // No proof: nothing to time but the fold.
+        self.op_started = None;
         self.emit(Record::BadgeApprove { target, slot })
     }
 
@@ -631,7 +780,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             member.badge(rng, replica.obj_store(), i, badge)?
         };
         // pub_args first, then the root — the Merkle convention.
-        Ok(personas_core::encode_badge_proof(&proof, &[i, badge, root])?)
+        let out = personas_core::encode_badge_proof(&proof, &[i, badge, root])?;
+        self.record_proof_only(out.len());
+        Ok(out)
     }
 
     /// Produce a scan absorbing every callback invoked on this member since its last
@@ -666,10 +817,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     // object is safe to spend. Nothing else can be produced while a scan is pending.
 
     /// Prove a scan without releasing it. Returns its envelope hash only.
-    pub fn prepare_scan(
-        &mut self,
-        rng: &mut (impl CryptoRng + RngCore),
-    ) -> Result<Eh, SendError> {
+    pub fn prepare_scan(&mut self, rng: &mut (impl CryptoRng + RngCore)) -> Result<Eh, SendError> {
         let (record, before, memb_root, nmemb_root) = {
             let (replica, member) = self.parts_mut()?;
             let before = member.user.clone();
@@ -678,7 +826,12 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             let record = member.scan(rng, replica.obj_store(), cbs)?;
             (record, before, memb_root, nmemb_root)
         };
-        let (bytes, eh) = record::encode(&record)?;
+        let (bytes, eh) = record::encode_with_view(&record, self.view_claim())?;
+        self.last_op = OpTimings {
+            prove_us: self.op_started.take().map_or(0, micros_since),
+            self_ingest_us: 0,
+            bytes: bytes.len(),
+        };
         self.pending_scan = Some(PendingScan {
             emitted: Emitted {
                 bytes,
@@ -705,7 +858,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     /// this it can no longer be discarded.
     pub fn commit_scan(&mut self) -> Result<Emitted, SendError> {
         let pending = self.pending_scan.take().ok_or(SendError::NoPreparedScan)?;
+        let started = std::time::Instant::now();
         let _ = self.replica.ingest(pending.emitted.bytes.clone());
+        self.last_op.self_ingest_us = micros_since(started);
         Ok(pending.emitted)
     }
 
@@ -808,6 +963,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         while let Some(event) = stream.next().await {
             let mut m = this.lock().await;
             if m.ingest_incoming(&event).is_some() {
+                // Relays are best effort: a failed send leaves the mismatch visible.
+                let _ = m.broadcast_relays().await;
                 on_update(&m);
             }
         }
@@ -822,11 +979,35 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         if self.pending_scan.is_some() {
             return Err(SendError::ScanPending);
         }
-        let (bytes, eh) = record::encode(&record)?;
+        let prove_us = self.op_started.take().map_or(0, micros_since);
+        // Every record carries the sender's view of the group, so receivers can check
+        // that the messenger showed everyone the same records (§5.5).
+        let (bytes, eh) = record::encode_with_view(&record, self.view_claim())?;
         let persona = persona_for(&record);
         // Idempotent by `eh`, so the echo the transport later delivers is deduped.
+        let started = std::time::Instant::now();
         let _ = self.replica.ingest(bytes.clone());
+        self.last_op = OpTimings {
+            prove_us,
+            self_ingest_us: micros_since(started),
+            bytes: bytes.len(),
+        };
         Ok(Emitted { bytes, eh, persona })
+    }
+
+    /// Timings of the last operation ([`OpTimings`]).
+    pub fn last_op_timings(&self) -> OpTimings {
+        self.last_op
+    }
+
+    // A proof that is not a record (authorship, badge possession, not banned): proving
+    // only, nothing folded into the replica.
+    fn record_proof_only(&mut self, bytes: usize) {
+        self.last_op = OpTimings {
+            prove_us: self.op_started.take().map_or(0, micros_since),
+            self_ingest_us: 0,
+            bytes,
+        };
     }
 
     /// Split the disjoint `replica`/`member` fields so a produce step can read the
@@ -836,6 +1017,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         if self.pending_scan.is_some() {
             return Err(SendError::ScanPending);
         }
+        // ...so this is where proving starts, for OpTimings.
+        self.op_started = Some(std::time::Instant::now());
         let member = self.member.as_mut().ok_or(SendError::Observer)?;
         Ok((&self.replica, member))
     }

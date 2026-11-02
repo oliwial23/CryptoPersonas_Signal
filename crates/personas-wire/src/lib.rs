@@ -233,7 +233,9 @@ pub mod raw {
 
     pub const COMPRESS: Compress = Compress::No;
 
-    pub fn encode<T: CanonicalSerialize>(value: &T) -> std::result::Result<Vec<u8>, ark_serialize::SerializationError> {
+    pub fn encode<T: CanonicalSerialize>(
+        value: &T,
+    ) -> std::result::Result<Vec<u8>, ark_serialize::SerializationError> {
         let mut bytes = Vec::new();
         value.serialize_with_mode(&mut bytes, COMPRESS)?;
         Ok(bytes)
@@ -245,6 +247,15 @@ pub mod raw {
         bytes: &[u8],
     ) -> std::result::Result<T, ark_serialize::SerializationError> {
         T::deserialize_with_mode(bytes, COMPRESS, Validate::No)
+    }
+}
+
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reader")
+            .field("kind", &self.kind)
+            .field("consumed", &self.cursor.position())
+            .finish()
     }
 }
 
@@ -324,8 +335,9 @@ mod tests {
     #[test]
     fn curve_points_halve() {
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(7);
-        let points: Vec<ark_bn254::G1Affine> =
-            (0..16).map(|_| ark_bn254::G1Affine::rand(&mut rng)).collect();
+        let points: Vec<ark_bn254::G1Affine> = (0..16)
+            .map(|_| ark_bn254::G1Affine::rand(&mut rng))
+            .collect();
 
         let record = encode_one(Kind::Predicate, &points).unwrap();
         let uncompressed = raw::encode(&points).unwrap();
@@ -352,14 +364,5 @@ mod tests {
             record.len() - uncompressed.len() < 32,
             "the envelope should cost a header, not a multiple"
         );
-    }
-}
-
-impl std::fmt::Debug for Reader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Reader")
-            .field("kind", &self.kind)
-            .field("consumed", &self.cursor.position())
-            .finish()
     }
 }

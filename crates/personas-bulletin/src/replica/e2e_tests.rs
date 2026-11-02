@@ -158,7 +158,8 @@ fn e2e_convergence_out_of_order_delivery() {
     // apply both records.
     let mut roots = Vec::new();
     for order in [vec![&join_b, &post_b], vec![&post_b, &join_b]] {
-        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default()).trust_unproven_joins_for_tests();
+        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default())
+            .trust_unproven_joins_for_tests();
         for bytes in order {
             r.ingest(bytes.clone()).unwrap();
         }
@@ -207,7 +208,8 @@ fn e2e_double_spend_resolves_to_one_winner_everywhere() {
         vec![&b_by, &a_by, &join_by],
         vec![&a_by, &join_by, &b_by],
     ] {
-        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default()).trust_unproven_joins_for_tests();
+        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), Config::default())
+            .trust_unproven_joins_for_tests();
         for bytes in order {
             r.ingest(bytes.clone()).unwrap();
         }
@@ -454,7 +456,8 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
         vec![3, 0, 5, 1, 6, 2, 4],
     ];
     for order in orders {
-        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), config).trust_unproven_joins_for_tests();
+        let mut r =
+            Replica::<OH, MH, NH>::new(keys.clone(), config).trust_unproven_joins_for_tests();
         for &i in &order {
             r.ingest(base[i].clone()).unwrap();
         }
@@ -527,4 +530,75 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
     );
     // T's object, having absorbed BAN_FLAG, is now banned.
     assert_eq!(t_good.data.banned, F::from(1), "the scan set banned = 1");
+}
+
+#[test]
+#[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+fn verifying_with_a_prepared_key_gives_the_same_answers() {
+    // The replica verifies against keys prepared once (PreparedVk) instead of through
+    // `verify_interaction` / `Snark::verify`, which re-prepare the key every call. That
+    // must change nothing but the speed: same answer for a valid proof, and for every
+    // way of naming the wrong public inputs.
+    use zk_callbacks::generic::bulletin::UserBul;
+    let mut rng = StdRng::seed_from_u64(91);
+    let (pk, vk) = standard_keys(&mut rng);
+    let (mut user, join) = make_user(&mut rng);
+    let mut obj = ObjT::new();
+    obj.push(join_object(&join), F::from(0), vec![]);
+    let Record::Post { exec, obj_root, .. } = anon_post(&mut rng, &mut user, &obj, &pk, "x") else {
+        unreachable!()
+    };
+    let exec = exec.0;
+    let prepared = personas_core::PreparedVk::new(&vk);
+    let fresh = ObjT::new();
+    let cases = [
+        ("valid", exec.new_object, exec.old_nullifier, obj_root.0),
+        (
+            "wrong root",
+            exec.new_object,
+            exec.old_nullifier,
+            obj_root.0 + F::from(1),
+        ),
+        (
+            "wrong nullifier",
+            exec.new_object,
+            exec.old_nullifier + F::from(1),
+            obj_root.0,
+        ),
+        (
+            "wrong object",
+            exec.new_object + F::from(1),
+            exec.old_nullifier,
+            obj_root.0,
+        ),
+    ];
+    for (i, (label, object, nul, root)) in cases.into_iter().enumerate() {
+        let library = <ObjT as UserBul<F, MsgUser>>::verify_interaction::<F, Snark, 1>(
+            &fresh,
+            object,
+            nul,
+            F::from(0),
+            exec.cb_com_list,
+            exec.proof.clone(),
+            Some(root),
+            &vk,
+        );
+        let mut cache = std::collections::HashMap::new();
+        let ours = super::memo_interaction::<OH, _, 1>(
+            &mut cache,
+            Eh([i as u8; 32]),
+            &prepared,
+            object,
+            nul,
+            F::from(0),
+            exec.cb_com_list,
+            &exec.proof,
+            root,
+        );
+        assert_eq!(
+            ours, library,
+            "{label}: prepared and library checks must agree"
+        );
+        assert_eq!(ours, label == "valid", "{label}");
+    }
 }

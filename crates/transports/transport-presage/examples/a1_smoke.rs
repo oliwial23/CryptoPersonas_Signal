@@ -141,7 +141,9 @@ async fn main() -> Result<()> {
             // surface an error from its post-send bookkeeping (save_message / self-sync
             // profile fetch) racing the short-lived websocket teardown. Delivery is what we
             // test here, so warn and let B's receive be the source of truth.
-            Err(e) => println!("      ⚠ send_message returned {e:?} — continuing to check delivery"),
+            Err(e) => {
+                println!("      ⚠ send_message returned {e:?} — continuing to check delivery")
+            }
         }
 
         println!("[4/4] B draining its queue (attempt {attempt}/{MAX_ATTEMPTS})…");

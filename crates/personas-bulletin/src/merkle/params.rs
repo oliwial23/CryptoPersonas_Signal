@@ -27,20 +27,22 @@
 
 use std::path::Path;
 
+use ark_r1cs_std::fields::fp::FpVar;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
 use personas_core::circuits::{
-    join_pred, not_banned_pred,
     BadgesArgs, BadgesArgsVar, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsPair,
     PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, PubScan, ScanInt, authorship_pred,
     badge_pred, get_badge_request_interaction, get_callbacks, get_scan_interaction,
     get_standard_interaction, get_standard_pseudo_interaction,
-    get_standard_pseudo_rate_interaction, pseudonym_pred,
+    get_standard_pseudo_rate_interaction, join_pred, not_banned_pred, pseudonym_pred,
 };
 use personas_core::params::ServerKeys;
 use personas_core::{Cr, F, H, PK, Snark, VK};
-use ark_r1cs_std::fields::fp::FpVar;
-use zk_callbacks::generic::interaction::{generate_keys_for_statement, generate_keys_for_statement_in};
+use zk_callbacks::generic::interaction::{
+    generate_keys_for_statement, generate_keys_for_statement_in,
+};
 use zk_callbacks::generic::object::Time;
 
 use super::callback::{DEFAULT_CB_MEMB_HEIGHT, DEFAULT_CB_NMEMB_HEIGHT, MerkleCallbackStore};
@@ -251,8 +253,8 @@ pub fn merkle_scan_pubdata<const MH: usize, const NH: usize, const N: usize>(
     }
 }
 
-/// Generate all Groth16 key sets for Merkle mode, at the production default
-/// heights.
+/// Generate every Merkle-mode circuit's key pair under SNARK `S`, at the production
+/// default heights.
 ///
 /// Structurally identical to [`personas_core::params::generate_server_keys`] but
 /// with `None` object membership (root = public input) throughout and the scan
@@ -262,19 +264,19 @@ pub fn merkle_scan_pubdata<const MH: usize, const NH: usize, const N: usize>(
 /// `cstore` supplies only the scan circuit's bulletin handle — the keys do **not**
 /// bake in its contents (that is the whole point), so a fresh
 /// [`MerkleCStore::default`] is a fine argument.
-pub fn generate_merkle_server_keys(
+pub fn generate_merkle_circuit_keys<S: SNARK<F>>(
     rng: &mut (impl CryptoRng + RngCore),
     cstore: &MerkleCStore,
-) -> ServerKeys {
+) -> MerkleCircuitKeys<S> {
     let (standard_proving_key, standard_verifying_key) = get_standard_interaction()
-        .generate_keys::<H, Snark, Cr, MerkleOStore>(rng, None, F::from(0), false);
+        .generate_keys::<H, S, Cr, MerkleOStore>(rng, None, F::from(0), false);
 
     let dummy_pseudo = PseudonymArgs {
         context: F::from(0),
         claimed: F::from(0),
     };
     let (standard_pseudo_proving_key, standard_pseudo_verifying_key) =
-        get_standard_pseudo_interaction().generate_keys::<H, Snark, Cr, MerkleOStore>(
+        get_standard_pseudo_interaction().generate_keys::<H, S, Cr, MerkleOStore>(
             rng,
             None,
             dummy_pseudo.clone(),
@@ -287,7 +289,7 @@ pub fn generate_merkle_server_keys(
         claimed: F::from(0),
     };
     let (standard_pseudor_proving_key, standard_pseudor_verifying_key) =
-        get_standard_pseudo_rate_interaction().generate_keys::<H, Snark, Cr, MerkleOStore>(
+        get_standard_pseudo_rate_interaction().generate_keys::<H, S, Cr, MerkleOStore>(
             rng,
             None,
             dummy_pseudo_rate,
@@ -299,7 +301,7 @@ pub fn generate_merkle_server_keys(
         claimed: F::from(0),
     };
     let (badge_request_proving_key, badge_request_verifying_key) = get_badge_request_interaction()
-        .generate_keys::<H, Snark, Cr, MerkleOStore>(
+        .generate_keys::<H, S, Cr, MerkleOStore>(
         rng,
         None,
         dummy_badge_request.clone(),
@@ -313,7 +315,7 @@ pub fn generate_merkle_server_keys(
         NUM_SCANS_PER_FOLD,
     >(cstore, Time::default());
     let (scan_proving_key, scan_verifying_key) =
-        scan_interaction.generate_keys::<H, Snark, Cr, MerkleOStore>(rng, None, dummy_scan, true);
+        scan_interaction.generate_keys::<H, S, Cr, MerkleOStore>(rng, None, dummy_scan, true);
 
     let (pseudonym_pred_proving_key, pseudonym_pred_verifying_key) =
         generate_keys_for_statement_in::<
@@ -324,7 +326,7 @@ pub fn generate_merkle_server_keys(
             PseudonymArgsVar<F>,
             (),
             (),
-            Snark,
+            S,
             MerkleOStore,
         >(rng, pseudonym_pred, None, dummy_pseudo.clone());
 
@@ -341,7 +343,7 @@ pub fn generate_merkle_server_keys(
             PseudonymArgsPairVar<F>,
             (),
             (),
-            Snark,
+            S,
             MerkleOStore,
         >(rng, authorship_pred, None, dummy_author);
 
@@ -354,48 +356,85 @@ pub fn generate_merkle_server_keys(
             BadgesArgsVar<F>,
             (),
             (),
-            Snark,
+            S,
             MerkleOStore,
         >(rng, badge_pred, None, dummy_badge_request);
 
     // A join proves its object is fresh: a statement about the object alone (no
     // membership — it is not in any tree yet), its commitment the first public input.
     let (join_pred_proving_key, join_pred_verifying_key) =
-        generate_keys_for_statement::<F, H, MsgUser, F, FpVar<F>, (), (), Snark>(
+        generate_keys_for_statement::<F, H, MsgUser, F, FpVar<F>, (), (), S>(
             rng,
             join_pred,
             F::from(0u64),
         );
     // A reset request proves a CURRENT object (membership) is unbanned and just swept.
     let (not_banned_pred_proving_key, not_banned_pred_verifying_key) =
-        generate_keys_for_statement_in::<F, H, MsgUser, F, FpVar<F>, (), (), Snark, MerkleOStore>(
+        generate_keys_for_statement_in::<F, H, MsgUser, F, FpVar<F>, (), (), S, MerkleOStore>(
             rng,
             not_banned_pred,
             None,
             F::from(0u64),
         );
 
+    MerkleCircuitKeys {
+        standard: (standard_proving_key, standard_verifying_key),
+        scan: (scan_proving_key, scan_verifying_key),
+        pseudonym_pred: (pseudonym_pred_proving_key, pseudonym_pred_verifying_key),
+        authorship_pred: (authorship_pred_proving_key, authorship_pred_verifying_key),
+        badge_pred: (badge_pred_proving_key, badge_pred_verifying_key),
+        standard_pseudo: (standard_pseudo_proving_key, standard_pseudo_verifying_key),
+        standard_pseudor: (standard_pseudor_proving_key, standard_pseudor_verifying_key),
+        badge_request: (badge_request_proving_key, badge_request_verifying_key),
+        join_pred: (join_pred_proving_key, join_pred_verifying_key),
+        not_banned_pred: (not_banned_pred_proving_key, not_banned_pred_verifying_key),
+    }
+}
+
+/// Every Merkle-mode circuit's key pair, under any SNARK `S`. With Groth16 these are the
+/// production keys ([`generate_merkle_server_keys`]); with a counting stand-in they are
+/// the circuits' sizes (the benchmark harness), from the very same circuit definitions.
+pub struct MerkleCircuitKeys<S: SNARK<F>> {
+    pub standard: (S::ProvingKey, S::VerifyingKey),
+    pub scan: (S::ProvingKey, S::VerifyingKey),
+    pub pseudonym_pred: (S::ProvingKey, S::VerifyingKey),
+    pub authorship_pred: (S::ProvingKey, S::VerifyingKey),
+    pub badge_pred: (S::ProvingKey, S::VerifyingKey),
+    pub standard_pseudo: (S::ProvingKey, S::VerifyingKey),
+    pub standard_pseudor: (S::ProvingKey, S::VerifyingKey),
+    pub badge_request: (S::ProvingKey, S::VerifyingKey),
+    pub join_pred: (S::ProvingKey, S::VerifyingKey),
+    pub not_banned_pred: (S::ProvingKey, S::VerifyingKey),
+}
+
+/// Generate all Groth16 key sets for Merkle mode, at the production default
+/// heights ([`generate_merkle_circuit_keys`] with Groth16).
+pub fn generate_merkle_server_keys(
+    rng: &mut (impl CryptoRng + RngCore),
+    cstore: &MerkleCStore,
+) -> ServerKeys {
+    let k = generate_merkle_circuit_keys::<Snark>(rng, cstore);
     ServerKeys {
-        standard_proving_key,
-        standard_verifying_key,
-        scan_proving_key,
-        scan_verifying_key,
-        pseudonym_pred_proving_key,
-        pseudonym_pred_verifying_key,
-        authorship_pred_proving_key,
-        authorship_pred_verifying_key,
-        badge_pred_proving_key,
-        badge_pred_verifying_key,
-        standard_pseudo_proving_key,
-        standard_pseudo_verifying_key,
-        standard_pseudor_proving_key,
-        standard_pseudor_verifying_key,
-        badge_request_proving_key,
-        badge_request_verifying_key,
-        join_pred_proving_key,
-        join_pred_verifying_key,
-        not_banned_pred_proving_key,
-        not_banned_pred_verifying_key,
+        standard_proving_key: k.standard.0,
+        standard_verifying_key: k.standard.1,
+        scan_proving_key: k.scan.0,
+        scan_verifying_key: k.scan.1,
+        pseudonym_pred_proving_key: k.pseudonym_pred.0,
+        pseudonym_pred_verifying_key: k.pseudonym_pred.1,
+        authorship_pred_proving_key: k.authorship_pred.0,
+        authorship_pred_verifying_key: k.authorship_pred.1,
+        badge_pred_proving_key: k.badge_pred.0,
+        badge_pred_verifying_key: k.badge_pred.1,
+        standard_pseudo_proving_key: k.standard_pseudo.0,
+        standard_pseudo_verifying_key: k.standard_pseudo.1,
+        standard_pseudor_proving_key: k.standard_pseudor.0,
+        standard_pseudor_verifying_key: k.standard_pseudor.1,
+        badge_request_proving_key: k.badge_request.0,
+        badge_request_verifying_key: k.badge_request.1,
+        join_pred_proving_key: k.join_pred.0,
+        join_pred_verifying_key: k.join_pred.1,
+        not_banned_pred_proving_key: k.not_banned_pred.0,
+        not_banned_pred_verifying_key: k.not_banned_pred.1,
     }
 }
 

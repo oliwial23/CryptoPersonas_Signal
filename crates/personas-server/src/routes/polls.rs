@@ -99,11 +99,7 @@ async fn open(
         } else {
             body.clone()
         },
-        options: if is_ban {
-            vec!["Yes".into(), "No".into()]
-        } else {
-            vec!["Yes".into(), "No".into()]
-        },
+        options: vec!["Yes".into(), "No".into()],
         kind: if is_ban {
             PollKind::Ban
         } else {
@@ -481,10 +477,7 @@ pub async fn slack_vote(
 
     let transport = state.read().await.slack.transport.clone();
     transport
-        .send(Outgoing::new(
-            ConversationId(input.channel),
-            announcement,
-        ))
+        .send(Outgoing::new(ConversationId(input.channel), announcement))
         .await?;
 
     Ok(ok())

@@ -26,6 +26,12 @@ export interface EngineOptions {
    */
   heartbeatAnchorMs?: number;
   heartbeatPeriodMs?: number;
+  /**
+   * View checking (SERVERLESS_PROTOCOL.md §5.5): records carry the sender's view of the
+   * group, mismatches are reported and missing records relayed. Default false, pending
+   * review of its privacy cost.
+   */
+  viewChecks?: boolean;
   /** A member's saved private state (exportMemberState) to continue as. SECRET. */
   memberState?: Buffer;
   /** A file to journal every seen record to, and to restore the replica from. */
@@ -49,6 +55,25 @@ export interface IngestStatus {
   reason?: string;
   /** The ingested record's envelope hash (hex); use `logEntry` to fetch its post. */
   eh: string;
+}
+
+/** How the views of the group carried by recent records compare with ours. */
+export interface ViewReport {
+  /** Some member saw a different set of records than we did. Tell the user. */
+  diverged: boolean;
+  /** Claims that match our view. */
+  agreeing: number;
+  /** Claims too recent to check yet. */
+  pending: number;
+  /** The records whose claims disagree, oldest barrier first. */
+  mismatches: Array<{ barrier: number; eh: string }>;
+}
+
+/** A record to relay to the group because views disagree. */
+export interface Relay {
+  /** The barrier we placed the record at; send it alongside the record. */
+  barrier: number;
+  record: Buffer;
 }
 
 /** One structured chat-log entry, for the UI. */
@@ -104,7 +129,9 @@ export class Engine {
   /** Joins applied and re-joins approved for `account`. */
   joinCounts(account: string): { joins: number; approved: number };
   /** For a join or re-join approval: which, and the account it names (hex). */
-  recordAccountClaim(record: Buffer): { kind: 'join' | 'rejoin-approve' | 'ban'; account: string } | null;
+  recordAccountClaim(
+    record: Buffer
+  ): { kind: 'join' | 'rejoin-approve' | 'ban'; account: string } | null;
   /** Emit a pseudonymous post under `context`. Real Groth16 proof — seconds. */
   emitPostPseudo(body: string, context: number): Emitted;
   /** Emit an anonymous post (no linkable persona). */
@@ -130,6 +157,16 @@ export class Engine {
    * receive timestamp for barrier bucketing; pass 0 for the local-barrier path.
    */
   ingest(record: Buffer, receivedAtMs: number): IngestStatus;
+  /**
+   * Ingest a record another member RELAYED because views disagreed, at the `barrier`
+   * the relay names. `receivedAtMs` is the relay message's own service timestamp; the
+   * record is never placed after it. A record we already hold is left where it is.
+   */
+  ingestRelayed(record: Buffer, barrier: number, receivedAtMs: number): IngestStatus;
+  /** Whether received records carry views of the group that match ours. */
+  viewReport(): ViewReport;
+  /** The records to relay because views disagree, each returned once. */
+  takeRelays(): Array<Relay>;
 
   /** Accepted chat log as display lines (`~petname: msg`, flagged where revoked). */
   render(): Array<string>;
@@ -147,6 +184,15 @@ export class Engine {
 
   /** Convergence fingerprint: the three replica roots as concatenated hex. */
   fingerprint(): string;
+  /** EXPERIMENTS: how long the last emit, scan or proof took. */
+  lastOpTimings(): { proveMs: number; selfIngestMs: number; bytes: number };
+  /** EXPERIMENTS: the latest barrier that invoked callbacks, and its cost. */
+  lastSettleTimings(): {
+    barrier: number;
+    invoked: number;
+    invokeMs: number;
+    epochUpdateMs: number;
+  } | null;
   /** The barrier this replica is currently at. */
   currentBarrier(): number;
   /**

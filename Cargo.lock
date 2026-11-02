@@ -3409,6 +3409,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "personas-bench"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ff",
+ "ark-grumpkin",
+ "ark-relations",
+ "ark-serialize",
+ "ark-snark",
+ "ark-std",
+ "folding-schemes",
+ "personas-bulletin",
+ "personas-core",
+ "personas-messenger",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "transport-api",
+ "transport-mock",
+ "zk-callbacks",
+]
+
+[[package]]
 name = "personas-bulletin"
 version = "0.1.0"
 dependencies = [
@@ -6725,7 +6748,6 @@ dependencies = [
 [[package]]
 name = "zk-callbacks"
 version = "0.1.0"
-source = "git+https://github.com/hkailad/callbacks.git?rev=d6618793ce34cdb2fb987b1d6569f0f23f369d3e#d6618793ce34cdb2fb987b1d6569f0f23f369d3e"
 dependencies = [
  "ark-bls12-377",
  "ark-bls12-381",
@@ -6751,7 +6773,6 @@ dependencies = [
 [[package]]
 name = "zk-object"
 version = "0.1.0"
-source = "git+https://github.com/hkailad/callbacks.git?rev=d6618793ce34cdb2fb987b1d6569f0f23f369d3e#d6618793ce34cdb2fb987b1d6569f0f23f369d3e"
 dependencies = [
  "proc-macro2",
  "quote",

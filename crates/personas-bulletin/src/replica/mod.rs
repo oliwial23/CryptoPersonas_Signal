@@ -54,15 +54,18 @@
 //!
 //! # Scope (d3)
 //!
-//! Built here: the accept rules for `Join`/`Post`/`Scan`/`Vote`/`Rate`/`PollOpen`,
-//! the object-root window, nullifier-first-wins, the event-driven [`Replica::barrier`]
-//! that fires the **derived** triggers (poll-ban close and reputation settlement,
-//! §7) and re-pins the callback root, the tallies and persona cache, and
-//! append-only journal persistence. Deferred to their workstreams: the messenger
-//! receive loop / rendering / `Snapshot` late-join (d4); the settlement-heartbeat
-//! *cadence* that drives `barrier()` (d5); `FoldScan` (off by default, §13); and
-//! the *authorized* triggers `BanInvoke`/`BadgeGrant`, which need the config
-//! authority-key list (their derived cousin, the poll-ban, is implemented).
+//! Built here: the accept rules for every [`Record`] kind; the object-root window;
+//! nullifier-first-wins; the barriers ([`Replica::advance_to`]) that fire the
+//! **derived** triggers (poll-ban close and reputation settlement, §7) and re-pin the
+//! callback root; the tallies and persona cache; view digests and claims (§5.5); and
+//! append-only journal persistence. The messenger receive loop, rendering and late
+//! join live in `personas-messenger`, and the heartbeat that drives the barriers in
+//! its `Heartbeat`. `FoldScan` is off by default (§13).
+//!
+//! The *authorized* triggers are not authenticated here. An admin [`Record::Ban`] and
+//! [`Record::RejoinApprove`] are accepted by the client only from a Signal group admin
+//! (they travel under the admin's own account), and a [`Record::BadgeApprove`] is not
+//! checked at all; see its docs. The signed authority keys of §7/§11 are not built.
 
 pub mod record;
 pub mod tally;
@@ -76,15 +79,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use ark_ff::PrimeField;
+use ark_ff::ToConstraintField;
 use ark_snark::SNARK;
+use personas_core::PreparedVk;
 use zk_callbacks::crypto::enc::AECipherSigZK;
-use zk_callbacks::generic::bulletin::{CallbackBul, UserBul};
+use zk_callbacks::generic::bulletin::CallbackBul;
 use zk_callbacks::generic::object::Time;
 use zk_callbacks::impls::centralized::crypto::FakeSigPrivkey;
 
 use personas_core::circuits::{
-    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, MsgUser, RATE_LIMITED_PERSONAS_PER_CONTEXT, NUM_SCANS_PER_FOLD,
-    BadgesArgs, PseudonymArgs, PseudonymArgsRate, arg_rep,
+    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, BadgesArgs, NUM_SCANS_PER_FOLD, PseudonymArgs,
+    PseudonymArgsRate, RATE_LIMITED_PERSONAS_PER_CONTEXT, arg_rep,
 };
 use personas_core::params::ServerKeys;
 use personas_core::{Cr, F, Snark, VK};
@@ -119,6 +124,31 @@ pub struct ReplicaKeys {
     pub badge_request: VK,
     /// A join's freshness proof (`join_pred`).
     pub join: VK,
+}
+
+/// [`ReplicaKeys`], each prepared once for verification ([`PreparedVk`]).
+pub(crate) struct PreparedKeys {
+    standard: PreparedVk,
+    pseudo: PreparedVk,
+    pseudo_rate: PreparedVk,
+    scan: PreparedVk,
+    pseudonym_pred: PreparedVk,
+    badge_request: PreparedVk,
+    join: PreparedVk,
+}
+
+impl PreparedKeys {
+    fn new(keys: &ReplicaKeys) -> Self {
+        Self {
+            standard: PreparedVk::new(&keys.standard),
+            pseudo: PreparedVk::new(&keys.pseudo),
+            pseudo_rate: PreparedVk::new(&keys.pseudo_rate),
+            scan: PreparedVk::new(&keys.scan),
+            pseudonym_pred: PreparedVk::new(&keys.pseudonym_pred),
+            badge_request: PreparedVk::new(&keys.badge_request),
+            join: PreparedVk::new(&keys.join),
+        }
+    }
 }
 
 impl ReplicaKeys {
@@ -181,6 +211,9 @@ struct Seen {
     /// The `current_barrier` when this record was first ingested. Settlement and
     /// poll-close are measured from it (§7, §8).
     first_barrier: u64,
+    /// The sender's view of the group when it sent the record, if it carried one
+    /// ([`Replica::view_report`]).
+    view: Option<record::ViewClaim>,
 }
 
 /// A serverless replica: the ordered log in, a convergent bulletin out.
@@ -189,7 +222,8 @@ pub struct Replica<
     const MH: usize = DEFAULT_CB_MEMB_HEIGHT,
     const NH: usize = DEFAULT_CB_NMEMB_HEIGHT,
 > {
-    keys: ReplicaKeys,
+    /// The verifying keys, each prepared once for verification.
+    prepared: PreparedKeys,
     config: Config,
 
     /// Every record seen, keyed and *ordered* by envelope hash — the §4 tiebreak
@@ -203,18 +237,16 @@ pub struct Replica<
     current_barrier: u64,
 
     // --- Derived by rebuild (a pure function of the fields above) --------------
-    obj: MerkleObjStore<F, OH>,
-    cbs: MerkleCallbackStore<F, MH, NH>,
-    /// Object roots produced so far, within the last-`K` window — the set a
-    /// membership proof may pin against.
-    produced: HashSet<[u8; 32]>,
-    produced_order: VecDeque<[u8; 32]>,
-    derived: Derived,
-    statuses: HashMap<Eh, Status>,
+    /// The bulletin as it stands at the end of barrier `state_at` (== `current_barrier`
+    /// after every rebuild): object tree, callback sets, produced roots, tallies, log
+    /// and statuses.
+    state: BuildState<OH, MH, NH>,
+    state_at: u64,
 
     /// The rebuild's state at the end of each of the last [`CHECKPOINT_BARRIERS`]
-    /// barriers, so a change replays from where it can first matter instead of from
-    /// genesis (see the module docs). Always holds `current_barrier` after a rebuild.
+    /// barriers BEFORE `state_at`, so a change replays from where it can first matter
+    /// instead of from genesis (see the module docs). The end of `state_at` itself is
+    /// `state`, kept once rather than copied.
     checkpoints: std::collections::BTreeMap<u64, BuildState<OH, MH, NH>>,
 
     /// TEST BUILDS ONLY: accept a join without checking its freshness proof, for the
@@ -223,26 +255,38 @@ pub struct Replica<
 
     /// Append-only journal of accepted record bytes; replayed on [`Replica::open`].
     journal: Option<PathBuf>,
+
+    /// The latest barrier at which callbacks were invoked, and how long that took
+    /// ([`SettleTimings`]). For benchmarks; nothing reads it otherwise.
+    last_settle: Option<(u64, SettleTimings)>,
+}
+
+/// What a barrier's settlement cost: the callbacks invoked ("post callback" — encrypt the
+/// argument and append it to the called set) and the epoch update that follows (re-pinning
+/// the non-membership root over the grown called set).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SettleTimings {
+    pub invoked: u32,
+    pub invoke_us: u64,
+    pub epoch_update_us: u64,
 }
 
 impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     /// A fresh in-memory replica (no persistence).
     pub fn new(keys: ReplicaKeys, config: Config) -> Self {
+        let genesis = BuildState::genesis(config.root_window);
         let mut r = Self {
-            keys,
+            prepared: PreparedKeys::new(&keys),
             config,
             seen: std::collections::BTreeMap::new(),
             verify_cache: HashMap::new(),
             current_barrier: 0,
-            obj: MerkleObjStore::new(),
-            cbs: MerkleCallbackStore::new(),
-            produced: HashSet::new(),
-            produced_order: VecDeque::new(),
-            derived: Derived::default(),
-            statuses: HashMap::new(),
+            state: genesis,
+            state_at: 0,
             checkpoints: std::collections::BTreeMap::new(),
             trust_unproven_joins: false,
             journal: None,
+            last_settle: None,
         };
         r.rebuild();
         r
@@ -301,11 +345,12 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         let mut r = Self::new(keys, config);
         r.current_barrier = current_barrier;
         for (first_barrier, bytes) in records {
-            if let Ok((record, eh)) = record::decode(&bytes) {
+            if let Ok((record, eh, view)) = record::decode_with_view(&bytes) {
                 r.seen.entry(eh).or_insert(Seen {
                     bytes,
                     record,
                     first_barrier,
+                    view,
                 });
             }
         }
@@ -350,7 +395,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             if self.seen.contains_key(&eh) {
                 continue;
             }
-            let Ok((record, _)) = record::decode(&bytes) else {
+            let Ok((record, _, view)) = record::decode_with_view(&bytes) else {
                 continue;
             };
             self.seen.insert(
@@ -359,6 +404,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     bytes,
                     record,
                     first_barrier,
+                    view,
                 },
             );
             self.current_barrier = self.current_barrier.max(first_barrier);
@@ -419,6 +465,30 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         self.ingest_inner(bytes, first_barrier, true, true)
     }
 
+    /// Ingest a record RELAYED by another member, at the barrier the relay says the
+    /// group placed it at (§5.5). Used when the messenger seems to have withheld the
+    /// record from us.
+    ///
+    /// Not authoritative. A record we already hold keeps its own barrier, so a relay
+    /// cannot move a record that the service delivered to us. The caller must cap
+    /// `first_barrier` at the relay message's own service-stamped barrier: a record
+    /// cannot have been placed after it was relayed. The relayer could still claim an
+    /// earlier barrier than the group used. That error shows up as a view mismatch,
+    /// as any other split does. A record that is not [relayable](Record::relayable) is
+    /// refused.
+    pub fn ingest_relayed(
+        &mut self,
+        bytes: Vec<u8>,
+        first_barrier: u64,
+    ) -> Result<Status, record::CodecError> {
+        if !record::decode(&bytes)?.0.relayable() {
+            return Ok(Status::Rejected(
+                "a relay cannot carry a sender-checked record",
+            ));
+        }
+        self.ingest_inner(bytes, first_barrier, true, false)
+    }
+
     fn ingest_inner(
         &mut self,
         bytes: Vec<u8>,
@@ -426,7 +496,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         journal: bool,
         authoritative: bool,
     ) -> Result<Status, record::CodecError> {
-        let (rec, eh) = record::decode(&bytes)?;
+        let (rec, eh, view) = record::decode_with_view(&bytes)?;
         if let Some(prev) = self.seen.get(&eh) {
             // Already seen. An authoritative (service-stamped) re-arrival reconciles a
             // provisional barrier assigned by an optimistic self-fold; anything else is
@@ -438,12 +508,15 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 self.current_barrier = self.current_barrier.max(first_barrier);
                 self.rebuild_from(from.min(built + 1));
             }
-            return Ok(self.statuses.get(&eh).cloned().unwrap_or(Status::Buffered));
+            return Ok(self
+                .state
+                .statuses
+                .get(&eh)
+                .cloned()
+                .unwrap_or(Status::Buffered));
         }
-        if journal {
-            if let Some(path) = &self.journal {
-                append_journal(path, &bytes);
-            }
+        if journal && let Some(path) = &self.journal {
+            append_journal(path, &bytes);
         }
         // A record whose bucket is ahead of where we've reached is itself evidence the
         // schedule advanced that far (the provider serviced it then), so cross to it.
@@ -455,10 +528,24 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 bytes,
                 record: rec,
                 first_barrier,
+                view,
             },
         );
-        self.rebuild_from(first_barrier.min(built + 1));
-        Ok(self.statuses.get(&eh).cloned().unwrap_or(Status::Buffered))
+        // The common case — a record for the barrier we stand at that sorts after every
+        // record already applied in it — continues that barrier's pass in place; any
+        // other arrival replays from the first barrier it can affect.
+        let in_order = self.state.pass_max.is_none_or(|max| eh > max);
+        if first_barrier == built && self.state_at == built && in_order {
+            self.continue_pass(built);
+        } else {
+            self.rebuild_from(first_barrier.min(built + 1));
+        }
+        Ok(self
+            .state
+            .statuses
+            .get(&eh)
+            .cloned()
+            .unwrap_or(Status::Buffered))
     }
 
     /// Cross exactly one barrier: the settlement heartbeat, a ban, or an authority
@@ -488,6 +575,109 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         self.rebuild_from(built + 1);
     }
 
+    // --- Views (§5.5) -----------------------------------------------------------
+
+    /// The digest of this replica's view of the group up to and including `barrier`.
+    ///
+    /// A hash chain over the barriers that hold any record, each link committing to
+    /// the barrier number and the envelope hashes of every record placed at it (applied,
+    /// buffered or rejected) in ascending order. The bulletin is a deterministic
+    /// function of exactly these inputs, so equal digests mean equal state. It is
+    /// a chain so that, once two members' views of a barrier differ, every later digest
+    /// differs too: the messenger cannot split a group and later merge it again without
+    /// someone noticing.
+    pub fn view_digest(&self, barrier: u64) -> [u8; 32] {
+        self.view_digests()
+            .range(..=barrier)
+            .next_back()
+            .map_or_else(view_genesis, |(_, d)| *d)
+    }
+
+    /// The claim this replica's member attaches to a record it sends now: the digest
+    /// at [`VIEW_CLAIM_LAG`] barriers back, by which point every record placed at that
+    /// barrier should have been delivered. `None` until the group is that old.
+    pub fn view_claim(&self) -> Option<record::ViewClaim> {
+        let barrier = self.current_barrier.checked_sub(VIEW_CLAIM_LAG)?;
+        Some(record::ViewClaim {
+            barrier,
+            digest: self.view_digest(barrier),
+        })
+    }
+
+    /// Compare the view claims carried by recent records with this replica's own view.
+    ///
+    /// Only claims about barriers at least [`VIEW_CLAIM_LAG`] behind this replica are
+    /// checked (before that, the difference may only be our own delivery lag), and only
+    /// those within the last [`VIEW_WINDOW`] barriers (an old mismatch from a member who
+    /// was briefly behind, and has since caught up, ages out). A split that persists keeps
+    /// producing fresh mismatches as long as the other side keeps sending.
+    pub fn view_report(&self) -> ViewReport {
+        let digests = self.view_digests();
+        let at = |b: u64| {
+            digests
+                .range(..=b)
+                .next_back()
+                .map_or_else(view_genesis, |(_, d)| *d)
+        };
+        let oldest = self.current_barrier.saturating_sub(VIEW_WINDOW);
+        let mut report = ViewReport::default();
+        for (eh, s) in &self.seen {
+            let Some(claim) = s.view else { continue };
+            if claim.barrier < oldest {
+                continue;
+            }
+            if claim.barrier + VIEW_CLAIM_LAG > self.current_barrier {
+                report.pending += 1;
+            } else if claim.digest == at(claim.barrier) {
+                report.agreeing += 1;
+            } else {
+                report.mismatches.push(ViewMismatch {
+                    barrier: claim.barrier,
+                    record: *eh,
+                });
+            }
+        }
+        report.mismatches.sort_by_key(|m| (m.barrier, m.record));
+        report
+    }
+
+    /// Every [relayable](Record::relayable) seen record placed at a barrier in
+    /// `from..=to`, as `(first_barrier, bytes)`: what a member relays when it sees a view
+    /// mismatch (§5.5).
+    pub fn relayable_between(&self, from: u64, to: u64) -> Vec<(u64, Vec<u8>)> {
+        self.seen
+            .values()
+            .filter(|s| (from..=to).contains(&s.first_barrier) && s.record.relayable())
+            .map(|s| (s.first_barrier, s.bytes.clone()))
+            .collect()
+    }
+
+    /// The view digest at the end of every barrier that holds a record.
+    fn view_digests(&self) -> std::collections::BTreeMap<u64, [u8; 32]> {
+        let mut by_barrier: std::collections::BTreeMap<u64, Vec<Eh>> =
+            std::collections::BTreeMap::new();
+        // `seen` iterates in ascending eh, so each barrier's list comes out sorted.
+        for (eh, s) in &self.seen {
+            by_barrier.entry(s.first_barrier).or_default().push(*eh);
+        }
+        let mut digest = view_genesis();
+        by_barrier
+            .into_iter()
+            .map(|(b, ehs)| {
+                use blake2::{Blake2s256, Digest};
+                let mut h = Blake2s256::new();
+                h.update(digest);
+                h.update(b.to_le_bytes());
+                h.update((ehs.len() as u64).to_le_bytes());
+                for eh in &ehs {
+                    h.update(eh.0);
+                }
+                digest = h.finalize().into();
+                (b, digest)
+            })
+            .collect()
+    }
+
     // --- Accessors --------------------------------------------------------------
 
     /// Whether `root` is one of the object roots this replica produced (within the
@@ -500,8 +690,13 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     pub fn join_counts(&self, account: F) -> (u32, u32) {
         let key = f_key(account);
         (
-            self.derived.joins.get(&key).copied().unwrap_or(0),
-            self.derived.rejoin_allowance.get(&key).copied().unwrap_or(0),
+            self.state.derived.joins.get(&key).copied().unwrap_or(0),
+            self.state
+                .derived
+                .rejoin_allowance
+                .get(&key)
+                .copied()
+                .unwrap_or(0),
         )
     }
 
@@ -514,22 +709,22 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     }
 
     pub fn has_produced_root(&self, root: F) -> bool {
-        self.produced.contains(&f_key(root))
+        self.state.produced.contains(&f_key(root))
     }
 
     /// The current object-tree root — the membership data a member proves against.
     pub fn obj_root(&self) -> F {
-        self.obj.root()
+        self.state.obj.root()
     }
 
     /// The current callback membership root (called tickets).
     pub fn cb_memb_root(&self) -> F {
-        self.cbs.memb_root()
+        self.state.cbs.memb_root()
     }
 
     /// The current callback nonmembership root (the pinned barrier, §5.2).
     pub fn cb_nmemb_root(&self) -> F {
-        self.cbs.nmemb_root()
+        self.state.cbs.nmemb_root()
     }
 
     /// Read-only view of the object store, for a **co-located** member to build a
@@ -539,7 +734,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     /// a peer — the member proves membership of *its* object against the current
     /// root, and the resulting record is then re-verified on ingest like any other.
     pub fn obj_store(&self) -> &MerkleObjStore<F, OH> {
-        &self.obj
+        &self.state.obj
     }
 
     /// Read-only view of the callback store, for a co-located member to build a
@@ -547,7 +742,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     /// only ever valid against the latest barrier, so a member must read the live
     /// store here rather than reconstruct a stale one.
     pub fn callback_store(&self) -> &MerkleCallbackStore<F, MH, NH> {
-        &self.cbs
+        &self.state.cbs
     }
 
     /// The barrier the replica has reached.
@@ -563,8 +758,162 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         self.seen.get(eh).map(|s| s.first_barrier)
     }
 
+    /// The latest barrier at which callbacks were invoked, with what it cost.
+    pub fn last_settle_timings(&self) -> Option<(u64, SettleTimings)> {
+        self.last_settle
+    }
+
+    /// BENCHMARKS: check a record's PROOF only — the same Groth16 check, with the same
+    /// public inputs, that applying it makes — without ordering, buffering, caching or
+    /// touching any state. `None` for a record that carries no proof (polls, approvals,
+    /// bans) or that does not decode. A scan is checked against this replica's current
+    /// callback set, as applying it would be.
+    pub fn verify_record_proof(&self, bytes: &[u8]) -> Option<bool> {
+        let (rec, eh) = record::decode(bytes).ok()?;
+        let mut cache = HashMap::new();
+        let ok = match &rec {
+            Record::Join {
+                object,
+                account,
+                proof,
+                ..
+            } => memo_statement(
+                &mut cache,
+                eh,
+                &self.prepared.join,
+                &[object.0, account.0],
+                &proof.0,
+            ),
+            Record::Post {
+                flavour,
+                exec,
+                extra,
+                obj_root,
+                ..
+            } => {
+                let exec = &exec.0;
+                match flavour {
+                    Flavour::Anon => memo_interaction::<OH, _, 1>(
+                        &mut cache,
+                        eh,
+                        &self.prepared.standard,
+                        exec.new_object,
+                        exec.old_nullifier,
+                        F::from(0),
+                        exec.cb_com_list,
+                        &exec.proof,
+                        obj_root.0,
+                    ),
+                    Flavour::Pseudo => memo_interaction::<OH, _, 1>(
+                        &mut cache,
+                        eh,
+                        &self.prepared.pseudo,
+                        exec.new_object,
+                        exec.old_nullifier,
+                        PseudonymArgs {
+                            context: *extra.0.first()?,
+                            claimed: *extra.0.get(1)?,
+                        },
+                        exec.cb_com_list,
+                        &exec.proof,
+                        obj_root.0,
+                    ),
+                    Flavour::PseudoRate => memo_interaction::<OH, _, 1>(
+                        &mut cache,
+                        eh,
+                        &self.prepared.pseudo_rate,
+                        exec.new_object,
+                        exec.old_nullifier,
+                        PseudonymArgsRate {
+                            context: *extra.0.first()?,
+                            claimed: *extra.0.get(1)?,
+                            i: *extra.0.get(2)?,
+                        },
+                        exec.cb_com_list,
+                        &exec.proof,
+                        obj_root.0,
+                    ),
+                }
+            }
+            Record::BadgeRequest {
+                exec,
+                slot,
+                obj_root,
+            } => {
+                let exec = &exec.0;
+                memo_interaction::<OH, _, 1>(
+                    &mut cache,
+                    eh,
+                    &self.prepared.badge_request,
+                    exec.new_object,
+                    exec.old_nullifier,
+                    BadgesArgs {
+                        i: F::from(u64::from(*slot)),
+                        claimed: F::from(0),
+                    },
+                    exec.cb_com_list,
+                    &exec.proof,
+                    obj_root.0,
+                )
+            }
+            Record::Scan { exec, obj_root, .. } => {
+                let exec = &exec.0;
+                let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(
+                    &self.state.cbs,
+                    Time::from(0),
+                );
+                memo_interaction::<OH, _, 0>(
+                    &mut cache,
+                    eh,
+                    &self.prepared.scan,
+                    exec.new_object,
+                    exec.old_nullifier,
+                    ps,
+                    exec.cb_com_list,
+                    &exec.proof,
+                    obj_root.0,
+                )
+            }
+            Record::Rate {
+                target,
+                proof,
+                claimed,
+                obj_root,
+                ..
+            } => memo_predicate(
+                &mut cache,
+                eh,
+                &self.prepared.pseudonym_pred,
+                target.context(),
+                claimed.0,
+                obj_root.0,
+                &proof.0,
+            ),
+            Record::Vote {
+                poll,
+                proof,
+                claimed,
+                obj_root,
+                ..
+            } => memo_predicate(
+                &mut cache,
+                eh,
+                &self.prepared.pseudonym_pred,
+                poll.context(),
+                claimed.0,
+                obj_root.0,
+                &proof.0,
+            ),
+            Record::PollOpen { .. }
+            | Record::BadgeApprove { .. }
+            | Record::RejoinApprove { .. }
+            | Record::Ban { .. } => return None,
+        };
+        Some(ok)
+    }
+
     pub fn status(&self, eh: &Eh) -> Option<Status> {
-        self.statuses.get(eh).cloned()
+        self.state.statuses.get(eh).cloned()
     }
 
     /// The raw encoded bytes of a seen record — what a late joiner's snapshot or a
@@ -576,17 +925,17 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     /// The rendered log — accepted records in canonical order, for a client to
     /// display (d4 does the actual rendering).
     pub fn log(&self) -> &[LogEntry] {
-        &self.derived.log
+        &self.state.derived.log
     }
 
     /// An open or recently-closed poll, by its `PollOpen` envelope hash.
     pub fn poll(&self, eh: &Eh) -> Option<&Poll> {
-        self.derived.polls.get(eh)
+        self.state.derived.polls.get(eh)
     }
 
     /// Read access to the derived tallies (polls, outstanding tickets, personas).
     pub fn derived(&self) -> &Derived {
-        &self.derived
+        &self.state.derived
     }
 
     // --- The rebuild (the accept rule) -----------------------------------------
@@ -620,16 +969,40 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     }
 
     fn rebuild_from_inner(&mut self, from: u64) {
-        let resumed = from
-            .checked_sub(1)
-            .and_then(|prev| self.checkpoints.get(&prev))
-            .cloned();
-        let (from, mut st) = match resumed {
-            Some(st) => (from, st),
+        // Resume from the end of `from - 1`: the current state itself when the change
+        // starts right after it (crossing a barrier), else its checkpoint, else genesis.
+        let (from, mut st) = match from.checked_sub(1) {
+            Some(prev) if prev == self.state_at => {
+                let genesis = BuildState::genesis(self.config.root_window);
+                let st = std::mem::replace(&mut self.state, genesis);
+                // Keep the end of `prev` for a later change that starts at `from`.
+                self.checkpoints.insert(prev, st.clone());
+                (from, st)
+            }
+            Some(prev) => match self.checkpoints.get(&prev) {
+                Some(st) => (from, st.clone()),
+                None => (0, BuildState::genesis(self.config.root_window)),
+            },
             None => (0, BuildState::genesis(self.config.root_window)),
         };
         // Checkpoints at or after `from` describe a past that no longer holds.
         drop(self.checkpoints.split_off(&from));
+
+        // The records each barrier makes eligible, and those already eligible but not
+        // yet applied (buffered) when the replay starts.
+        let mut arriving: std::collections::BTreeMap<u64, Vec<Eh>> =
+            std::collections::BTreeMap::new();
+        let mut pending: std::collections::BTreeSet<Eh> = std::collections::BTreeSet::new();
+        for (eh, s) in &self.seen {
+            if st.applied.contains(eh) {
+                continue;
+            }
+            if s.first_barrier < from {
+                pending.insert(*eh);
+            } else {
+                arriving.entry(s.first_barrier).or_default().push(*eh);
+            }
+        }
 
         for b in from..=self.current_barrier {
             // (1) The barrier event fires *first* (§5.2): settle every ticket due or
@@ -638,71 +1011,126 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             //     therefore prove against the *post*-settlement callback set — which
             //     is exactly what makes a ban enforceable the moment a replica crosses
             //     its barrier. (At `b == 0` there is nothing yet to settle.)
-            settle_barrier(b, &self.config, &mut st.cbs, &mut st.derived);
-
-            // (2) Apply every record now available, smallest eh first, until the
-            //     worklist stops making progress. `seen` iterates in ascending eh,
-            //     so the first applicable record each pass is the §4 tiebreak
-            //     winner.
-            loop {
-                let next = self.seen.iter().find(|(eh, s)| {
-                    s.first_barrier <= b
-                        && !st.applied.contains(*eh)
-                        && is_applicable(&s.record, &st.produced, &st.derived)
-                });
-                let Some((&eh, _)) = next else { break };
-                st.applied.insert(eh);
-                let status = self.apply(
-                    eh,
-                    b,
-                    &mut st.obj,
-                    &st.cbs,
-                    &mut st.derived,
-                    &mut st.produced,
-                    &mut st.produced_order,
-                );
-                st.statuses.insert(eh, status);
+            let settled = settle_barrier(b, &self.config, &mut st.cbs, &mut st.derived);
+            if settled.invoked > 0 {
+                self.last_settle = Some((b, settled));
             }
 
-            self.checkpoints.insert(b, st.clone());
+            // (2) Apply every record now available, smallest eh first (§4).
+            st.pass_max = None;
+            if let Some(new) = arriving.remove(&b) {
+                pending.extend(new);
+            }
+            self.run_pass(b, &mut st, &mut pending);
+
+            if b < self.current_barrier {
+                self.checkpoints.insert(b, st.clone());
+            }
         }
 
         // Keep only the recent past: a record is bucketed by its service timestamp, so
         // it lands at (or within a barrier or two of) the current barrier. Older
         // arrivals take the full-replay fallback.
-        let keep_from = self
-            .current_barrier
-            .saturating_sub(CHECKPOINT_BARRIERS - 1);
+        let keep_from = self.current_barrier.saturating_sub(CHECKPOINT_BARRIERS - 1);
         self.checkpoints = self.checkpoints.split_off(&keep_from);
 
         // Anything never applied and never rejected is waiting on a root it has not
         // seen (a prover ahead, or an orphan) — buffered.
-        let mut statuses = st.statuses;
         for eh in self.seen.keys() {
-            statuses.entry(*eh).or_insert(Status::Buffered);
+            st.statuses.entry(*eh).or_insert(Status::Buffered);
         }
 
-        self.obj = st.obj;
-        self.cbs = st.cbs;
-        self.derived = st.derived;
-        self.produced = st.produced;
-        self.produced_order = st.produced_order;
-        self.statuses = statuses;
+        self.state = st;
+        self.state_at = self.current_barrier;
+    }
+
+    /// One barrier's accept loop: repeatedly apply the smallest-eh record in `pending`
+    /// that is applicable, until none is. Applying one can make an earlier one
+    /// applicable (it produces the root that one names), so the search restarts from the
+    /// smallest each time — the §4 tiebreak, exactly as a scan of every seen record in
+    /// ascending eh would give, but over only the records still waiting.
+    fn run_pass(
+        &mut self,
+        b: u64,
+        st: &mut BuildState<OH, MH, NH>,
+        pending: &mut std::collections::BTreeSet<Eh>,
+    ) {
+        loop {
+            let next = pending.iter().copied().find(|eh| {
+                self.seen
+                    .get(eh)
+                    .is_some_and(|s| is_applicable(&s.record, &st.produced, &st.derived))
+            });
+            let Some(eh) = next else { break };
+            pending.remove(&eh);
+            st.applied.insert(eh);
+            st.pass_max = Some(st.pass_max.map_or(eh, |m| m.max(eh)));
+            let status = self.apply(
+                eh,
+                b,
+                &mut st.obj,
+                &st.cbs,
+                &mut st.derived,
+                &mut st.produced,
+                &mut st.produced_order,
+            );
+            st.statuses.insert(eh, status);
+        }
+    }
+
+    /// Take in a NEW record placed at the barrier the state already stands at, when it
+    /// sorts after every record applied in that barrier's pass. Replaying the barrier
+    /// would choose exactly the same records in the same order up to here (each was the
+    /// smallest applicable when chosen, and this one is larger than all of them), then
+    /// continue with the waiting records plus this one — which is what this does,
+    /// without copying or replaying anything. Anything else takes `rebuild_from`.
+    fn continue_pass(&mut self, b: u64) {
+        let genesis = BuildState::genesis(self.config.root_window);
+        let mut st = std::mem::replace(&mut self.state, genesis);
+        let mut pending: std::collections::BTreeSet<Eh> = self
+            .seen
+            .iter()
+            .filter(|(eh, s)| s.first_barrier <= b && !st.applied.contains(*eh))
+            .map(|(eh, _)| *eh)
+            .collect();
+        self.run_pass(b, &mut st, &mut pending);
+        for eh in pending {
+            st.statuses.entry(eh).or_insert(Status::Buffered);
+        }
+        self.state = st;
+
+        #[cfg(test)]
+        {
+            let incremental = self.fingerprint();
+            self.rebuild_from_inner(0);
+            assert_eq!(
+                incremental,
+                self.fingerprint(),
+                "continuing barrier {b}'s pass diverged from a full replay"
+            );
+        }
     }
 
     /// Everything observable about the derived bulletin, for the incremental-rebuild
     /// self-check.
     #[cfg(test)]
     fn fingerprint(&self) -> String {
-        let mut statuses: Vec<_> = self.statuses.iter().map(|(eh, s)| (eh.0, s.clone())).collect();
+        let mut statuses: Vec<_> = self
+            .state
+            .statuses
+            .iter()
+            .map(|(eh, s)| (eh.0, s.clone()))
+            .collect();
         statuses.sort_by_key(|(eh, _)| *eh);
         let log: Vec<_> = self
+            .state
             .derived
             .log
             .iter()
             .map(|e| (e.eh.0, e.kind, e.author.clone(), e.body.clone(), e.flagged))
             .collect();
         let mut outstanding: Vec<_> = self
+            .state
             .derived
             .outstanding
             .iter()
@@ -710,25 +1138,37 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             .collect();
         outstanding.sort_by_key(|o| o.0);
         let mut polls: Vec<_> = self
+            .state
             .derived
             .polls
             .iter()
             .map(|(eh, p)| (eh.0, p.closed, p.opened_barrier))
             .collect();
         polls.sort_by_key(|p| p.0);
-        let mut produced: Vec<_> = self.produced.iter().copied().collect();
+        let mut produced: Vec<_> = self.state.produced.iter().copied().collect();
         produced.sort();
-        let mut joins: Vec<_> = self.derived.joins.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut joins: Vec<_> = self
+            .state
+            .derived
+            .joins
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         joins.sort();
-        let mut allowance: Vec<_> =
-            self.derived.rejoin_allowance.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut allowance: Vec<_> = self
+            .state
+            .derived
+            .rejoin_allowance
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         allowance.sort();
         format!(
             "{:?}|{:?}|{:?}|{statuses:?}|{log:?}|{outstanding:?}|{polls:?}|{produced:?}|{joins:?}|{allowance:?}|{:?}",
-            self.obj.root(),
-            self.cbs.memb_root(),
-            self.cbs.nmemb_root(),
-            self.produced_order,
+            self.state.obj.root(),
+            self.state.cbs.memb_root(),
+            self.state.cbs.nmemb_root(),
+            self.state.produced_order,
         )
     }
 
@@ -764,7 +1204,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     && !memo_statement(
                         &mut self.verify_cache,
                         eh,
-                        &self.keys.join,
+                        &self.prepared.join,
                         &[object.0, account.0],
                         &proof.0,
                     )
@@ -841,7 +1281,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     Flavour::Anon => memo_interaction::<OH, _, 1>(
                         &mut self.verify_cache,
                         eh,
-                        &self.keys.standard,
+                        &self.prepared.standard,
                         exec.new_object,
                         exec.old_nullifier,
                         F::from(0),
@@ -857,7 +1297,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                         memo_interaction::<OH, _, 1>(
                             &mut self.verify_cache,
                             eh,
-                            &self.keys.pseudo,
+                            &self.prepared.pseudo,
                             exec.new_object,
                             exec.old_nullifier,
                             a,
@@ -884,7 +1324,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                         memo_interaction::<OH, _, 1>(
                             &mut self.verify_cache,
                             eh,
-                            &self.keys.pseudo_rate,
+                            &self.prepared.pseudo_rate,
                             exec.new_object,
                             exec.old_nullifier,
                             a,
@@ -967,7 +1407,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 let ok = memo_interaction::<OH, _, 1>(
                     &mut self.verify_cache,
                     eh,
-                    &self.keys.badge_request,
+                    &self.prepared.badge_request,
                     exec.new_object,
                     exec.old_nullifier,
                     pub_args,
@@ -1050,7 +1490,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 let ok = memo_interaction::<OH, _, 0>(
                     &mut self.verify_cache,
                     eh,
-                    &self.keys.scan,
+                    &self.prepared.scan,
                     exec.new_object,
                     exec.old_nullifier,
                     ps,
@@ -1109,7 +1549,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 let ok = memo_predicate(
                     &mut self.verify_cache,
                     eh,
-                    &self.keys.pseudonym_pred,
+                    &self.prepared.pseudonym_pred,
                     context,
                     claimed.0,
                     obj_root.0,
@@ -1138,7 +1578,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 let ok = memo_predicate(
                     &mut self.verify_cache,
                     eh,
-                    &self.keys.pseudonym_pred,
+                    &self.prepared.pseudonym_pred,
                     context,
                     claimed.0,
                     obj_root.0,
@@ -1159,6 +1599,46 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
 /// that triggers one full replay.
 const CHECKPOINT_BARRIERS: u64 = 64;
 
+/// How many barriers back a sender's [view claim](Replica::view_claim) is taken, and
+/// how far behind a receiver a claim must be before it is checked. With a one-minute
+/// heartbeat, a record has had at least a minute to reach everyone (§5.5, §14).
+pub const VIEW_CLAIM_LAG: u64 = 2;
+
+/// How many barriers of view claims [`Replica::view_report`] considers.
+pub const VIEW_WINDOW: u64 = 10;
+
+/// The digest of an empty view.
+fn view_genesis() -> [u8; 32] {
+    use blake2::{Blake2s256, Digest};
+    Blake2s256::digest(b"personas-view-v1").into()
+}
+
+/// One record whose sender's view of a barrier differs from ours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewMismatch {
+    pub barrier: u64,
+    pub record: Eh,
+}
+
+/// The outcome of comparing recent view claims with our own view
+/// ([`Replica::view_report`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewReport {
+    /// Claims that match our view.
+    pub agreeing: u32,
+    /// Claims too recent to check yet.
+    pub pending: u32,
+    /// Claims that do not match our view, oldest barrier first.
+    pub mismatches: Vec<ViewMismatch>,
+}
+
+impl ViewReport {
+    /// Whether some member saw a different set of records than we did.
+    pub fn diverged(&self) -> bool {
+        !self.mismatches.is_empty()
+    }
+}
+
 /// The rebuild's working state, as it stands at the end of a barrier.
 #[derive(Clone)]
 struct BuildState<const OH: usize, const MH: usize, const NH: usize> {
@@ -1169,6 +1649,10 @@ struct BuildState<const OH: usize, const MH: usize, const NH: usize> {
     produced: HashSet<[u8; 32]>,
     produced_order: VecDeque<[u8; 32]>,
     applied: HashSet<Eh>,
+    /// The largest envelope hash applied in this barrier's pass so far: a record that
+    /// sorts after it can be applied by continuing the pass instead of replaying it
+    /// (see `ingest_inner`).
+    pass_max: Option<Eh>,
 }
 
 impl<const OH: usize, const MH: usize, const NH: usize> BuildState<OH, MH, NH> {
@@ -1187,6 +1671,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> BuildState<OH, MH, NH> {
             produced,
             produced_order,
             applied: HashSet::new(),
+            pass_max: None,
         }
     }
 }
@@ -1239,7 +1724,8 @@ fn settle_barrier<const MH: usize, const NH: usize>(
     config: &Config,
     cbs: &mut MerkleCallbackStore<F, MH, NH>,
     derived: &mut Derived,
-) {
+) -> SettleTimings {
+    let mut timings = SettleTimings::default();
     // (a) Close ban polls whose window has elapsed; a pass marks its target banned.
     //     Ban strictly precedes reputation (§7 property 1), so this runs first.
     let mut banned_targets: Vec<Eh> = Vec::new();
@@ -1249,10 +1735,10 @@ fn settle_barrier<const MH: usize, const NH: usize>(
         }
         if barrier >= poll.opened_barrier + config.poll_close_barriers {
             poll.closed = true;
-            if poll.passes_ban() {
-                if let Some(target) = poll.target {
-                    banned_targets.push(target);
-                }
+            if poll.passes_ban()
+                && let Some(target) = poll.target
+            {
+                banned_targets.push(target);
             }
         }
     }
@@ -1287,8 +1773,7 @@ fn settle_barrier<const MH: usize, const NH: usize>(
         // scan repeatedly, correctly absorb nothing, and reasonably conclude approval
         // had silently failed.
         .filter(|(_, o)| {
-            !o.settled
-                && (o.banned || o.badge_slot.is_some() || barrier >= o.settle_barrier)
+            !o.settled && (o.banned || o.badge_slot.is_some() || barrier >= o.settle_barrier)
         })
         .map(|(eh, _)| *eh)
         .collect();
@@ -1320,18 +1805,21 @@ fn settle_barrier<const MH: usize, const NH: usize>(
             // Reputation is clamped so `r` cannot reach `BAN_FLAG` (§7 property, R8).
             arg_rep(out.clamped_rep())
         };
-        if invoke(cbs, &out, arg) {
+        let started = std::time::Instant::now();
+        let called = invoke(cbs, &out, arg);
+        timings.invoke_us += u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        if called {
+            timings.invoked += 1;
             any_called = true;
             if let Some(o) = derived.outstanding.get_mut(&eh) {
                 o.settled = true;
             }
             // Rendering gate (§9): flag the banned author's posts on sight of the ban.
-            if out.banned {
-                if let Some(entry) = derived.log.iter().find(|e| e.eh == eh) {
-                    if let Some(author) = entry.author.clone() {
-                        derived.flag_author(&author);
-                    }
-                }
+            if out.banned
+                && let Some(entry) = derived.log.iter().find(|e| e.eh == eh)
+                && let Some(author) = entry.author.clone()
+            {
+                derived.flag_author(&author);
             }
         }
     }
@@ -1341,8 +1829,11 @@ fn settle_barrier<const MH: usize, const NH: usize>(
     // grown called set yields a distinct partition and so a distinct root, which is
     // what makes a pre-ban scan stale.
     if any_called {
+        let started = std::time::Instant::now();
         cbs.update_epoch();
+        timings.epoch_update_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     }
+    timings
 }
 
 /// Invoke a committed callback with `arg`, mirroring `ServiceProvider::call`: the
@@ -1377,7 +1868,7 @@ fn invoke<const MH: usize, const NH: usize>(
 fn memo_interaction<const OH: usize, PubArgs, const NUMCBS: usize>(
     cache: &mut HashMap<Eh, bool>,
     eh: Eh,
-    vk: &VK,
+    vk: &PreparedVk,
     new_object: F,
     old_nul: F,
     pub_args: PubArgs,
@@ -1391,21 +1882,24 @@ where
     if let Some(&v) = cache.get(&eh) {
         return v;
     }
-    let fresh = MerkleObjStore::<F, OH>::new();
-    let v = <MerkleObjStore<F, OH> as UserBul<F, MsgUser>>::verify_interaction::<
-        PubArgs,
-        Snark,
-        NUMCBS,
-    >(
-        &fresh,
-        new_object,
-        old_nul,
-        pub_args,
-        cb_com_list,
-        proof.clone(),
-        Some(obj_root),
-        vk,
-    );
+    // Exactly `UserBul::verify_interaction`'s public inputs, in its order: the new
+    // object, the spent nullifier, the interaction's public arguments, the callback
+    // commitments, then the membership root. (Its nullifier pre-check is trivially true
+    // on a fresh store, so it is the Groth16 check alone — made here against the
+    // prepared key; `verify_interaction` itself has no prepared-key entry point.)
+    let mut inputs = vec![new_object, old_nul];
+    let (Some(args), Some(cbs), Some(root)) = (
+        pub_args.to_field_elements(),
+        cb_com_list.to_field_elements(),
+        obj_root.to_field_elements(),
+    ) else {
+        cache.insert(eh, false);
+        return false;
+    };
+    inputs.extend(args);
+    inputs.extend(cbs);
+    inputs.extend(root);
+    let v = vk.verify(&inputs, proof);
     cache.insert(eh, v);
     v
 }
@@ -1420,14 +1914,14 @@ where
 fn memo_statement(
     cache: &mut HashMap<Eh, bool>,
     eh: Eh,
-    vk: &VK,
+    vk: &PreparedVk,
     inputs: &[F],
     proof: &<Snark as SNARK<F>>::Proof,
 ) -> bool {
     if let Some(&v) = cache.get(&eh) {
         return v;
     }
-    let v = Snark::verify(vk, inputs, proof).unwrap_or(false);
+    let v = vk.verify(inputs, proof);
     cache.insert(eh, v);
     v
 }
@@ -1435,7 +1929,7 @@ fn memo_statement(
 fn memo_predicate(
     cache: &mut HashMap<Eh, bool>,
     eh: Eh,
-    vk: &VK,
+    vk: &PreparedVk,
     context: F,
     claimed: F,
     obj_root: F,
@@ -1445,7 +1939,7 @@ fn memo_predicate(
         return v;
     }
     let inputs = vec![context, claimed, obj_root];
-    let v = Snark::verify(vk, &inputs, proof).unwrap_or(false);
+    let v = vk.verify(&inputs, proof);
     cache.insert(eh, v);
     v
 }

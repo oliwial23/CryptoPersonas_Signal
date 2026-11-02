@@ -61,7 +61,7 @@ type Int1 = Interaction<F, UserData, (), (), (), (), CBArg, CBArgVar, BATCH_SIZE
 // scan through IntScan.
 
 // The user is incrementing the token by 1 each time the method is called.
-fn int_meth<'a>(tu: &'a U, _pub_args: (), _priv_args: ()) -> U {
+fn int_meth(tu: &U, _pub_args: (), _priv_args: ()) -> U {
     let a = tu.clone();
 
     // We could update token2 here! If you want :), there's nothing enforcing we need to keep it
@@ -80,23 +80,22 @@ fn int_meth_pred<'a>(
     _pub_args: (),
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
-    let e = tu_old.data.reputation.is_eq(&tu_new.data.reputation);
-    e
+    tu_old.data.reputation.is_eq(&tu_new.data.reputation)
 }
 
 // The callback method here allows the *server* to call a method on the user: Here the argument (F)
 // being passed in can be selected by the server, and the user is forced to set their token1 to
 // `args`.
-fn cb_meth<'a>(tu: &'a U, args: F) -> U {
+fn cb_meth(tu: &U, args: F) -> U {
     let mut out = tu.clone();
     out.data.reputation = tu.data.reputation + args;
     out
 }
 
 // The proof that enforces the callback that the server calls.
-fn cb_pred<'a>(tu_old: &'a UV, args: FpVar<F>) -> ArkResult<UV> {
+fn cb_pred(tu_old: &UV, args: FpVar<F>) -> ArkResult<UV> {
     let mut tu_new = tu_old.clone();
-    tu_new.data.reputation = tu_new.data.reputation + args;
+    tu_new.data.reputation += args;
     Ok(tu_new)
 }
 
@@ -193,10 +192,10 @@ fn main() {
         BATCH_SIZE,
     >(
         &mut store.obj_bul,
-        exec_meth.exec_meth.new_object.clone(),
-        exec_meth.exec_meth.old_nullifier.clone(),
+        exec_meth.exec_meth.new_object,
+        exec_meth.exec_meth.old_nullifier,
         (),
-        exec_meth.exec_meth.cb_com_list.clone(),
+        exec_meth.exec_meth.cb_com_list,
         exec_meth.exec_meth.proof.clone(),
         None,
         &vk,
@@ -222,10 +221,10 @@ fn main() {
         _,
         BATCH_SIZE,
     >(
-        exec_meth.exec_meth.new_object.clone(),
-        exec_meth.exec_meth.old_nullifier.clone(),
+        exec_meth.exec_meth.new_object,
+        exec_meth.exec_meth.old_nullifier,
         (),
-        exec_meth.exec_meth.cb_com_list.clone(),
+        exec_meth.exec_meth.cb_com_list,
         exec_meth.exec_meth.proof.clone(),
         store.obj_bul.get_pubkey(),
         true,

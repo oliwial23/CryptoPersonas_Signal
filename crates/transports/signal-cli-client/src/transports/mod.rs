@@ -1,4 +1,4 @@
-use futures_util::{stream::StreamExt, Sink, SinkExt, Stream};
+use futures_util::{Sink, SinkExt, Stream, stream::StreamExt};
 use jsonrpsee::core::{
     async_trait,
     client::{ReceivedMessage, TransportReceiverT, TransportSenderT},

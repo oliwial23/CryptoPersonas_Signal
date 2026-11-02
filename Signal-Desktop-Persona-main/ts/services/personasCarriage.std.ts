@@ -712,6 +712,43 @@ export function decodeResetRequest(
   }
 }
 
+// A RELAYED RECORD (SERVERLESS_PROTOCOL.md §5.5). Every record carries a hash of its
+// sender's view of the group; when a received one disagrees with ours, Signal may have
+// withheld records from some members, so we re-send the records we hold from around
+// that point:
+//
+//   PZY2:<barrier>:<base64 record>
+//
+// `barrier` is where we placed the record. The receiver places it there, but never later
+// than the relay message itself. Same format as the Rust carriage (carriage.rs).
+//
+// Sent ATTRIBUTABLY under the real account, like a scan: a relay claims nothing about
+// who wrote the record (every member holds every record), so it reveals nothing. Joins,
+// re-join approvals and admin bans are never relayed: they are accepted only because of
+// who sent them, which a relay would hide. Not in ALL_MARKERS, so `decodeRecordBody`
+// never returns a relayed record and the sender checks never see one.
+export const PERSONAS_RELAY_MARKER = 'PZY2:';
+
+export function encodeRelayBody(barrier: number, record: Uint8Array): string {
+  return `${PERSONAS_RELAY_MARKER}${barrier}:${Buffer.from(record).toString('base64')}`;
+}
+
+export function decodeRelayBody(
+  body: string | undefined | null
+): { barrier: number; record: Buffer } | undefined {
+  if (!body?.startsWith(PERSONAS_RELAY_MARKER)) {
+    return undefined;
+  }
+  const rest = body.slice(PERSONAS_RELAY_MARKER.length);
+  const colon = rest.indexOf(':');
+  const barrier = Number(rest.slice(0, colon));
+  if (colon < 0 || !Number.isSafeInteger(barrier) || barrier < 0) {
+    return undefined;
+  }
+  const record = Buffer.from(rest.slice(colon + 1), 'base64');
+  return record.length > 0 ? { barrier, record } : undefined;
+}
+
 // LATE-JOIN CATCH-UP (personasCatchUp). A member added after the group started posting
 // has none of the group's records, so its posts name a tree nobody else has and it
 // cannot apply anyone else's. It asks; a group admin sends its history.

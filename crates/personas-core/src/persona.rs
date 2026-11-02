@@ -8,7 +8,7 @@
 
 use ark_ff::{BigInteger, BigInteger256, PrimeField};
 use petname::{Generator, Petnames};
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use std::str::FromStr;
 use zk_callbacks::crypto::hash::HasherZK;
 

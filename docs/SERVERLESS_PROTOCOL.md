@@ -141,7 +141,9 @@ Two consequences follow, and they are the whole of §5:
 an epoch boundary, or drop a ban record so some replicas never see it. It cannot forge a proof,
 mint a member, invoke a callback, or backdate (prefix-ordering closed that). That is the
 serverless trust boundary: strictly smaller than the as-a-service one, which additionally learns
-who sent what. Censorship resistance is a messenger property we do not try to add. ⚠
+who sent what. Censorship resistance is a messenger property we do not try to add, but a
+messenger that withholds records from some members only is detected and, for most records,
+repaired by the members themselves (§5.5). ⚠
 
 **Determinism is a correctness requirement, not a style note.** The accept rule and the
 linearization tiebreak may not consult wall-clock time, an RNG, or hash-map iteration order. Two
@@ -344,6 +346,107 @@ records propagate. If two replicas that have ingested an identical set of record
 differently, that is a determinism bug in the accept rule (§1), and the convergence test (g) has
 to catch it: feed N replicas the same records in adversarially different *arrival* orders and
 assert identical roots.
+
+### 5.5 Views: detecting a messenger that shows members different records
+
+> **Status: implemented, OFF by default** (`Messenger::with_view_checks`, the addon's
+> `viewChecks` option, Desktop's `PERSONAS_VIEW_CHECKS=1`), pending review of the tagging
+> cost below. With it off, records carry no claim and encode exactly as before, and relays
+> are ignored.
+
+§4 leaves one power with the messenger: it orders and delivers, so it can delay or drop a
+record for *some* members only. Nothing above would notice. Two members would then compute
+different states, and each would believe it was the group's.
+
+**Every record carries its sender's view.** The envelope gains an optional field
+`view: {barrier, digest}` ([`record::ViewClaim`](../crates/personas-bulletin/src/replica/record.rs)).
+The digest ([`Replica::view_digest`](../crates/personas-bulletin/src/replica/mod.rs)) is a
+hash chain over the barriers that hold any record. Each link commits to the previous link,
+the barrier number and the envelope hashes of every record placed at that barrier, in
+ascending order, whether the record was applied, buffered or rejected. The bulletin is a
+deterministic function of exactly these inputs, so equal digests mean equal state.
+
+- **Which barrier.** A sender claims `current_barrier − VIEW_CLAIM_LAG` (2). By then
+  every record placed at that barrier has had at least one heartbeat to arrive. A receiver
+  checks a claim only once it is itself that far past the barrier, and before that the
+  claim counts as `pending`.
+- **Why a chain.** Once two members' views of a barrier differ, every later digest differs
+  too. A messenger that splits a group cannot quietly merge it later: it has to keep the
+  two sides apart for good, and every record either side sends exposes the split (fork
+  consistency, as in SUNDR).
+- **Binding.** The claim is inside the envelope, so the record's `eh` covers it, and the
+  payload is end-to-end encrypted, so the messenger cannot change it. A member who
+  re-wraps someone else's proof under a different claim produces a second record with the
+  same nullifier, and the §4 double-spend rule keeps only one. The claim is not a public
+  input of the proof. Binding it in-circuit would need new circuits and keys, and buys
+  nothing against the messenger.
+- **Compatibility.** A record without a claim encodes byte-for-byte as before, so
+  journaled `eh`s are unchanged, and a reader that predates claims ignores the field.
+
+**Comparing.** [`Replica::view_report`] compares the claims carried by records from the
+last `VIEW_WINDOW` (10) barriers with our own digests, and lists the records whose claims
+disagree. A member who was briefly behind sent claims that disagree, but these age out of
+the window once that member catches up. A split that persists keeps producing fresh
+mismatches for as long as the other side sends anything. Desktop shows the member a
+warning the first time a report turns `diverged`.
+
+**Relaying.** For a mismatch at barrier `b`, a member re-sends every record it holds that
+was placed at `b − VIEW_CLAIM_LAG ..= b`, as `PZY2:<barrier>:<base64 record>`, at most once
+per record ([`Messenger::take_relays`](../crates/personas-messenger/src/lib.rs)). Claims are
+made continuously, so a view that first differs at `b` most likely differs because of a
+record placed shortly before it. Both sides relay, so whichever side is missing records
+receives them.
+
+- A relayed record is placed at the barrier the relay names, capped at the relay
+  message's own service-stamped barrier, and it is **not authoritative**: a record we
+  already hold keeps its barrier. A relayer who lies about the barrier changes only the
+  receiver's view, and that shows up as a mismatch like any other split.
+- A **join, re-join approval or admin ban is never relayed**
+  ([`Record::relayable`](../crates/personas-bulletin/src/replica/record.rs)), and a relay
+  carrying one is refused. Those records are accepted only because of who sent them over
+  Signal (the joining account, a group admin), and a relay hides the sender. If the
+  messenger withholds one, members detect it but cannot repair it in-band.
+
+**Tagging (the privacy cost, and why it is off by default).** A view claim reveals which
+records its sender had seen. Signal cannot read it (the payload is end-to-end encrypted),
+but group members can. Desktop encrypts a group message per recipient, so a malicious
+member with a modified client can send a record to one victim only. Until a relay heals
+the split, every record the victim sends, anonymous posts included, carries a digest
+nobody else has, and the attacker can pick out the victim's records.
+
+This is not new in kind. Every proof-carrying record already names the object root it was
+built on (§5.1), so a post or join sent to one victim only makes the victim's next records
+name a root only the victim holds. Without view checks that split is also *permanent*:
+nobody else can verify the victim's records, so the victim is silently cut off. View
+checks make the split detectable and short-lived, but they widen the tag from posts and
+joins to every record kind.
+
+Candidate fixes, for review:
+
+1. **Separate attestations.** Members send their claims as standalone anonymous messages
+   instead of inside posts, votes and ratings. A tagged attestation then shows only that
+   *some* member has view V, and is linked to nothing that member wrote.
+2. **Prove against settled roots.** The replica accepts any object root in the last `K`
+   (§5.1). A member who proves against a root that is a few barriers old, and that other
+   members' claims have confirmed, cannot be tagged by a split shorter than that, and view
+   checks catch a longer one. This also closes the pre-existing root tag. The cost: after
+   posting, a member must wait until its new object is in a settled root before posting
+   again.
+3. **Hold anonymous sends while views disagree,** until the relays land.
+
+**What this does and does not give.** Against a messenger that drops or delays records but
+delivers relays, members detect the split and repair it. Against one that also drops the
+relays, members still *detect* the split: it cannot be hidden, only kept. Detection needs
+the other side to send something. A member who is completely cut off sees no
+disagreement, because it sees nothing. The stronger steps, not implemented:
+
+1. **Quorum-attested barriers.** Before applying a barrier, require a majority of members
+   to attest to the same digest for it, each with a `pseudonym_pred` vote whose context is
+   the barrier (one attestation per member, unlinkable across barriers). Two disjoint
+   majorities cannot exist, so the messenger can no longer make two members apply
+   different bans. It can still stall the group, and the stall is visible.
+2. **An out-of-band check.** Comparing a short digest code in person or over another app
+   (like Signal's safety numbers) catches a member the messenger has cut off entirely.
 
 ---
 

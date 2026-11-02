@@ -17,10 +17,10 @@
 //! that produced it, because it goes through real blind issuance — holds regardless
 //! of how much time passes between the two calls.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use personas_core::privpass::{
-    self, decode_validated_tickets, encode_badge_redemption, encode_post_redemption,
-    encode_redemption, encode_ticket_request, BadgeRedemption, PostRedemption, PrivPassUser,
+    self, BadgeRedemption, PostRedemption, PrivPassUser, decode_validated_tickets,
+    encode_badge_redemption, encode_post_redemption, encode_redemption, encode_ticket_request,
 };
 
 use crate::PersonaClient;

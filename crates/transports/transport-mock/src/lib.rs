@@ -254,9 +254,15 @@ mod tests {
             .send(Outgoing::new(conv.clone(), "first").as_persona("able-mongoose"))
             .await
             .unwrap();
-        let b = mock.send(Outgoing::new(conv.clone(), "second")).await.unwrap();
+        let b = mock
+            .send(Outgoing::new(conv.clone(), "second"))
+            .await
+            .unwrap();
 
-        assert_ne!(a.id, b.id, "message ids key the callback log; they must differ");
+        assert_ne!(
+            a.id, b.id,
+            "message ids key the callback log; they must differ"
+        );
 
         let history = mock.history();
         assert_eq!(history.len(), 2);
@@ -270,7 +276,10 @@ mod tests {
         let mut stream = mock.subscribe().await.unwrap();
         let conv = ConversationId("room".into());
 
-        let sent = mock.send(Outgoing::new(conv.clone(), "hello")).await.unwrap();
+        let sent = mock
+            .send(Outgoing::new(conv.clone(), "hello"))
+            .await
+            .unwrap();
 
         match stream.next().await.expect("send should reach subscribers") {
             Incoming::Message { id, body, .. } => {

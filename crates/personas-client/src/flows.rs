@@ -6,28 +6,28 @@
 //! a flow that proves but does not persist leaves the client's committed state behind
 //! the bulletin's, and every later proof against it fails.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ark_bn254::G1Projective as Projective;
 use ark_ff::PrimeField;
 use ark_grumpkin::Projective as Projective2;
 use ark_relations::r1cs::SynthesisError;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use folding_schemes::{
-    commitment::pedersen::Pedersen, folding::nova::zk::RandomizedIVCProof, folding::nova::Nova,
-    frontend::FCircuit, FoldingScheme,
+    FoldingScheme, commitment::pedersen::Pedersen, folding::nova::Nova,
+    folding::nova::zk::RandomizedIVCProof, frontend::FCircuit,
 };
 use hex::FromHex;
 use personas_wire::{Kind, Payload};
 
 use personas_core::{
+    Args, ArgsVar, Cr, F, H, OStore, Snark,
     circuits::{
+        BadgesArgs, BadgesArgsVar, FoldingProofData, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs,
+        PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar,
         authorship_pred, badge_pred, exec_badge_request_standint, exec_pseudo_rate_standint,
         exec_pseudo_standint, exec_scanint, exec_standint, get_callbacks, pseudonym_pred,
-        BadgesArgs, BadgesArgsVar, FoldingProofData, MsgUser, PseudonymArgs, PseudonymArgsPair,
-        PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, NUM_SCANS_PER_FOLD,
     },
     timing::{append_proof_size_fold, append_timing_line, append_timing_line_fold},
-    Args, ArgsVar, Cr, OStore, Snark, F, H,
 };
 use rand::rngs::OsRng;
 use serde::Deserialize;
@@ -99,6 +99,12 @@ fn ensure_not_scanning(user: &User<F, MsgUser>) -> Result<()> {
     }
     Ok(())
 }
+
+/// A membership witness for the object bulletin: its public part and its witness.
+type Membership = (
+    <BulNet as PublicUserBul<F, MsgUser>>::MembershipPub,
+    <BulNet as PublicUserBul<F, MsgUser>>::MembershipWitness,
+);
 
 impl PersonaClient {
     /// The current epoch. Scans and pseudonymous posts are bound to it, so a callback
@@ -195,12 +201,7 @@ impl PersonaClient {
 
         let start = SystemTime::now();
         let scan = exec_scanint::<_, _, NUM_SCANS_PER_FOLD>(
-            &mut user,
-            &mut rng,
-            &self.bul,
-            &pk,
-            &self.bul,
-            epoch,
+            &mut user, &mut rng, &self.bul, &pk, &self.bul, epoch,
         )
         .map_err(synthesis)?;
         record("scan", start);
@@ -243,8 +244,17 @@ impl PersonaClient {
                 steps,
             );
 
-        let f_circ: FoldingScan<F, MsgUser, Args, ArgsVar, Cr, BulNet, BulNet, H, NUM_SCANS_PER_FOLD> =
-            FoldingScan::new(params).map_err(|e| anyhow!("failed to build fold circuit: {e}"))?;
+        let f_circ: FoldingScan<
+            F,
+            MsgUser,
+            Args,
+            ArgsVar,
+            Cr,
+            BulNet,
+            BulNet,
+            H,
+            NUM_SCANS_PER_FOLD,
+        > = FoldingScan::new(params).map_err(|e| anyhow!("failed to build fold circuit: {e}"))?;
 
         let nova_params = self.fold_params();
         let mut folding_scheme: NFC = NFC::init(&nova_params, f_circ, init)
@@ -307,9 +317,8 @@ impl PersonaClient {
         let pseudo = PseudonymArgs { context, claimed };
 
         let start = SystemTime::now();
-        let exec =
-            exec_pseudo_standint(&mut user, &mut rng, &self.bul, &pk, epoch, pseudo, ())
-                .map_err(synthesis)?;
+        let exec = exec_pseudo_standint(&mut user, &mut rng, &self.bul, &pk, epoch, pseudo, ())
+            .map_err(synthesis)?;
         record("pseudo_msg", start);
 
         let payload = encode_record_with_inputs(Kind::PostPseudo, &exec, vec![context, claimed])?;
@@ -326,7 +335,11 @@ impl PersonaClient {
         ensure_not_scanning(&user)?;
         let pk = self.standard_pseudo_rate_pk();
 
-        let pseudo = PseudonymArgsRate { context, claimed, i };
+        let pseudo = PseudonymArgsRate {
+            context,
+            claimed,
+            i,
+        };
 
         let start = SystemTime::now();
         let exec = exec_pseudo_rate_standint(
@@ -513,7 +526,11 @@ impl PersonaClient {
     /// Apply every reputation callback the server is holding.
     pub fn process_reputation_updates(&self) -> Result<()> {
         let route = self.cfg.namespace.reputation_route();
-        self.drain_callbacks(self.cfg.namespace.all_callbacks_route(), route, "reputation")
+        self.drain_callbacks(
+            self.cfg.namespace.all_callbacks_route(),
+            route,
+            "reputation",
+        )
     }
 
     /// Apply every badge-request callback the server is holding (approves the requests).
@@ -572,13 +589,7 @@ impl PersonaClient {
     }
 
     /// The membership witness proving this user is on the object bulletin.
-    fn membership(
-        &self,
-        user: &User<F, MsgUser>,
-    ) -> Option<(
-        <BulNet as PublicUserBul<F, MsgUser>>::MembershipPub,
-        <BulNet as PublicUserBul<F, MsgUser>>::MembershipWitness,
-    )> {
+    fn membership(&self, user: &User<F, MsgUser>) -> Option<Membership> {
         <BulNet as PublicUserBul<F, MsgUser>>::get_membership_data(&self.bul, user.commit::<H>())
     }
 
@@ -639,19 +650,23 @@ fn callback_bytes<T: CanonicalSerialize>(cb: &T) -> Result<Vec<u8>> {
 
 /// Instrumentation is best-effort: a failed benchmark write must never fail a proof.
 fn record(label: &str, start: SystemTime) {
-    if let Ok(elapsed) = start.elapsed() {
-        if let Err(e) = append_timing_line(label, start, elapsed.as_millis()) {
-            eprintln!("failed to record timing for {label}: {e}");
-        }
+    if let Ok(elapsed) = start.elapsed()
+        && let Err(e) = append_timing_line(label, start, elapsed.as_millis())
+    {
+        eprintln!("failed to record timing for {label}: {e}");
     }
 }
 
 fn record_fold(label: &str, start: SystemTime, suffix: &str) {
-    if let Ok(elapsed) = start.elapsed() {
-        if let Err(e) =
-            append_timing_line_fold(label, start, elapsed.as_millis(), NUM_SCANS_PER_FOLD, suffix)
-        {
-            eprintln!("failed to record fold timing for {label}: {e}");
-        }
+    if let Ok(elapsed) = start.elapsed()
+        && let Err(e) = append_timing_line_fold(
+            label,
+            start,
+            elapsed.as_millis(),
+            NUM_SCANS_PER_FOLD,
+            suffix,
+        )
+    {
+        eprintln!("failed to record fold timing for {label}: {e}");
     }
 }

@@ -61,6 +61,10 @@ pub struct EngineOptions {
     /// with explicit `barrier()` calls.
     pub heartbeat_anchor_ms: Option<f64>,
     pub heartbeat_period_ms: Option<f64>,
+    /// View checking (`SERVERLESS_PROTOCOL.md` §5.5): records carry the sender's view
+    /// of the group, mismatches are reported and missing records relayed. Default
+    /// `false`, pending review of its privacy cost (§5.5, "Tagging").
+    pub view_checks: Option<bool>,
     /// A member's saved private state ([`Engine::export_member_state`]) to continue as,
     /// instead of minting a new member. Ignored for an observer.
     pub member_state: Option<Buffer>,
@@ -109,6 +113,35 @@ pub struct JsStatus {
     pub eh: String,
 }
 
+/// How the views of the group carried by recent records compare with ours
+/// (`SERVERLESS_PROTOCOL.md` §5.5).
+#[napi(object)]
+pub struct JsViewReport {
+    /// Some member saw a different set of records than we did. Show the user.
+    pub diverged: bool,
+    /// Claims that match our view.
+    pub agreeing: u32,
+    /// Claims too recent to check yet.
+    pub pending: u32,
+    /// The records whose claims disagree, oldest barrier first.
+    pub mismatches: Vec<JsViewMismatch>,
+}
+
+#[napi(object)]
+pub struct JsViewMismatch {
+    pub barrier: f64,
+    /// Envelope hash (hex) of the record that carried the disagreeing claim.
+    pub eh: String,
+}
+
+/// A record to relay to the group because views disagree ([`Engine::take_relays`]).
+#[napi(object)]
+pub struct JsRelay {
+    /// The barrier we placed the record at; send it alongside the record.
+    pub barrier: f64,
+    pub record: Buffer,
+}
+
 /// One rendered chat-log line, structured for the UI (Phase 4).
 #[napi(object)]
 pub struct JsLogEntry {
@@ -120,6 +153,28 @@ pub struct JsLogEntry {
     /// `true` once the author's persona was revoked by a settled ban — render the
     /// post flagged, never delete it (the rendering gate).
     pub flagged: bool,
+}
+
+/// How long the last operation took (personas_messenger::OpTimings), in milliseconds.
+#[napi(object)]
+pub struct JsOpTimings {
+    /// Proof generation (witness + Groth16 proof).
+    pub prove_ms: f64,
+    /// Folding the record into our own replica (verify + apply).
+    pub self_ingest_ms: f64,
+    /// Size of the record or proof produced.
+    pub bytes: u32,
+}
+
+/// The latest settlement barrier that invoked callbacks, and what it cost.
+#[napi(object)]
+pub struct JsSettleTimings {
+    pub barrier: f64,
+    pub invoked: u32,
+    /// Invoking the callbacks ("post callback"), all of them.
+    pub invoke_ms: f64,
+    /// The epoch update that follows (re-pinning the non-membership root).
+    pub epoch_update_ms: f64,
 }
 
 /// Joins applied and re-joins approved for one account.
@@ -156,11 +211,11 @@ pub struct Engine {
     /// Verifying key for `authorship_pred`, kept so a RECIPIENT can check an authorship
     /// proof. It ships in the same `ServerKeys` bundle every instance already generates,
     /// so holding it costs nothing extra.
-    authorship_vk: personas_core::VK,
+    authorship_vk: personas_core::PreparedVk,
     /// Verifying key for `badge_pred`, so a recipient can check a badge proof.
-    badge_vk: personas_core::VK,
+    badge_vk: personas_core::PreparedVk,
     /// Verifying key for `not_banned_pred`, so an admin can check a reset request.
-    not_banned_vk: personas_core::VK,
+    not_banned_vk: personas_core::PreparedVk,
     /// The record journal, when persistence is on.
     journal: Option<Journal>,
 }
@@ -187,9 +242,12 @@ const JOURNAL_EH_FLAG: u64 = 1 << 63;
 /// entries of `[u64 LE barrier][32-byte eh][u32 LE length][record bytes]`.
 const CATCH_UP_MAGIC: &[u8; 4] = b"PZH1";
 
+/// A journaled record: `(barrier, eh, bytes)`.
+type JournalEntry = (u64, Eh, Vec<u8>);
+
 impl Journal {
     /// Open (creating if needed) and read back the records, last entry per record wins.
-    fn open(path: &str) -> std::io::Result<(Self, Vec<(u64, Eh, Vec<u8>)>)> {
+    fn open(path: &str) -> std::io::Result<(Self, Vec<JournalEntry>)> {
         use std::io::{Read, Write};
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -331,9 +389,11 @@ impl Engine {
         let conversation =
             ConversationId(options.conversation.unwrap_or_else(|| "personas".into()));
 
-        let authorship_vk = keys.authorship_pred_verifying_key.clone();
-        let badge_vk = keys.badge_pred_verifying_key.clone();
-        let not_banned_vk = keys.not_banned_pred_verifying_key.clone();
+        // Prepared once for verification (personas_core::verify): same checks, without
+        // re-preparing the key on every proof.
+        let authorship_vk = personas_core::PreparedVk::new(&keys.authorship_pred_verifying_key);
+        let badge_vk = personas_core::PreparedVk::new(&keys.badge_pred_verifying_key);
+        let not_banned_vk = personas_core::PreparedVk::new(&keys.not_banned_pred_verifying_key);
 
         let heartbeat = match (options.heartbeat_anchor_ms, options.heartbeat_period_ms) {
             (Some(anchor), Some(period)) => Some(Heartbeat::new(anchor as u64, period as u64)),
@@ -376,6 +436,7 @@ impl Engine {
         if let Some(heartbeat) = heartbeat {
             inner = inner.with_heartbeat(heartbeat);
         }
+        inner = inner.with_view_checks(options.view_checks.unwrap_or(false));
 
         Ok(Self {
             inner,
@@ -567,7 +628,7 @@ impl Engine {
     #[napi]
     pub fn emit_badge_request(&mut self, slot: u32) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_badge_request")?;
-        if slot < 1 || slot > 3 {
+        if !(1..=3).contains(&slot) {
             return napi::Result::Err(napi::Error::from_reason(
                 "emit_badge_request: slot must be 1 (Faculty), 2 (Student) or 3 (Industry)",
             ));
@@ -582,7 +643,7 @@ impl Engine {
     #[napi]
     pub fn emit_badge_approve(&mut self, request: String, slot: u32) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_badge_approve")?;
-        if slot < 1 || slot > 3 {
+        if !(1..=3).contains(&slot) {
             return napi::Result::Err(napi::Error::from_reason(
                 "emit_badge_approve: slot must be 1, 2 or 3",
             ));
@@ -846,7 +907,10 @@ impl Engine {
     /// `joins < 1 + approved`.
     #[napi]
     pub fn join_counts(&self, account: String) -> napi::Result<JsJoinCounts> {
-        let (joins, approved) = self.inner.replica().join_counts(account_from_hex(&account)?);
+        let (joins, approved) = self
+            .inner
+            .replica()
+            .join_counts(account_from_hex(&account)?);
         Ok(JsJoinCounts { joins, approved })
     }
 
@@ -1011,24 +1075,66 @@ impl Engine {
                 "ingest: body carried no record (marker missing)",
             )),
             Some(Err(e)) => Err(napi::Error::from_reason(format!("ingest decode: {e}"))),
-            Some(Ok(status)) => Ok(match status {
-                Status::Applied => JsStatus {
-                    status: "applied".into(),
-                    reason: None,
-                    eh,
-                },
-                Status::Buffered => JsStatus {
-                    status: "buffered".into(),
-                    reason: None,
-                    eh,
-                },
-                Status::Rejected(reason) => JsStatus {
-                    status: "rejected".into(),
-                    reason: Some(reason.to_string()),
-                    eh,
-                },
-            }),
+            Some(Ok(status)) => Ok(js_status(status, eh)),
         }
+    }
+
+    /// Ingest a record another member RELAYED because views disagreed (§5.5), at the
+    /// `barrier` the relay names. `received_at_ms` is the relay message's own service
+    /// timestamp; the record is never placed after it. A record we already hold is
+    /// left where it is.
+    #[napi]
+    pub fn ingest_relayed(
+        &mut self,
+        record: Buffer,
+        barrier: f64,
+        received_at_ms: f64,
+    ) -> napi::Result<JsStatus> {
+        let bytes = record.to_vec();
+        let decoded = personas_bulletin::replica::record::decode(&bytes)
+            .map_err(|e| napi::Error::from_reason(format!("ingest decode: {e}")))?
+            .1;
+        let status = self
+            .inner
+            .ingest_relayed(bytes.clone(), barrier as u64, received_at_ms as u64)
+            .map_err(|e| napi::Error::from_reason(format!("ingest decode: {e}")))?;
+        self.journal_record(decoded, &bytes)?;
+        Ok(js_status(status, eh_to_hex(&decoded)))
+    }
+
+    /// Whether the records we have received carry views of the group that match ours.
+    /// Check after each ingest; when `diverged`, tell the user that the messenger may
+    /// be showing members different messages.
+    #[napi]
+    pub fn view_report(&self) -> JsViewReport {
+        let report = self.inner.view_report();
+        JsViewReport {
+            diverged: report.diverged(),
+            agreeing: report.agreeing,
+            pending: report.pending,
+            mismatches: report
+                .mismatches
+                .iter()
+                .map(|m| JsViewMismatch {
+                    barrier: m.barrier as f64,
+                    eh: eh_to_hex(&m.record),
+                })
+                .collect(),
+        }
+    }
+
+    /// The records to relay to the group because views disagree, each returned once.
+    /// Call after each ingest and send every one with its barrier.
+    #[napi]
+    pub fn take_relays(&mut self) -> Vec<JsRelay> {
+        self.inner
+            .take_relays()
+            .into_iter()
+            .map(|(barrier, record)| JsRelay {
+                barrier: barrier as f64,
+                record: record.into(),
+            })
+            .collect()
     }
 
     /// The accepted chat log as display lines (`~petname: msg`, flagged where a
@@ -1099,6 +1205,33 @@ impl Engine {
     /// have ingested the same records across the same barriers share it exactly.
     #[napi]
     pub fn fingerprint(&self) -> String {
+        self.fingerprint_inner()
+    }
+
+    /// EXPERIMENTS: how long the last operation (an emit, a scan, or a proof) took.
+    #[napi]
+    pub fn last_op_timings(&self) -> JsOpTimings {
+        let t = self.inner.last_op_timings();
+        JsOpTimings {
+            prove_ms: t.prove_us as f64 / 1000.0,
+            self_ingest_ms: t.self_ingest_us as f64 / 1000.0,
+            bytes: u32::try_from(t.bytes).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// EXPERIMENTS: the latest barrier at which callbacks were invoked, with its cost.
+    #[napi]
+    pub fn last_settle_timings(&self) -> Option<JsSettleTimings> {
+        let (barrier, t) = self.inner.replica().last_settle_timings()?;
+        Some(JsSettleTimings {
+            barrier: barrier as f64,
+            invoked: t.invoked,
+            invoke_ms: t.invoke_us as f64 / 1000.0,
+            epoch_update_ms: t.epoch_update_us as f64 / 1000.0,
+        })
+    }
+
+    fn fingerprint_inner(&self) -> String {
         let r = self.inner.replica();
         format!(
             "{}:{}:{}",
@@ -1219,4 +1352,17 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn js_status(status: Status, eh: String) -> JsStatus {
+    let (status, reason) = match status {
+        Status::Applied => ("applied", None),
+        Status::Buffered => ("buffered", None),
+        Status::Rejected(reason) => ("rejected", Some(reason.to_string())),
+    };
+    JsStatus {
+        status: status.into(),
+        reason,
+        eh,
+    }
 }

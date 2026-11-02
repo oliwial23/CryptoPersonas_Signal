@@ -8,5 +8,7 @@ pub mod persona;
 pub mod privpass;
 pub mod timing;
 pub mod types;
+pub mod verify;
 
 pub use types::*;
+pub use verify::{PreparedVk, ProofVerifier};

@@ -71,7 +71,10 @@ async fn main() -> Result<()> {
     let privpass_issuer = load_or_create_issuer_keys(&mut rng, &data_dir)?;
     let obj_pubkey_bytes = {
         let mut bytes = Vec::new();
-        ark_serialize::CanonicalSerialize::serialize_compressed(&db.obj_bul.get_pubkey(), &mut bytes)?;
+        ark_serialize::CanonicalSerialize::serialize_compressed(
+            &db.obj_bul.get_pubkey(),
+            &mut bytes,
+        )?;
         bytes
     };
     let (privpass_batch_pk, privpass_batch_vk) =

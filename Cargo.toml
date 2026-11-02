@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "batch-zkc",
+    "crates/personas-bench",
     "crates/personas-bulletin",
     "crates/personas-cli",
     "crates/personas-client",
@@ -134,3 +135,11 @@ libsignal-service = { path = "third_party/libsignal-service-rs" }
 [patch."https://github.com/whisperfish/presage"]
 presage = { path = "third_party/presage/presage" }
 presage-store-sqlite = { path = "third_party/presage/presage-store-sqlite" }
+
+# Vendored zk-callbacks at the pinned rev (d6618793), patched ONLY to cache its Poseidon
+# parameters: `gen_poseidon_params` re-derived the same round constants and MDS matrix
+# (Grain LFSR + rejection sampling) on EVERY hash — native and in-circuit — which
+# dominated proving and replica time. The cache returns the identical deterministic
+# values, so proofs, keys and roots are unchanged. See third_party/zk-callbacks/PATCHES.md.
+[patch."https://github.com/hkailad/callbacks.git"]
+zk-callbacks = { path = "third_party/zk-callbacks" }

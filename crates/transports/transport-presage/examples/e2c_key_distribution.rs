@@ -90,7 +90,9 @@ async fn main() -> Result<()> {
             secret.epoch
         );
     }
-    println!("      ✓ member's copy matches byte-for-byte — recovered entirely from the pairwise channel");
+    println!(
+        "      ✓ member's copy matches byte-for-byte — recovered entirely from the pairwise channel"
+    );
 
     println!(
         "[5/5] both sides start a PresageTransport with their own copy of the secret and \

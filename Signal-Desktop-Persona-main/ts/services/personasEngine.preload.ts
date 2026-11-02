@@ -17,7 +17,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { Engine } from '@signalapp/personas-engine';
-import type { IngestStatus, Emitted } from '@signalapp/personas-engine';
+import type {
+  IngestStatus,
+  Emitted,
+  ViewReport,
+} from '@signalapp/personas-engine';
 
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
@@ -31,6 +35,8 @@ import {
   encodeRateBody,
   decodeRecordBody,
   decodePollDescriptor,
+  decodeRelayBody,
+  encodeRelayBody,
   type PersonaChoice,
   type PersonaPollDescriptor,
   encodeAuthorshipProof,
@@ -47,8 +53,18 @@ import {
   savePersonasState,
 } from './personasPersistence.preload.ts';
 import { initPersonasCatchUp } from './personasCatchUp.preload.ts';
-import { ensureProvingKeys, getPinnedKeysSha256 } from './personasKeys.preload.ts';
+import {
+  benchLog,
+  benchNowMs,
+  benchProofKey,
+  isBenchLogEnabled,
+} from './personasBenchLog.node.ts';
+import {
+  ensureProvingKeys,
+  getPinnedKeysSha256,
+} from './personasKeys.preload.ts';
 import { drop } from '../util/drop.std.ts';
+import { ToastType } from '../types/Toast.dom.tsx';
 import { sleep } from '../util/sleep.std.ts';
 import {
   getBarrierSchedule,
@@ -67,6 +83,12 @@ export type {
 } from './personasCarriage.std.ts';
 
 const log = createLogger('personasEngine');
+
+// OFF unless PERSONAS_VIEW_CHECKS=1 at launch: a view claim reveals which records its
+// sender had seen, so a member who sends a record to one victim only can recognise the
+// victim's next records until a relay heals the split (SERVERLESS_PROTOCOL.md §5.5,
+// "Tagging"). With it off, records carry no claim and relays are ignored.
+const VIEW_CHECKS = process.env.PERSONAS_VIEW_CHECKS === '1';
 
 // One shared conversation label for the demo group (the engine is single-conversation;
 // the id is just a tag). All members must use the same value.
@@ -110,6 +132,58 @@ export function groupIdOf(
   return conversation?.get('groupId') ?? undefined;
 }
 
+// --- experiment log (personasBenchLog; inert unless PERSONAS_BENCH_LOG is set) ---------
+
+// A short, stable tag per group, so a log never carries the group id itself.
+const groupTag = (groupId: string): string =>
+  benchProofKey(Buffer.from(groupId, 'utf8')).slice(0, 8);
+
+// The engine's record kind ("BadgeRequest") as the log names operations ("badge_request").
+const opName = (engine: Engine, eh: string, fallback: string): string =>
+  (engine.logEntry(eh)?.kind ?? fallback)
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .toLowerCase();
+
+function benchEmitted(
+  groupId: string,
+  engine: Engine,
+  op: string,
+  startMs: number,
+  key: string
+): void {
+  if (!isBenchLogEnabled()) {
+    return;
+  }
+  const t =
+    typeof engine.lastOpTimings === 'function'
+      ? engine.lastOpTimings()
+      : undefined;
+  benchLog({
+    event: 'emit',
+    op,
+    group: groupTag(groupId),
+    key,
+    startMs,
+    endMs: benchNowMs(),
+    proveMs: t?.proveMs,
+    selfIngestMs: t?.selfIngestMs,
+    bytes: t?.bytes,
+  });
+}
+
+const lastSettleLogged = new Map<string, number>();
+function benchSettled(groupId: string, engine: Engine): void {
+  if (!isBenchLogEnabled() || typeof engine.lastSettleTimings !== 'function') {
+    return;
+  }
+  const t = engine.lastSettleTimings();
+  if (!t || lastSettleLogged.get(groupId) === t.barrier) {
+    return;
+  }
+  lastSettleLogged.set(groupId, t.barrier);
+  benchLog({ event: 'settle', group: groupTag(groupId), ...t });
+}
+
 // With a pinned key hash, an engine is built only once the downloaded keys verified.
 let keysReady = false;
 let keysRetry: NodeJS.Timeout | undefined;
@@ -146,7 +220,9 @@ const KEYS_RETRY_MS = 30_000;
 // construction reads the ~51MB key bundle and mints this member's keypair for the group.
 // Returns undefined if disabled, if the group has no bundle, or if construction failed
 // (so callers never crash the message pipeline).
-export function getPersonasEngine(groupId: string | undefined): Engine | undefined {
+export function getPersonasEngine(
+  groupId: string | undefined
+): Engine | undefined {
   if (!groupId || !isPersonasEngineEnabled()) {
     return undefined;
   }
@@ -199,12 +275,15 @@ export function getPersonasEngine(groupId: string | undefined): Engine | undefin
         : {}),
       ...(memberState ? { memberState } : {}),
       ...(groupState ? { journalPath: groupState.journalPath } : {}),
+      viewChecks: VIEW_CHECKS,
     });
     runtime.engine = engine;
     if (memberState) {
       log.info(
         `restored the saved member (${
-          engine.memberOnBulletin() ? 'on the bulletin' : 'NOT on the restored bulletin'
+          engine.memberOnBulletin()
+            ? 'on the bulletin'
+            : 'NOT on the restored bulletin'
         })`
       );
     } else {
@@ -223,7 +302,13 @@ export function getPersonasEngine(groupId: string | undefined): Engine | undefin
     );
     // Advance the replica along the schedule so settlement happens on time even in a
     // silent group. No-op when there is no shared schedule.
-    startBarrierTicker(groupId, nowMs => runtime.engine?.tick(nowMs));
+    startBarrierTicker(groupId, nowMs => {
+      const barrier = runtime.engine?.tick(nowMs);
+      if (runtime.engine) {
+        benchSettled(groupId, runtime.engine);
+      }
+      return barrier;
+    });
     wakeAll();
   } catch (error) {
     runtime.constructionFailed = true;
@@ -302,6 +387,49 @@ export type RecordIngestResult =
   // A badge APPROVAL, rendered so the requester learns they have one to collect.
   | { kind: 'badge-approve'; eh: string; slot: number };
 
+// VIEWS (SERVERLESS_PROTOCOL.md §5.5). Every record carries a hash of its sender's view
+// of the group, and the engine compares the ones it receives with its own. After each
+// ingest we send any records the engine asks us to relay, and tell the member, once per
+// episode, if some member's view disagrees with ours.
+const viewsDiverged = new Map<string, boolean>();
+
+export function getPersonasViewReport(
+  groupId: string | undefined
+): ViewReport | undefined {
+  return getPersonasEngine(groupId)?.viewReport();
+}
+
+async function relayAndCheckViews(
+  groupId: string,
+  currentEngine: Engine
+): Promise<void> {
+  const relays = currentEngine.takeRelays();
+  if (relays.length > 0) {
+    const conversation = window.ConversationController.get(groupId);
+    if (conversation) {
+      log.warn(`views disagree: relaying ${relays.length} record(s) to the group`);
+      for (const relay of relays) {
+        // oxlint-disable-next-line no-await-in-loop
+        await conversation.enqueueMessageForSend(
+          { body: encodeRelayBody(relay.barrier, relay.record), attachments: [] },
+          { hideFromTimeline: true }
+        );
+      }
+    }
+  }
+  const report = currentEngine.viewReport();
+  if (report.diverged && !viewsDiverged.get(groupId)) {
+    log.warn(
+      `views diverged: ${report.mismatches.length} record(s) carry a view of the ` +
+        `group that differs from ours (first at barrier ${report.mismatches[0]?.barrier})`
+    );
+    window.reduxActions?.toast?.showToast({
+      toastType: ToastType.PersonaViewsDiverged,
+    });
+  }
+  viewsDiverged.set(groupId, report.diverged);
+}
+
 // Receive seam for the timeline: ingest a record body and describe what to render.
 // `serverTimestampMs` is the SERVICE receive timestamp; on the shared barrier
 // schedule it is what buckets the record onto a barrier every member agrees about
@@ -312,7 +440,10 @@ export function ingestRecordForTimeline(
   body: string | undefined | null,
   serverTimestampMs: number
 ): RecordIngestResult {
-  const record = decodeRecordBody(body);
+  // A relayed record (another member re-sending one Signal may have withheld from us)
+  // is ingested at the barrier the relay names, then rendered like any other.
+  const relay = decodeRelayBody(body);
+  const record = relay?.record ?? decodeRecordBody(body);
   if (!record) {
     return { kind: 'not-record' };
   }
@@ -322,10 +453,28 @@ export function ingestRecordForTimeline(
     return { kind: 'ingested' };
   }
   try {
-    const status: IngestStatus = currentEngine.ingest(
-      record,
-      ingestTimestampFor(groupId, serverTimestampMs)
-    );
+    const receivedMs = benchNowMs();
+    const receivedAt = ingestTimestampFor(groupId, serverTimestampMs);
+    const status: IngestStatus = relay
+      ? currentEngine.ingestRelayed(record, relay.barrier, receivedAt)
+      : currentEngine.ingest(record, receivedAt);
+    if (groupId) {
+      drop(relayAndCheckViews(groupId, currentEngine));
+    }
+    if (isBenchLogEnabled() && groupId) {
+      const doneMs = benchNowMs();
+      benchLog({
+        event: 'receive',
+        group: groupTag(groupId),
+        key: status.eh,
+        kind: opName(currentEngine, status.eh, 'record'),
+        status: status.status,
+        receivedMs,
+        doneMs,
+        ingestMs: doneMs - receivedMs,
+      });
+      benchSettled(groupId, currentEngine);
+    }
     log.info(
       `ingested record: ${status.status}${status.reason ? ` (${status.reason})` : ''}`
     );
@@ -353,7 +502,7 @@ export function ingestRecordForTimeline(
         // would put a wrong badge name in front of an admin about to grant it.
         log.error(
           `ingestRecordForTimeline: could not read a slot out of a ${entry.kind} ` +
-          `body (${JSON.stringify(entry.body)}); not rendering it`
+            `body (${JSON.stringify(entry.body)}); not rendering it`
         );
         return { kind: 'ingested' };
       }
@@ -386,7 +535,11 @@ export function ingestRecordForTimeline(
 
 // Fold our own record into our replica at the timestamp it will be SENT with, so every
 // replica — ours included — places it on the same barrier (personasRegistry).
-function selfIngest(groupId: string, currentEngine: Engine, emitted: Emitted): void {
+function selfIngest(
+  groupId: string,
+  currentEngine: Engine,
+  emitted: Emitted
+): void {
   const sentAt = stampOwnRecord(Buffer.from(emitted.bytes).toString('base64'));
   currentEngine.ingest(emitted.bytes, ingestTimestampFor(groupId, sentAt));
 }
@@ -412,12 +565,20 @@ export function emitAndSelfIngest(
   if (!groupId || !currentEngine) {
     return undefined;
   }
+  const startMs = benchNowMs();
   const emitted = produce(currentEngine);
   persistAfterEmit(groupId, currentEngine);
   // Our own record never went to the server, so there is no service timestamp;
   // ingestTimestampFor falls back to local wall-clock on the shared schedule (and to
   // the local-barrier 0 when there is no schedule).
   selfIngest(groupId, currentEngine, emitted);
+  benchEmitted(
+    groupId,
+    currentEngine,
+    opName(currentEngine, emitted.eh, 'record'),
+    startMs,
+    emitted.eh
+  );
   return { emitted, body: encodeRecordBody(emitted.bytes) };
 }
 
@@ -446,6 +607,7 @@ export function composePersonaPost(
     return undefined;
   }
   let emitted: Emitted;
+  const startMs = benchNowMs();
   try {
     if (choice.kind === 'anon') {
       emitted = currentEngine.emitPostAnon(text);
@@ -471,6 +633,15 @@ export function composePersonaPost(
   }
   // Our own record; no service timestamp exists yet (see emitAndSelfIngest).
   selfIngest(groupId, currentEngine, emitted);
+  benchEmitted(
+    groupId,
+    currentEngine,
+    { anon: 'anon_post', pseudo: 'pseudo_post', rate: 'rate_limited_post' }[
+      choice.kind
+    ],
+    startMs,
+    emitted.eh
+  );
   return {
     body: text,
     persona: emitted.persona ?? undefined,
@@ -504,6 +675,7 @@ export function composePersonaRate(
     return undefined;
   }
   let emitted: Emitted;
+  const startMs = benchNowMs();
   try {
     emitted = currentEngine.emitRate(targetEh, delta);
     persistAfterEmit(groupId, currentEngine);
@@ -512,6 +684,7 @@ export function composePersonaRate(
     return undefined;
   }
   selfIngest(groupId, currentEngine, emitted);
+  benchEmitted(groupId, currentEngine, 'rating', startMs, emitted.eh);
   return { eh: emitted.eh, body: encodeRateBody(emitted.bytes) };
 }
 
@@ -529,6 +702,7 @@ export function composePersonaPoll(
     return undefined;
   }
   let emitted: Emitted;
+  const startMs = benchNowMs();
   try {
     emitted = currentEngine.emitPoll(
       descriptor.question,
@@ -542,6 +716,7 @@ export function composePersonaPoll(
     return undefined;
   }
   selfIngest(groupId, currentEngine, emitted);
+  benchEmitted(groupId, currentEngine, 'poll', startMs, emitted.eh);
   return {
     eh: emitted.eh,
     body: encodePollBody(emitted.bytes, descriptor),
@@ -570,6 +745,7 @@ export function composePersonaVote(
     return undefined;
   }
   let emitted: Emitted;
+  const startMs = benchNowMs();
   try {
     // The poll's envelope hash IS the poll_id: the engine derives
     // `context = poll.context() = Poseidon(eh)` and the voter's pseudonym as
@@ -582,6 +758,7 @@ export function composePersonaVote(
     return undefined;
   }
   selfIngest(groupId, currentEngine, emitted);
+  benchEmitted(groupId, currentEngine, 'vote', startMs, emitted.eh);
   return { eh: emitted.eh, body: encodeVoteBody(emitted.bytes) };
 }
 
@@ -591,8 +768,16 @@ export function composePersonaVote(
 // Messenger::prepare_scan in the engine): prepare (prove; nothing released), check
 // `personaScanStillValid` close to sending, then commit — which is the only way to get
 // the record to send — or discard. Throws "nothing to scan" when nothing is outstanding.
-export function preparePersonaScan(groupId: string | undefined): string | undefined {
+// When each group's prepared scan started proving (for the experiment log).
+const scanStartedMs = new Map<string, number>();
+
+export function preparePersonaScan(
+  groupId: string | undefined
+): string | undefined {
   const currentEngine = getPersonasEngine(groupId);
+  if (groupId) {
+    scanStartedMs.set(groupId, benchNowMs());
+  }
   return currentEngine ? currentEngine.prepareScan() : undefined;
 }
 
@@ -615,6 +800,13 @@ export function commitPersonaScan(
   const emitted = currentEngine.commitScan();
   persistAfterEmit(groupId, currentEngine);
   selfIngest(groupId, currentEngine, emitted);
+  benchEmitted(
+    groupId,
+    currentEngine,
+    'scan',
+    scanStartedMs.get(groupId) ?? benchNowMs(),
+    emitted.eh
+  );
   return { eh: emitted.eh, body: encodeRecordBody(emitted.bytes) };
 }
 
@@ -646,7 +838,9 @@ export function composeBadgeApprove(
   requestEh: string,
   slot: number
 ): { eh: string; body: string } | undefined {
-  return emitBadgeRecord(groupId, engine => engine.emitBadgeApprove(requestEh, slot));
+  return emitBadgeRecord(groupId, engine =>
+    engine.emitBadgeApprove(requestEh, slot)
+  );
 }
 
 /**
@@ -665,9 +859,17 @@ function emitBadgeRecord(
   if (!groupId || !currentEngine) {
     return undefined;
   }
+  const startMs = benchNowMs();
   const emitted = produce(currentEngine);
   persistAfterEmit(groupId, currentEngine);
   selfIngest(groupId, currentEngine, emitted);
+  benchEmitted(
+    groupId,
+    currentEngine,
+    opName(currentEngine, emitted.eh, 'badge'),
+    startMs,
+    emitted.eh
+  );
   return { eh: emitted.eh, body: encodeBadgeBody(emitted.bytes) };
 }
 
@@ -692,7 +894,9 @@ export function heldBadges(groupId: string | undefined): ReadonlyArray<string> {
 }
 
 /** Badge requests awaiting approval, read from the replica's own log. */
-export function listPendingBadgeRequests(groupId: string | undefined): ReadonlyArray<{
+export function listPendingBadgeRequests(
+  groupId: string | undefined
+): ReadonlyArray<{
   eh: string;
   slot: number;
 }> {
@@ -773,7 +977,17 @@ export function composePersonaAuthorship(
     return undefined;
   }
   try {
+    const startMs = benchNowMs();
     const proof = engine.emitAuthorship(contextA, contextB);
+    if (groupId) {
+      benchEmitted(
+        groupId,
+        engine,
+        'authorship',
+        startMs,
+        benchProofKey(proof)
+      );
+    }
     // Both: `body` for the wire, `proof` so the caller can verify its own output
     // before sending and render from the verifier rather than from its own inputs.
     return { body: encodeAuthorshipProof(proof), proof };
@@ -803,7 +1017,17 @@ export function composePersonaBadgeProof(
     return undefined;
   }
   try {
+    const startMs = benchNowMs();
     const proof = engine.emitBadgeProof(badge);
+    if (groupId) {
+      benchEmitted(
+        groupId,
+        engine,
+        'badge_proof',
+        startMs,
+        benchProofKey(proof)
+      );
+    }
     return { body: encodeBadgeProof(proof), proof };
   } catch (error) {
     // Includes the expected case: we do not hold the badge, so the witness does not
@@ -829,7 +1053,18 @@ export function verifyPersonaBadgeProof(
     return undefined;
   }
   try {
-    return engine.verifyBadgeProof(Buffer.from(proof)) ?? undefined;
+    const startMs = benchNowMs();
+    const badge = engine.verifyBadgeProof(Buffer.from(proof)) ?? undefined;
+    const doneMs = benchNowMs();
+    benchLog({
+      event: 'verify',
+      op: 'badge_proof',
+      key: benchProofKey(proof),
+      ms: doneMs - startMs,
+      doneMs,
+      ok: badge != null,
+    });
+    return badge;
   } catch (error) {
     log.error(`verifyPersonaBadgeProof failed: ${toLogFormat(error)}`);
     return undefined;
@@ -853,7 +1088,18 @@ export function verifyPersonaAuthorship(
     return undefined;
   }
   try {
-    return engine.verifyAuthorship(Buffer.from(proof)) ?? undefined;
+    const startMs = benchNowMs();
+    const names = engine.verifyAuthorship(Buffer.from(proof)) ?? undefined;
+    const doneMs = benchNowMs();
+    benchLog({
+      event: 'verify',
+      op: 'authorship',
+      key: benchProofKey(proof),
+      ms: doneMs - startMs,
+      doneMs,
+      ok: names != null,
+    });
+    return names;
   } catch (error) {
     log.error(`verifyPersonaAuthorship failed: ${toLogFormat(error)}`);
     return undefined;
@@ -879,7 +1125,10 @@ export function verifyPersonaAuthorship(
 //     short window — long enough to collapse a burst of renders, short enough that a
 //     moving tally still updates promptly.
 const POLL_STATUS_TTL_MS = 500;
-const pollStatusCache = new Map<string, { atMs: number; lines: ReadonlyArray<string> }>();
+const pollStatusCache = new Map<
+  string,
+  { atMs: number; lines: ReadonlyArray<string> }
+>();
 
 export function getPollStatusLine(
   groupId: string | undefined,

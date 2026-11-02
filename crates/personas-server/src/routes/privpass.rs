@@ -11,7 +11,7 @@ use personas_core::privpass::{
     decode_redemption, decode_ticket_request, encode_validated_tickets, issue_tickets,
     redemption_key, ticket_pseudonym, verify_redemption,
 };
-use personas_core::{persona, F};
+use personas_core::{F, persona};
 use transport_api::{ConversationId, MessageId, Outgoing};
 
 use crate::bulletin::{self, bulk, epoch, verify_and_store};
@@ -147,11 +147,17 @@ async fn redeem_post(
     Ok(ok())
 }
 
-pub async fn redeem_post_signal(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+pub async fn redeem_post_signal(
+    State(state): State<ServerLock>,
+    body: Bytes,
+) -> AppResult<Response> {
     redeem_post(state, Namespace::Signal, false, body).await
 }
 
-pub async fn redeem_post_slack(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+pub async fn redeem_post_slack(
+    State(state): State<ServerLock>,
+    body: Bytes,
+) -> AppResult<Response> {
     redeem_post(state, Namespace::Slack, false, body).await
 }
 
@@ -174,7 +180,10 @@ pub async fn redeem_pseudo_post_slack(
 /// the ledger's accumulated rating. Fixed rather than free-form for the same reason
 /// badge redemption is limited to three flags: an arbitrary caller-chosen amount
 /// would let anyone inflate their own reputation without limit.
-pub async fn redeem_reputation(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+pub async fn redeem_reputation(
+    State(state): State<ServerLock>,
+    body: Bytes,
+) -> AppResult<Response> {
     let redemption = decode_redemption(&body)
         .map_err(|e| AppError::BadRequest(format!("that is not a redemption: {e}")))?;
 

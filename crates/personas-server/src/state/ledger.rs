@@ -485,10 +485,6 @@ impl SpentTicketLog {
         })
     }
 
-    pub fn is_spent(&self, key: &str) -> bool {
-        self.spent.contains(key)
-    }
-
     /// Marks `key` spent. Returns `false` (and does not write) if it already was — the
     /// caller's cue to reject the redemption as a replay.
     pub fn mark_spent(&mut self, key: String) -> Result<bool> {
@@ -519,8 +515,7 @@ fn write_jsonl<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
     file.sync_all()?;
     drop(file);
 
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("could not replace {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("could not replace {}", path.display()))?;
     Ok(())
 }
 

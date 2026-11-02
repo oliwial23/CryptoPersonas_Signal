@@ -208,14 +208,19 @@ mod e2e {
             (),
             Snark,
             ObjT,
-        >(rng, personas_core::circuits::not_banned_pred, None, F::from(0u64));
+        >(
+            rng,
+            personas_core::circuits::not_banned_pred,
+            None,
+            F::from(0u64),
+        );
 
         Keys {
             not_banned_vk,
             replica: ReplicaKeys {
                 standard: std_vk,
                 pseudo: pseudo_vk,
-                pseudo_rate: scan_vk.clone(), // unused by this suite
+                pseudo_rate: scan_vk.clone(),   // unused by this suite
                 badge_request: scan_vk.clone(), // unused by this suite
                 join: join_vk,
                 scan: scan_vk,
@@ -224,10 +229,10 @@ mod e2e {
             member: MemberKeys {
                 standard: std_pk,
                 pseudo: pseudo_pk,
-                pseudo_rate: scan_pk.clone(), // unused by this suite
-                badge_request: scan_pk.clone(), // unused by this suite
+                pseudo_rate: scan_pk.clone(),     // unused by this suite
+                badge_request: scan_pk.clone(),   // unused by this suite
                 authorship_pred: pred_pk.clone(), // unused by this suite
-                badge_pred: pred_pk.clone(), // unused by this suite
+                badge_pred: pred_pk.clone(),      // unused by this suite
                 join: join_pk,
                 not_banned: not_banned_pk,
                 scan: scan_pk,
@@ -441,8 +446,14 @@ mod e2e {
         deliver(&mut admin, &post);
 
         let ban = admin.emit_ban(post.eh).unwrap();
-        assert_eq!(deliver(&mut poster, &ban).unwrap().unwrap(), Status::Applied);
-        assert!(admin.replica().derived().polls.is_empty(), "no poll is opened");
+        assert_eq!(
+            deliver(&mut poster, &ban).unwrap().unwrap(),
+            Status::Applied
+        );
+        assert!(
+            admin.replica().derived().polls.is_empty(),
+            "no poll is opened"
+        );
         for m in [&mut poster, &mut admin] {
             m.barrier();
         }
@@ -456,14 +467,24 @@ mod e2e {
         );
 
         let scan = poster.emit_scan(&mut rng).unwrap();
-        assert_eq!(deliver(&mut admin, &scan).unwrap().unwrap(), Status::Applied);
-        assert_eq!(poster.member().unwrap().user.data.banned, F::from(1), "banned");
+        assert_eq!(
+            deliver(&mut admin, &scan).unwrap().unwrap(),
+            Status::Applied
+        );
+        assert_eq!(
+            poster.member().unwrap().user.data.banned,
+            F::from(1),
+            "banned"
+        );
         // Its persona proofs are no longer satisfiable: either proving refuses, or the
         // proof it makes is rejected by everyone else.
         match poster.emit_post_anon(&mut rng, "still here?") {
             Err(_) => {}
             Ok(post) => assert!(
-                matches!(deliver(&mut admin, &post).unwrap().unwrap(), Status::Rejected(_)),
+                matches!(
+                    deliver(&mut admin, &post).unwrap().unwrap(),
+                    Status::Rejected(_)
+                ),
                 "a banned member's persona post is refused"
             ),
         }
@@ -647,6 +668,138 @@ mod e2e {
     /// A stale, pre-ban scan is rejected once a replica has crossed the ban barrier —
     /// O10, carried through the messenger layer (§5.2). Isolated from the flagship so
     /// the assertion is unambiguous.
+    /// The messenger withholds one member's post from another (§5.5). The next record
+    /// sent by someone who saw it carries a view claim the deprived member cannot
+    /// match, and the reverse holds too. A member who holds the post relays it, and
+    /// the deprived member's view, state and future claims then match the group's.
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_a_withheld_post_is_detected_and_relayed() {
+        let mut rng = StdRng::seed_from_u64(55);
+        let keys = keygen(&mut rng);
+        let conv = ConversationId("views".into());
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let hb = Heartbeat::new(0, 1000);
+        let member = |rng: &mut StdRng| {
+            Msg::new(
+                transport.clone(),
+                conv.clone(),
+                keys.replica.clone(),
+                config(),
+                Some(Member::create(keys.member.clone(), rng)),
+            )
+            .with_heartbeat(hb)
+            .with_view_checks(true)
+        };
+        let mut a = member(&mut rng);
+        let mut b = member(&mut rng);
+        let mut c = member(&mut rng);
+
+        let joins = [
+            a.emit_join(&mut rng, acct()).unwrap(),
+            b.emit_join(&mut rng, acct()).unwrap(),
+            c.emit_join(&mut rng, acct()).unwrap(),
+        ];
+        for m in [&mut a, &mut b, &mut c] {
+            for j in &joins {
+                deliver_at(m, j, 100);
+            }
+        }
+
+        // `a` posts in barrier 1, and the messenger delivers it to `a` and `b` only.
+        let hidden = a
+            .emit_post_anon(&mut rng, "only some of you see this")
+            .unwrap();
+        deliver_at(&mut a, &hidden, 1100);
+        deliver_at(&mut b, &hidden, 1100);
+        for m in [&mut a, &mut b, &mut c] {
+            m.tick(4500);
+        }
+        assert_ne!(a.replica().view_digest(2), c.replica().view_digest(2));
+
+        // `b` and `c` each post in barrier 4, and these reach everyone. Each carries a
+        // claim about barrier 2.
+        let from_b = b.emit_post_anon(&mut rng, "b").unwrap();
+        let from_c = c.emit_post_anon(&mut rng, "c").unwrap();
+        for m in [&mut a, &mut b, &mut c] {
+            deliver_at(m, &from_b, 4100);
+            deliver_at(m, &from_c, 4200);
+            m.tick(6500);
+        }
+        let report = a.view_report();
+        assert_eq!(report.mismatches.len(), 1, "{report:?}");
+        assert_eq!(report.mismatches[0].record, from_c.eh);
+        assert!(c.view_report().diverged(), "c sees b's claim disagree too");
+        assert!(c.replica().status(&hidden.eh).is_none());
+
+        // `a` relays what it holds around the mismatch; the relay reaches `c`.
+        let relays = a.take_relays();
+        assert!(
+            relays
+                .iter()
+                .any(|(_, bytes)| record::Eh::of_bytes(bytes) == hidden.eh)
+        );
+        assert!(a.take_relays().is_empty(), "each record is relayed once");
+        for (first_barrier, bytes) in &relays {
+            let incoming = Incoming::Message {
+                id: MessageId("relay".into()),
+                conversation: c.conversation().clone(),
+                sender: "peer".into(),
+                body: carriage::encode_relay(*first_barrier, bytes),
+                reply_to: None,
+                attachments: vec![],
+                received_at: 6600,
+            };
+            c.ingest_incoming(&incoming).unwrap().unwrap();
+        }
+        assert_eq!(c.replica().first_barrier(&hidden.eh), Some(1));
+        assert_eq!(c.replica().status(&hidden.eh), Some(Status::Applied));
+        for barrier in 0..7 {
+            assert_eq!(
+                a.replica().view_digest(barrier),
+                c.replica().view_digest(barrier)
+            );
+        }
+        assert_eq!(fingerprint(&a), fingerprint(&c));
+
+        // With view checks off (the default), a record carries no claim, relays are
+        // ignored and nothing is reported.
+        let mut off = Msg::new(
+            transport.clone(),
+            conv.clone(),
+            keys.replica.clone(),
+            config(),
+            Some(Member::create(keys.member.clone(), &mut rng)),
+        )
+        .with_heartbeat(hb);
+        off.tick(6500);
+        let join = off.emit_join(&mut rng, acct()).unwrap();
+        assert_eq!(record::decode_with_view(&join.bytes).unwrap().2, None);
+        assert!(
+            off.ingest_relayed(relays[0].1.clone(), relays[0].0, 6600)
+                .is_ok()
+        );
+        assert!(
+            off.replica()
+                .status(&record::Eh::of_bytes(&relays[0].1))
+                .is_none()
+        );
+        assert!(off.take_relays().is_empty() && !off.view_report().diverged());
+
+        // From here on, `c`'s claims agree with everyone's.
+        for m in [&mut a, &mut b, &mut c] {
+            m.tick(20_500);
+        }
+        let later = c.emit_post_anon(&mut rng, "caught up").unwrap();
+        for m in [&mut a, &mut b, &mut c] {
+            deliver_at(m, &later, 20_600);
+            m.tick(23_500);
+            let report = m.view_report();
+            assert!(!report.diverged(), "{report:?}");
+            assert_eq!(report.agreeing, 1);
+        }
+    }
+
     #[test]
     #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
     fn e2e_stale_scan_is_rejected_after_the_ban() {
@@ -768,7 +921,10 @@ mod e2e {
             config(),
             Some(Member::create(keys.member.clone(), &mut rng)),
         );
-        for e in [poster.emit_join(&mut rng, acct()).unwrap(), peer.emit_join(&mut rng, acct()).unwrap()] {
+        for e in [
+            poster.emit_join(&mut rng, acct()).unwrap(),
+            peer.emit_join(&mut rng, acct()).unwrap(),
+        ] {
             deliver(&mut poster, &e);
             deliver(&mut peer, &e);
         }
@@ -794,7 +950,10 @@ mod e2e {
             barrier,
         );
         assert_eq!(fingerprint(&restored), fingerprint(&peer));
-        assert!(restored.member_on_bulletin(), "the restored object is on the tree");
+        assert!(
+            restored.member_on_bulletin(),
+            "the restored object is on the tree"
+        );
 
         let second = restored
             .emit_post_pseudo(&mut rng, "after the restart", F::from(9))
@@ -892,7 +1051,10 @@ mod e2e {
         for m in [&mut poster, &mut v1, &mut v2] {
             m.barrier();
         }
-        assert!(!poster.scan_still_valid(), "the settlement made the scan stale");
+        assert!(
+            !poster.scan_still_valid(),
+            "the settlement made the scan stale"
+        );
 
         poster.discard_scan().unwrap();
         assert_eq!(
@@ -904,7 +1066,10 @@ mod e2e {
         poster.prepare_scan(&mut rng).expect("re-prepare");
         assert!(poster.scan_still_valid());
         let scan = poster.commit_scan().unwrap();
-        assert!(matches!(poster.discard_scan(), Err(SendError::NoPreparedScan)));
+        assert!(matches!(
+            poster.discard_scan(),
+            Err(SendError::NoPreparedScan)
+        ));
         for m in [&mut v1, &mut v2] {
             assert_eq!(deliver(m, &scan).unwrap().unwrap(), Status::Applied);
         }
@@ -938,17 +1103,25 @@ mod e2e {
         let join = m.emit_join(&mut rng, acct()).unwrap();
         deliver(&mut m, &join);
         for i in 0..3u64 {
-            let e = m.emit_post_pseudo(&mut rng, "post", F::from(100 + i)).unwrap();
+            let e = m
+                .emit_post_pseudo(&mut rng, "post", F::from(100 + i))
+                .unwrap();
             deliver(&mut m, &e);
         }
         assert_eq!(m.member().unwrap().user.num_outstanding_callbacks(), 3);
-        assert!(!m.scan_needed(), "nothing invoked yet: a scan would absorb nothing");
+        assert!(
+            !m.scan_needed(),
+            "nothing invoked yet: a scan would absorb nothing"
+        );
 
         // Cross the settlement window: every post's ticket is invoked.
         for _ in 0..=config().settlement_barriers {
             m.barrier();
         }
-        assert!(m.scan_needed(), "invoked callbacks are waiting to be absorbed");
+        assert!(
+            m.scan_needed(),
+            "invoked callbacks are waiting to be absorbed"
+        );
 
         let mut remaining = Vec::new();
         for _ in 0..3 {
@@ -958,7 +1131,10 @@ mod e2e {
             remaining.push(m.sweep_remaining());
         }
         assert_eq!(remaining, vec![2, 1, 0], "one scan per callback");
-        assert!(!m.member().unwrap().user.is_scanning(), "the sweep finished");
+        assert!(
+            !m.member().unwrap().user.is_scanning(),
+            "the sweep finished"
+        );
         assert_eq!(
             m.member().unwrap().user.num_outstanding_callbacks(),
             0,
@@ -1030,7 +1206,11 @@ mod e2e {
             !group.replica().has_produced_root(root),
             "but its root is not one the group produced, so it must be refused"
         );
-        assert!(group.replica().has_produced_root(group.replica().obj_root()));
+        assert!(
+            group
+                .replica()
+                .has_produced_root(group.replica().obj_root())
+        );
     }
 
     /// Proven joins, one per account, and the admin-approved re-join a reset needs.
@@ -1089,7 +1269,11 @@ mod e2e {
         assert!(bob.import_records(history, at) > 0);
         assert_eq!(bob.replica().obj_root(), admin.replica().obj_root());
         assert_eq!(
-            bob.replica().log().iter().find(|e| e.eh == old_post).map(|e| e.body.clone()),
+            bob.replica()
+                .log()
+                .iter()
+                .find(|e| e.eh == old_post)
+                .map(|e| e.body.clone()),
             Some(String::new()),
             "old posts are known to the replica, but not their text"
         );
@@ -1116,7 +1300,7 @@ mod e2e {
         let keys = keygen(&mut rng);
         let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
         let conv = ConversationId("joins".into());
-        let mut new_member = |rng: &mut StdRng| {
+        let new_member = |rng: &mut StdRng| {
             Msg::new(
                 transport.clone(),
                 conv.clone(),
@@ -1140,12 +1324,19 @@ mod e2e {
         let j = admin.emit_join(&mut rng, admin_acct).unwrap();
         status(&mut alice, &j);
         let j = alice.emit_join(&mut rng, alice_acct).unwrap();
-        assert_eq!(status(&mut admin, &j), Status::Applied, "a fresh, proven join");
+        assert_eq!(
+            status(&mut admin, &j),
+            Status::Applied,
+            "a fresh, proven join"
+        );
 
         // A doctored object cannot produce an acceptable join...
         let mut forger = Member::create(keys.member.clone(), &mut rng);
         forger.user.data.badge1 = *FACULTY_F;
-        assert!(matches!(forger.join(&mut rng, F::from(1u64)), Err(MemberError::NotFresh)));
+        assert!(matches!(
+            forger.join(&mut rng, F::from(1u64)),
+            Err(MemberError::NotFresh)
+        ));
         let forced = forger
             .user
             .prove_statement::<H, F, ark_r1cs_std::fields::fp::FpVar<F>, (), (), Snark>(
@@ -1163,13 +1354,33 @@ mod e2e {
             proof: Ark(forced.proof),
         })
         .unwrap();
-        let forged = Emitted { bytes, eh: record::decode(&record::encode(&Record::PollOpen { question: String::new(), options: vec![], kind: PollKind::Standard, target: None }).unwrap().0).unwrap().1, persona: None };
-        assert_eq!(status(&mut admin, &forged), Status::Rejected("join proof failed"));
+        let forged = Emitted {
+            bytes,
+            eh: record::decode(
+                &record::encode(&Record::PollOpen {
+                    question: String::new(),
+                    options: vec![],
+                    kind: PollKind::Standard,
+                    target: None,
+                })
+                .unwrap()
+                .0,
+            )
+            .unwrap()
+            .1,
+            persona: None,
+        };
+        assert_eq!(
+            status(&mut admin, &forged),
+            Status::Rejected("join proof failed")
+        );
         // ...nor can a valid proof be pinned to someone else's object or account.
         let honest = Member::create(keys.member.clone(), &mut rng)
             .join(&mut rng, F::from(2u64))
             .unwrap();
-        let Record::Join { proof, .. } = honest else { unreachable!() };
+        let Record::Join { proof, .. } = honest else {
+            unreachable!()
+        };
         let (bytes, _) = record::encode(&Record::Join {
             object: Ark(forger.commitment()),
             old_nul: Ark(F::from(0u64)),
@@ -1177,19 +1388,34 @@ mod e2e {
             proof,
         })
         .unwrap();
-        let swapped = Emitted { bytes, eh: forged.eh, persona: None };
-        assert_eq!(status(&mut admin, &swapped), Status::Rejected("join proof failed"));
+        let swapped = Emitted {
+            bytes,
+            eh: forged.eh,
+            persona: None,
+        };
+        assert_eq!(
+            status(&mut admin, &swapped),
+            Status::Rejected("join proof failed")
+        );
 
         // One join per account: a second identity for alice is refused.
         let mut alice2 = new_member(&mut rng);
         let again = alice2.emit_join(&mut rng, alice_acct).unwrap();
-        assert_eq!(status(&mut admin, &again), Status::Rejected("account already joined"));
+        assert_eq!(
+            status(&mut admin, &again),
+            Status::Rejected("account already joined")
+        );
         tick([&mut alice, &mut admin]);
 
         // Not banned: needs a completed sweep first.
-        let post = alice.emit_post_pseudo(&mut rng, "hi", F::from(5u64)).unwrap();
+        let post = alice
+            .emit_post_pseudo(&mut rng, "hi", F::from(5u64))
+            .unwrap();
         status(&mut admin, &post);
-        assert!(alice.prove_not_banned(&mut rng, alice_acct).is_err(), "not swept since posting");
+        assert!(
+            alice.prove_not_banned(&mut rng, alice_acct).is_err(),
+            "not swept since posting"
+        );
         for m in [&mut alice, &mut admin] {
             for _ in 0..=config().settlement_barriers {
                 m.barrier();
@@ -1204,7 +1430,10 @@ mod e2e {
         let (account, root) =
             personas_core::verify_not_banned_proof(&keys.not_banned_vk, &proof).unwrap();
         assert_eq!(account, alice_acct);
-        assert!(admin.replica().has_produced_root(root), "made against the group's tree");
+        assert!(
+            admin.replica().has_produced_root(root),
+            "made against the group's tree"
+        );
 
         // The admin approves; alice resets to a fresh object and joins once more.
         let approve = admin.emit_rejoin_approve(alice_acct).unwrap();
@@ -1213,13 +1442,20 @@ mod e2e {
         tick([&mut alice, &mut admin]);
         alice.reset_member(&mut rng).unwrap();
         let rejoin = alice.emit_join(&mut rng, alice_acct).unwrap();
-        assert_eq!(status(&mut admin, &rejoin), Status::Applied, "the approved re-join");
+        assert_eq!(
+            status(&mut admin, &rejoin),
+            Status::Applied,
+            "the approved re-join"
+        );
         assert!(alice.member_on_bulletin());
         tick([&mut alice, &mut admin]);
         // The approval is used up.
         let mut alice3 = new_member(&mut rng);
         let third = alice3.emit_join(&mut rng, alice_acct).unwrap();
-        assert_eq!(status(&mut admin, &third), Status::Rejected("account already joined"));
+        assert_eq!(
+            status(&mut admin, &third),
+            Status::Rejected("account already joined")
+        );
         assert_eq!(fingerprint(&alice), fingerprint(&admin));
     }
 

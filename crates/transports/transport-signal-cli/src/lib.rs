@@ -163,16 +163,16 @@ impl Transport for SignalCliTransport {
         let attachments = msg
             .attachments
             .iter()
-            .map(|a| encode_attachment(a))
+            .map(encode_attachment)
             .collect::<Vec<_>>();
 
         let response = client
             .send(
                 Some(self.config.account.clone()),
-                vec![],                       // recipients: unused, we send to a group
+                vec![],                           // recipients: unused, we send to a group
                 vec![msg.conversation.0.clone()], // groupIds
-                false,                        // noteToSelf
-                false,                        // endSession
+                false,                            // noteToSelf
+                false,                            // endSession
                 body,
                 attachments,
                 vec![], // mentions
@@ -320,12 +320,7 @@ fn parse_envelope(value: &Value) -> Option<Incoming> {
         .to_string();
 
     let data = envelope.get("dataMessage")?;
-    let conversation = ConversationId(
-        data.get("groupInfo")?
-            .get("groupId")?
-            .as_str()?
-            .to_string(),
-    );
+    let conversation = ConversationId(data.get("groupInfo")?.get("groupId")?.as_str()?.to_string());
 
     if let Some(reaction) = data.get("reaction") {
         return Some(Incoming::Reaction {

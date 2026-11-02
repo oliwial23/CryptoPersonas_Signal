@@ -288,10 +288,12 @@ impl<F: PrimeField + Absorb, const MH: usize, const NH: usize> MerkleCallbackSto
             ranges.push((F::ZERO, top));
         }
 
-        let mut tree = IncrementalMerkleTree::<F, NH>::new();
-        for &(lo, hi) in &ranges {
-            tree.append(range_leaf(lo, hi, self.epoch));
-        }
+        // Every leaf carries the epoch, so the whole tree is new each epoch; build it level
+        // by level (the same tree as appending each leaf, ~2 hashes per leaf, not NH).
+        let epoch = self.epoch;
+        let tree = IncrementalMerkleTree::<F, NH>::from_leaves(
+            ranges.iter().map(|&(lo, hi)| range_leaf(lo, hi, epoch)),
+        );
         self.ranges = ranges;
         self.nmemb_tree = tree;
     }

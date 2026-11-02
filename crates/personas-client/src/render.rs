@@ -4,7 +4,7 @@
 //! serverless path carry the badge *proof* and nothing else, so this module (and the
 //! SVG toolchain it drags in) is behind the `render` feature.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use badge_maker::{BadgeBuilder, Style};
 use resvg::{
     tiny_skia,
@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{badges::badge_name, PersonaClient};
+use crate::{PersonaClient, badges::badge_name};
 
 /// A stable color per badge text, so "Faculty" always renders the same shade.
 pub fn color_for_badge_text(text: &str) -> String {
@@ -105,7 +105,11 @@ fn render_svg_to_png(svg: &str, out: &std::path::Path) -> Result<()> {
     let mut pixmap = tiny_skia::Pixmap::new(size.width() as u32, size.height() as u32)
         .ok_or_else(|| anyhow!("badge has a degenerate size"))?;
 
-    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
 
     pixmap
         .save_png(out)

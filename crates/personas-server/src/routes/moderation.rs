@@ -49,13 +49,16 @@ pub(crate) fn call(st: &mut ServerState, cb: Callback, arg: F) -> AppResult<()> 
 
     let current = epoch(&st.db);
 
-    <CStore as CallbackBul<F, F, Cr>>::verify_call_and_append(
-        &mut st.db.callback_bul,
-        called.0,
-        called.1,
-        called.2,
-        current,
-    )
+    {
+        let _: () = called.2;
+        <CStore as CallbackBul<F, F, Cr>>::verify_call_and_append(
+            &mut st.db.callback_bul,
+            called.0,
+            called.1,
+            (),
+            current,
+        )
+    }
     .map_err(|e| {
         AppError::Internal(anyhow::anyhow!(
             "the callback bulletin refused the call: {e:?}"
@@ -98,11 +101,7 @@ pub async fn slack_reputation(State(state): State<ServerLock>, body: Bytes) -> A
     apply_reputation(state, Namespace::Slack, body).await
 }
 
-async fn apply_reputation(
-    state: ServerLock,
-    ns: Namespace,
-    body: Bytes,
-) -> AppResult<Response> {
+async fn apply_reputation(state: ServerLock, ns: Namespace, body: Bytes) -> AppResult<Response> {
     let (cb, cb_hex) = parse_callback(&body)?;
 
     let mut st = state.write().await;

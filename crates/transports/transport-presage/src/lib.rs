@@ -792,7 +792,10 @@ async fn fanout_message(
             // — a genuinely different failure (unknown recipient, IO error, ...) still
             // aborts the fan-out below, unlike the blanket swallow the bring-up-only
             // `distribute_group_secret`/`receive_group_secret` helpers use.
-            if matches!(&e, presage::Error::ServiceError(ServiceError::WsClosing { .. })) {
+            if matches!(
+                &e,
+                presage::Error::ServiceError(ServiceError::WsClosing { .. })
+            ) {
                 warn!(
                     error = %e,
                     ?member,
@@ -954,7 +957,11 @@ mod tests {
     #[test]
     fn corrupt_key_distribution_payload_is_an_error_not_a_skip() {
         let malformed = format!("{KEY_DISTRIBUTION_TAG}not-valid-base64!!!");
-        assert!(decode_key_distribution(&malformed).expect("tagged, must be Some").is_err());
+        assert!(
+            decode_key_distribution(&malformed)
+                .expect("tagged, must be Some")
+                .is_err()
+        );
     }
 
     /// `tick(&mut None)` must never resolve — a `tokio::select!` branch built on it

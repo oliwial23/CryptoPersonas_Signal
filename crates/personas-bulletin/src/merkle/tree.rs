@@ -253,6 +253,37 @@ impl<F: PrimeField + Absorb, const HEIGHT: usize> IncrementalMerkleTree<F, HEIGH
         idx
     }
 
+    /// The tree that appending `leaves` in order would give, built level by level.
+    ///
+    /// Appending one at a time re-hashes the new leaf's whole path, `HEIGHT` hashes per
+    /// leaf. But once every leaf is in, each materialized node is just the hash of its two
+    /// children (an absent right child being `zeros[level]`) — so hashing each level from
+    /// the one below gives exactly the same nodes with about two hashes per leaf
+    /// (`tests::from_leaves_matches_appending` pins the equality).
+    pub fn from_leaves(leaves: impl IntoIterator<Item = F>) -> Self {
+        let mut tree = Self::new();
+        let base: Vec<F> = leaves.into_iter().collect();
+        assert!(
+            (base.len() as u64) <= tree.capacity(),
+            "Merkle tree of height {HEIGHT} cannot hold {} leaves",
+            base.len()
+        );
+        tree.count = base.len();
+        if base.is_empty() {
+            return tree;
+        }
+        tree.levels[0] = base;
+        for l in 0..HEIGHT {
+            let below = &tree.levels[l];
+            let parents: Vec<F> = below
+                .chunks(2)
+                .map(|pair| hash_pair(pair[0], pair.get(1).copied().unwrap_or(tree.zeros[l])))
+                .collect();
+            tree.levels[l + 1] = parents;
+        }
+        tree
+    }
+
     /// Write `value` at `(level, index)`, extending the dense level as needed.
     ///
     /// Appends fill positions left-to-right without gaps, so `index` is always
@@ -304,6 +335,30 @@ impl<F: PrimeField + Absorb, const HEIGHT: usize> IncrementalMerkleTree<F, HEIGH
 }
 
 #[cfg(test)]
+mod from_leaves_tests {
+    use super::*;
+    use ark_bn254::Fr;
+
+    #[test]
+    fn from_leaves_matches_appending() {
+        for n in [0usize, 1, 2, 3, 4, 5, 7, 8, 9, 16, 17, 31, 64, 100] {
+            let leaves: Vec<Fr> = (0..n).map(|i| Fr::from(1000 + i as u64 * 7)).collect();
+            let mut appended = IncrementalMerkleTree::<Fr, 8>::new();
+            for leaf in &leaves {
+                appended.append(*leaf);
+            }
+            let built = IncrementalMerkleTree::<Fr, 8>::from_leaves(leaves.iter().copied());
+            assert_eq!(built.root(), appended.root(), "root, n = {n}");
+            assert_eq!(built.len(), appended.len(), "len, n = {n}");
+            assert_eq!(built.levels, appended.levels, "every node, n = {n}");
+            for i in 0..n {
+                assert_eq!(built.path(i), appended.path(i), "path {i}, n = {n}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ark_bn254::Fr as F;
@@ -323,7 +378,11 @@ mod tests {
             vec![F::from(5u64), F::from(6u64), F::from(7u64)],
         ];
         for data in inputs {
-            assert_eq!(poseidon2(&data), <Poseidon<2>>::hash(&data), "input {data:?}");
+            assert_eq!(
+                poseidon2(&data),
+                <Poseidon<2>>::hash(&data),
+                "input {data:?}"
+            );
         }
         let (a, b) = (F::from(11u64), F::from(13u64));
         assert_eq!(hash_pair(a, b), <Poseidon<2>>::hash(&[a, b]));

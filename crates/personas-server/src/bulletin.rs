@@ -59,10 +59,10 @@ where
 
     let appended = <OStore as UserBul<F, MsgUser>>::verify_interact_and_append::<PubArgs, Snark, N>(
         &mut db.obj_bul,
-        exec.new_object.clone(),
-        exec.old_nullifier.clone(),
+        exec.new_object,
+        exec.old_nullifier,
         pub_args.clone(),
-        exec.cb_com_list.clone(),
+        exec.cb_com_list,
         exec.proof.clone(),
         None,
         vk,

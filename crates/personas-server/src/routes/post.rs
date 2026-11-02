@@ -162,15 +162,12 @@ fn verify_post(
     let current = epoch(&st.db);
 
     let (result, start, millis) = bench::time(|| match flavour {
-        Flavour::Anon => {
-            verify_and_store(&mut st.db, &vk, exec, F::from(0), current, INTERACTION).map(
-                |callbacks| Verified {
-                    callbacks,
-                    persona: None,
-                    context: None,
-                },
-            )
-        }
+        Flavour::Anon => verify_and_store(&mut st.db, &vk, exec, F::from(0), current, INTERACTION)
+            .map(|callbacks| Verified {
+                callbacks,
+                persona: None,
+                context: None,
+            }),
 
         Flavour::Pseudo => {
             let inputs = pub_inputs(&mut reader, 2)?;
@@ -202,7 +199,11 @@ fn verify_post(
                 &mut st.db,
                 &vk,
                 exec,
-                PseudonymArgsRate { context, claimed, i },
+                PseudonymArgsRate {
+                    context,
+                    claimed,
+                    i,
+                },
                 current,
                 INTERACTION,
             )
@@ -249,7 +250,11 @@ async fn relay(
 /// A pseudonym is derived from a context, so a proof naming a context it cannot find is a
 /// proof about a thread the server does not have. That is a client bug (it did not fetch the
 /// contexts) and it is refused rather than posted into the void.
-fn thread_for(st: &ServerState, ns: Namespace, verified: &Verified) -> AppResult<Option<MessageId>> {
+fn thread_for(
+    st: &ServerState,
+    ns: Namespace,
+    verified: &Verified,
+) -> AppResult<Option<MessageId>> {
     let Some(context) = &verified.context else {
         return Ok(None);
     };
@@ -689,12 +694,7 @@ async fn send_plain(
 /// Used by every claim that changes nothing: an authorship claim, a badge claim, a vote. The
 /// member proves a statement about their object without touching the bulletin, so there is no
 /// interaction to append and no callback to file.
-pub fn verify_predicate(
-    vk: &VK,
-    proof: &[u8],
-    label: &str,
-    refusal: &str,
-) -> AppResult<Vec<F>> {
+pub fn verify_predicate(vk: &VK, proof: &[u8], label: &str, refusal: &str) -> AppResult<Vec<F>> {
     use ark_snark::SNARK;
 
     let mut reader = decode(Kind::Predicate, proof)?;

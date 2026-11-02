@@ -174,7 +174,8 @@ fn advance_to_closes_a_ban_poll_on_cadence() {
     let (poll, eh) = ban_poll();
     let config = Config::default();
     let close = config.poll_close_barriers;
-    let mut r = Replica::<4, 4, 4>::new(placeholder_keys(), config).trust_unproven_joins_for_tests();
+    let mut r =
+        Replica::<4, 4, 4>::new(placeholder_keys(), config).trust_unproven_joins_for_tests();
     r.ingest_at(poll, 0).unwrap();
     assert!(!r.poll(&eh).unwrap().closed, "open at barrier 0");
 
@@ -302,11 +303,17 @@ fn a_late_joiner_catches_up_from_stripped_records() {
 
     let mut newcomer = replica();
     assert_eq!(newcomer.import_records(history.clone()), 3);
-    assert_eq!(newcomer.import_records(history), 0, "a second copy adds nothing");
+    assert_eq!(
+        newcomer.import_records(history),
+        0,
+        "a second copy adds nothing"
+    );
     newcomer.advance_to(5);
     assert_eq!(newcomer.obj_root(), old.obj_root());
     assert_eq!(
-        newcomer.poll(&poll_eh).map(|p| (p.opened_barrier, p.closed)),
+        newcomer
+            .poll(&poll_eh)
+            .map(|p| (p.opened_barrier, p.closed)),
         old.poll(&poll_eh).map(|p| (p.opened_barrier, p.closed)),
         "the poll keeps its identity, so later votes still find it"
     );
@@ -317,4 +324,137 @@ fn a_late_joiner_catches_up_from_stripped_records() {
     newcomer.ingest_at(next, 6).unwrap();
     assert_eq!(newcomer.obj_root(), old.obj_root());
     assert_eq!(newcomer.status(&next_eh), Some(Status::Applied));
+}
+
+// --- Views (§5.5) ---------------------------------------------------------------------
+
+/// A proof-free record carrying `claim`; `n` makes it distinct.
+fn claiming(n: u64, claim: Option<super::record::ViewClaim>) -> Vec<u8> {
+    let rec = Record::PollOpen {
+        question: format!("q{n}"),
+        options: vec![],
+        kind: super::record::PollKind::Standard,
+        target: None,
+    };
+    super::record::encode_with_view(&rec, claim).unwrap().0
+}
+
+#[test]
+fn equal_records_at_equal_barriers_give_equal_views_in_any_arrival_order() {
+    let records = [
+        (0, join(1).0),
+        (1, join(2).0),
+        (1, claiming(1, None)),
+        (3, join(3).0),
+    ];
+    let mut a = replica();
+    let mut b = replica();
+    for (at, bytes) in &records {
+        a.ingest_at(bytes.clone(), *at).unwrap();
+    }
+    for (at, bytes) in records.iter().rev() {
+        b.ingest_at(bytes.clone(), *at).unwrap();
+    }
+    for barrier in 0..5 {
+        assert_eq!(a.view_digest(barrier), b.view_digest(barrier));
+    }
+    // Each barrier that holds a record moves the digest; an empty one does not.
+    assert_ne!(a.view_digest(0), a.view_digest(1));
+    assert_eq!(a.view_digest(1), a.view_digest(2));
+}
+
+#[test]
+fn a_withheld_record_is_detected_stays_detected_and_a_relay_heals_it() {
+    let withheld = claiming(9, None);
+    let shared = [(0, join(1).0), (1, join(2).0)];
+    let mut a = replica();
+    let mut b = replica();
+    for (at, bytes) in &shared {
+        a.ingest_at(bytes.clone(), *at).unwrap();
+        b.ingest_at(bytes.clone(), *at).unwrap();
+    }
+    // The messenger delivers one record placed at barrier 1 to `a` only.
+    a.ingest_at(withheld.clone(), 1).unwrap();
+    a.advance_to(4);
+    b.advance_to(4);
+    assert_eq!(a.view_claim().unwrap().barrier, 2);
+
+    // Each side's next record carries its claim, and reaches both sides. Each sees the
+    // other's claim disagree with its own view, and its own agree.
+    let from_a = claiming(1, a.view_claim());
+    let from_b = claiming(2, b.view_claim());
+    for r in [&mut a, &mut b] {
+        r.ingest_at(from_a.clone(), 4).unwrap();
+        r.ingest_at(from_b.clone(), 4).unwrap();
+        let report = r.view_report();
+        assert_eq!(report.mismatches.len(), 1);
+        assert_eq!((report.mismatches[0].barrier, report.agreeing), (2, 1));
+    }
+
+    // The digest is a chain: records both sides later receive do not hide the split.
+    for r in [&mut a, &mut b] {
+        r.ingest_at(join(3).0, 4).unwrap();
+        r.advance_to(7);
+    }
+    assert_ne!(a.view_digest(6), b.view_digest(6));
+
+    // `a` relays what it holds from around the mismatch, and `b` catches up. (The
+    // withheld record here is a proof-free poll: a join could not be relayed.)
+    for (at, bytes) in a.relayable_between(0, 2) {
+        b.ingest_relayed(bytes, at).unwrap();
+    }
+    for barrier in 0..8 {
+        assert_eq!(a.view_digest(barrier), b.view_digest(barrier));
+    }
+    // New claims agree, and the old mismatch ages out of the window.
+    let later = 7 + super::VIEW_WINDOW;
+    a.advance_to(later);
+    b.advance_to(later);
+    let from_a = claiming(3, a.view_claim());
+    for r in [&mut a, &mut b] {
+        r.ingest_at(from_a.clone(), later).unwrap();
+        r.advance_to(later + super::VIEW_CLAIM_LAG);
+        let report = r.view_report();
+        assert!(!report.diverged(), "{report:?}");
+        assert_eq!(report.agreeing, 1);
+    }
+}
+
+#[test]
+fn a_relay_cannot_carry_a_sender_checked_record() {
+    let (bytes, eh) = join(1);
+    let mut r = replica();
+    let status = r.ingest_relayed(bytes, 0).unwrap();
+    assert!(matches!(status, Status::Rejected(_)));
+    assert_eq!(r.first_barrier(&eh), None, "not even remembered");
+    // A member never offers one, either.
+    r.ingest_at(join(2).0, 0).unwrap();
+    assert!(r.relayable_between(0, 5).is_empty());
+}
+
+#[test]
+fn a_relay_cannot_move_a_record_the_service_delivered() {
+    let bytes = claiming(1, None);
+    let eh = super::record::Eh::of_bytes(&bytes);
+    let mut r = replica();
+    r.ingest_at(bytes.clone(), 2).unwrap();
+    let before = r.view_digest(5);
+    r.ingest_relayed(bytes, 0).unwrap();
+    assert_eq!(r.first_barrier(&eh), Some(2));
+    assert_eq!(r.view_digest(5), before);
+}
+
+#[test]
+fn claims_too_recent_to_check_are_pending() {
+    let mut r = replica();
+    r.advance_to(3);
+    // A claim about barrier 2 is only one barrier behind us: our own view of it may
+    // still be filling in.
+    let claim = super::record::ViewClaim {
+        barrier: 2,
+        digest: [7; 32],
+    };
+    r.ingest_at(claiming(1, Some(claim)), 3).unwrap();
+    let report = r.view_report();
+    assert_eq!((report.pending, report.diverged()), (1, false));
 }

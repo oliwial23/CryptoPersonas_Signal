@@ -21,7 +21,7 @@
 mod ledger;
 
 pub use ledger::{
-    Ballot, BadgeLog, ContextLog, PollEntry, PollLog, RecordLog, SlackPoll, SpentTicketLog,
+    BadgeLog, Ballot, ContextLog, PollEntry, PollLog, RecordLog, SlackPoll, SpentTicketLog,
     StoredBadge, ThreadContext, VoteState, badge_name, emoji_for, emoji_name,
 };
 

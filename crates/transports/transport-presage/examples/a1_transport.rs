@@ -55,9 +55,15 @@ async fn main() -> Result<()> {
 
     println!("[3/5] starting transports (A fans out to B, B to A)…");
     let conversation = format!("personas-group-{suffix:04}");
-    let a = PresageTransport::start(db_a, vec![b_aci], shared.clone(), conversation.clone(), None)
-        .await
-        .context("start A")?;
+    let a = PresageTransport::start(
+        db_a,
+        vec![b_aci],
+        shared.clone(),
+        conversation.clone(),
+        None,
+    )
+    .await
+    .context("start A")?;
     let b = PresageTransport::start(db_b, vec![a_aci], shared, conversation.clone(), None)
         .await
         .context("start B")?;

@@ -26,8 +26,7 @@ pub fn close_latency(label: &str) {
         return;
     };
 
-    if let Err(e) =
-        append_timing_line_with_filename(label, start, elapsed.as_millis(), "features")
+    if let Err(e) = append_timing_line_with_filename(label, start, elapsed.as_millis(), "features")
     {
         tracing::warn!("could not write the latency timing for {label}: {e}");
     }

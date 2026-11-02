@@ -6,7 +6,7 @@
 //! pseudonym it was claimed under — that binding is local, and it is the only thing
 //! linking the badge to a persona.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ark_ff::PrimeField;
 use serde::{Deserialize, Serialize};
 use std::{

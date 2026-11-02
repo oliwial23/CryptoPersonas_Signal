@@ -58,3 +58,17 @@ Thumbs.db
 
 # Local deploy/test artifacts
 .local/
+
+# Generated proving keys (regenerated on first run; ~156 MB). The server-based
+# implementation caches its keys under server/data, the serverless messenger under
+# messenger-data.
+/server/data/
+/messenger-data/
+
+# The paper lives outside this repository. Never commit LaTeX, generated tables or
+# figures, or paper PDFs here.
+*.tex
+*.bib
+*.pdf
+/deploy/play/bench/paper/
+/deploy/play/bench/latex.py
