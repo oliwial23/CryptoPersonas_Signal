@@ -268,7 +268,10 @@ pub async fn fold_scan(
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("could not append the folded scan: {e:?}")))?;
 
-    let elapsed = latency_start.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+    let elapsed = latency_start
+        .elapsed()
+        .map(|d| d.as_secs_f64() * 1e3)
+        .unwrap_or(0.0);
     personas_core::timing::append_timing_line_fold(
         "fold",
         latency_start,

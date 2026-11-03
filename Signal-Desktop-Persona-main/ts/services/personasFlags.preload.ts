@@ -28,6 +28,7 @@ import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
 import { drop } from '../util/drop.std.ts';
 import {
+  appliedPost,
   builtPersonasEngines,
   isPersonasEngineEnabled,
   isPostFlagged,
@@ -101,6 +102,27 @@ async function refreshPersonaFlags(): Promise<number> {
     const groupId = window.ConversationController.get(
       message.get('conversationId')
     )?.get('groupId');
+    // A post the engine was holding when it arrived (personasEngine's
+    // ingestRecordForTimeline): show it once it applies.
+    if (message.get('personaPending')) {
+      const applied = appliedPost(groupId, eh);
+      if (!applied) {
+        continue;
+      }
+      log.info(`refreshPersonaFlags: ${eh.slice(0, 12)}… applied; showing the held post`);
+      message.set({
+        body: applied.body,
+        persona: applied.persona,
+        personaAnonymous: applied.persona == null,
+        personaFlagged: applied.flagged,
+        personaPending: false,
+      });
+      // eslint-disable-next-line no-await-in-loop
+      await window.MessageCache.saveMessage(message.attributes);
+      changed += 1;
+      continue;
+    }
+
     const flagged = isPostFlagged(groupId, eh);
     if (flagged == null) {
       // The engine has no entry for this eh (it may have been rejected, or this

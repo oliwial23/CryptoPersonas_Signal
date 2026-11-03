@@ -649,9 +649,9 @@ fn callback_bytes<T: CanonicalSerialize>(cb: &T) -> Result<Vec<u8>> {
 }
 
 /// Instrumentation is best-effort: a failed benchmark write must never fail a proof.
-fn record(label: &str, start: SystemTime) {
+pub(crate) fn record(label: &str, start: SystemTime) {
     if let Ok(elapsed) = start.elapsed()
-        && let Err(e) = append_timing_line(label, start, elapsed.as_millis())
+        && let Err(e) = append_timing_line(label, start, elapsed.as_secs_f64() * 1e3)
     {
         eprintln!("failed to record timing for {label}: {e}");
     }
@@ -662,7 +662,7 @@ fn record_fold(label: &str, start: SystemTime, suffix: &str) {
         && let Err(e) = append_timing_line_fold(
             label,
             start,
-            elapsed.as_millis(),
+            elapsed.as_secs_f64() * 1e3,
             NUM_SCANS_PER_FOLD,
             suffix,
         )

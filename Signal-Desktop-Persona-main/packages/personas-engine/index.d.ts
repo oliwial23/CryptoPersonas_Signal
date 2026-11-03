@@ -132,6 +132,11 @@ export class Engine {
   recordAccountClaim(
     record: Buffer
   ): { kind: 'join' | 'rejoin-approve' | 'ban'; account: string } | null;
+  /**
+   * The kind of a record ("Post", "Join", ...), decoded only: nothing verified or
+   * applied. For a record the replica is holding, so a post can keep its timeline place.
+   */
+  recordKind(record: Buffer): string | null;
   /** Emit a pseudonymous post under `context`. Real Groth16 proof — seconds. */
   emitPostPseudo(body: string, context: number): Emitted;
   /** Emit an anonymous post (no linkable persona). */

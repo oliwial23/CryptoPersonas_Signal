@@ -70,6 +70,9 @@ export type StorageAccessType = {
   personasPhantomChains: Array<string>;
   // Personas demo: `${bundleFingerprint}:${serviceId}` for each member already sent it.
   personasPhantomSentTo: Array<string>;
+  // Personas demo: bundles received but not adopted yet, as JSON (key material): from
+  // someone not yet a fellow member, or while this account was at its group limit.
+  personasPhantomPending: string;
   // Personas demo: owns our entry in the member directory (personaRoster).
   personasDirectorySecret: string;
   // Personas demo: our contact code, which lets a tester we give it to add us.
@@ -468,6 +471,7 @@ const STORAGE_KEYS_TO_REMOVE_AFTER_UNLINK = [
   'personasPhantomBundles',
   'personasPhantomChains',
   'personasPhantomSentTo',
+  'personasPhantomPending',
   'lastCallQualitySurveyTime',
   'lastCallQualityFailureSurveyTime',
   'cqsTestMode',

@@ -32,7 +32,7 @@ import type { ConversationModel } from '../models/conversations.preload.ts';
 import { createLogger } from '../logging/log.std.ts';
 import { itemStorage } from '../textsecure/Storage.preload.ts';
 import { toLogFormat } from '../types/errors.std.ts';
-import { sleep } from '../util/sleep.std.ts';
+import { drop } from '../util/drop.std.ts';
 import type { ServiceIdString } from '../types/ServiceId.std.ts';
 import {
   encodeCatchUpParts,
@@ -51,8 +51,6 @@ const log = createLogger('personasCatchUp');
 
 // How often a request is repeated while no copy has come.
 const REQUEST_EVERY_MS = 60_000;
-// How long a received persona record waits for the copy (once per request).
-const HOLD_RECORDS_MS = 45_000;
 // An admin with no other admin to ask, or whom no other admin answers in this time,
 // starts from its own state: in a new group, admins are the founders.
 const ADMIN_FALLBACK_MS = 60_000;
@@ -68,13 +66,10 @@ type Saved = {
   requestedAt?: number;
 };
 
-// Per personas group: where its catch-up stands, when we last asked, and the signal the
-// held records wait on.
+// Per personas group: where its catch-up stands, and when we last asked.
 type GroupCatchUp = {
   saved?: Saved;
   lastRequestSentAt: number;
-  arrived?: Promise<void>;
-  signalArrived?: () => void;
 };
 const byGroup = new Map<string, GroupCatchUp>();
 
@@ -85,14 +80,6 @@ function catchUpOf(groupId: string): GroupCatchUp {
     byGroup.set(groupId, entry);
   }
   return entry;
-}
-
-// Settled once the group's copy is in; records waiting for it race it against a deadline.
-function copyArrived(entry: GroupCatchUp): Promise<void> {
-  entry.arrived ??= new Promise<void>(resolve => {
-    entry.signalArrived = resolve;
-  });
-  return entry.arrived;
 }
 
 registerPersistedExtra('catchUp', {
@@ -148,7 +135,6 @@ function markDone(groupId: string, how: string): void {
   savePersonasState(groupId, state ? Buffer.from(state) : undefined);
   personasExtrasChanged(groupId);
   log.info(`catch-up done (${how})`);
-  entry.signalArrived?.();
 }
 
 const ourAci = (): string | undefined => itemStorage.user.getAci();
@@ -209,11 +195,17 @@ export async function ensureCaughtUp(conversation: ConversationModel): Promise<b
 /** On every flag-loop tick: repeat unanswered requests, and the admin fallback. */
 export async function maybeContinueCatchUp(): Promise<void> {
   for (const [groupId, entry] of [...byGroup]) {
-    if (entry.saved?.state !== 'requested') {
-      continue;
-    }
     const conversation = window.ConversationController.get(groupId);
     if (!conversation) {
+      continue;
+    }
+    // A new member asks as soon as it has an engine, not when a record first arrives.
+    if (entry.saved?.state === 'needed') {
+      // oxlint-disable-next-line no-await-in-loop
+      await ensureCaughtUp(conversation);
+      continue;
+    }
+    if (entry.saved?.state !== 'requested') {
       continue;
     }
     if (
@@ -231,32 +223,25 @@ export async function maybeContinueCatchUp(): Promise<void> {
 }
 
 /**
- * Receive seam, before a persona record in `conversation` is ingested. A member that
- * still needs the history asks for it, and the record waits (a bounded while) for the
- * copy, so that it can be shown: one that arrives before the history cannot be applied
- * yet, and is only applied — not shown — when the copy lands.
+ * Receive seam, before a persona record in `conversation` is ingested: a member that
+ * still needs the history asks for it. The record does NOT wait for the copy.
+ *
+ * It used to, for up to 45 s, so that it could be shown. But this runs
+ * inside the group's message queue, and the request itself is sent through that same
+ * queue, so the request could not go out until the wait gave up: every new member
+ * waited the full 45 s, then took the record in before the history and never showed
+ * it. A record that arrives first is now held by the engine and shown once it applies
+ * (`ingestRecordForTimeline`, `refreshPersonaFlags`).
  */
-export async function holdRecordForCatchUp(conversation: ConversationModel): Promise<void> {
+export function requestCatchUpIfNeeded(conversation: ConversationModel): void {
   const groupId = conversation.get('groupId');
-  if (!groupId || catchUpState(groupId) === 'done') {
+  if (!groupId || catchUpState(groupId) !== 'needed') {
     return;
   }
-  if (catchUpState(groupId) === 'needed') {
-    await ensureCaughtUp(conversation);
-  }
-  const entry = catchUpOf(groupId);
-  const deadline = (entry.saved?.requestedAt ?? Date.now()) + HOLD_RECORDS_MS;
-  const wait = deadline - Date.now();
-  if (catchUpState(groupId) === 'done' || wait <= 0) {
-    return;
-  }
-  // Whichever comes first: the copy, or the deadline.
-  const abort = new AbortController();
-  await Promise.race([
-    copyArrived(entry),
-    sleep(wait, abort.signal).catch(() => undefined),
-  ]);
-  abort.abort();
+  // Outside the queue we are running in, or the send would wait for us.
+  setTimeout(() => {
+    drop(ensureCaughtUp(conversation));
+  }, 0);
 }
 
 // --- the admin side --------------------------------------------------------------------

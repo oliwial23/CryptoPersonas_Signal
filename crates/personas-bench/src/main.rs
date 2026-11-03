@@ -20,12 +20,16 @@
 //!   cargo run --release -p personas-bench -- --keys <dir> [--iters 20] [--warmup 2]
 //!       [--label modern] [--out bench-results.json] [--only op,op] [--skip-constraints]
 //!
+//! `--server` instead runs the server-based implementation (validation server, Privacy
+//! Pass tickets, folded scans) on this machine for comparison; see `server.rs`.
+//!
 //! `--keys` is the directory holding `params/serverless-merkle/merkle_groth16_keys.bin`
 //! — the same directory the app is given (~/.personas-demo-keys, or the packaged app's
 //! `personas-keys`). Keys are generated there if absent (slow at height 32).
 
 mod constraints;
 mod fold;
+mod server;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -61,6 +65,11 @@ struct Args {
     fold: bool,
     fold_batches: Vec<usize>,
     fold_ks: Vec<usize>,
+    /// Run the server-based implementation instead (`server.rs`).
+    server: bool,
+    server_dir: PathBuf,
+    /// Callbacks the server-based run answers by scanning and by folding.
+    callbacks: usize,
 }
 
 fn parse_args() -> Args {
@@ -76,6 +85,9 @@ fn parse_args() -> Args {
         fold: false,
         fold_batches: vec![1, 2, 4, 8, 16],
         fold_ks: vec![1, 2, 4, 8, 16, 32, 64],
+        server: false,
+        server_dir: server::default_work_dir(),
+        callbacks: 16,
     };
     let list = |v: String, flag: &str| -> Vec<usize> {
         v.split(',')
@@ -106,6 +118,11 @@ fn parse_args() -> Args {
             "--fold" => args.fold = true,
             "--fold-batches" => args.fold_batches = list(value(), "--fold-batches"),
             "--fold-k" => args.fold_ks = list(value(), "--fold-k"),
+            "--server" => args.server = true,
+            "--server-dir" => args.server_dir = PathBuf::from(value()),
+            "--callbacks" => {
+                args.callbacks = value().parse().unwrap_or_else(|_| usage("bad --callbacks"))
+            }
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),
         }
@@ -124,6 +141,9 @@ fn usage(problem: &str) -> ! {
          \x20      personas-bench --keys <dir> --fold [--fold-batches 1,2,4,8,16]\n\
          \x20                     [--fold-k 1,2,4,8,16,32,64] [--iters N] [--out FILE]\n\
          \x20                     (Nova-folded scans of k callbacks, N per fold step)\n\
+         \x20      personas-bench --server [--history N] [--callbacks K] [--iters N]\n\
+         \x20                     [--server-dir DIR] [--out FILE]\n\
+         \x20                     (server-based: proved posts, Privacy Pass, scan vs fold)\n\
          ops: {}",
         OPS.join(", ")
     );
@@ -953,6 +973,10 @@ fn run_fold(args: &Args, keys_dir: &std::path::Path) {
 
 fn main() {
     let args = parse_args();
+    if args.server {
+        server::run(&args, &args.server_dir, args.callbacks);
+        return;
+    }
     if args.fold {
         let Some(dir) = &args.keys else {
             usage("--fold needs --keys")

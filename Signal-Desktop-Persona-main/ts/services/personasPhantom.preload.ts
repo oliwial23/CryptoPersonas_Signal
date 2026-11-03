@@ -83,6 +83,7 @@ import { Address } from '../types/Address.std.ts';
 import type { ServiceIdString } from '../types/ServiceId.std.ts';
 import { normalizeServiceId } from '../types/ServiceId.std.ts';
 import { itemStorage } from '../textsecure/Storage.preload.ts';
+import { drop } from '../util/drop.std.ts';
 
 const log = createLogger('personasPhantom');
 
@@ -251,6 +252,26 @@ export const MAX_PERSONAS_GROUPS = 3;
 
 // The bundles this member holds, by Signal group id, with the JSON they were stored as.
 const held = new Map<string, { mat: PhantomMaterial; json: string }>();
+
+// The held groups that count toward MAX_PERSONAS_GROUPS: those this account is still in,
+// and that an admin has not ended. A bundle is never released (being re-added to a group
+// must find it again), so without this a group that was left, deleted or ended in Signal
+// kept its place forever, and an account that had tried personas in three groups could
+// never start a fourth. (An ended group keeps its members, hence the separate check.)
+function liveGroupIds(): Array<string> {
+  const ourAci = itemStorage.user.getAci();
+  return [...held.keys()].filter(groupId => {
+    const conversation = window.ConversationController.get(groupId);
+    if (!conversation || conversation.get('left') || conversation.get('terminated')) {
+      return false;
+    }
+    return ourAci == null || conversation.hasMember(ourAci);
+  });
+}
+
+function atGroupLimit(): boolean {
+  return liveGroupIds().length >= MAX_PERSONAS_GROUPS;
+}
 let loaded = false;
 const readyListeners: Array<(mat: PhantomMaterial) => void> = [];
 
@@ -351,6 +372,7 @@ async function loadHeld(): Promise<void> {
     return;
   }
   loaded = true;
+  loadPending();
   try {
     const all = itemStorage.get('personasPhantomBundles');
     if (all) {
@@ -420,12 +442,12 @@ export function personasGroupStanding(
   if (isPersonasGroup(conversation)) {
     return { kind: 'this' };
   }
-  if (held.size < MAX_PERSONAS_GROUPS) {
+  if (!atGroupLimit()) {
     return { kind: 'none' };
   }
   return {
     kind: 'full',
-    names: [...held.keys()].map(
+    names: liveGroupIds().map(
       groupId => window.ConversationController.get(groupId)?.getTitle() ?? 'a group'
     ),
   };
@@ -480,7 +502,7 @@ export async function mintPhantomBundle(
   if (existing) {
     return existing;
   }
-  if (held.size >= MAX_PERSONAS_GROUPS) {
+  if (atGroupLimit()) {
     log.info(
       `mintPhantomBundle: already in ${MAX_PERSONAS_GROUPS} personas groups; not minting`
     );
@@ -513,7 +535,7 @@ export async function turnOnPersonasInGroup(
   if (await ensurePhantomMaterial(groupId)) {
     return { ok: true };
   }
-  if (held.size >= MAX_PERSONAS_GROUPS) {
+  if (atGroupLimit()) {
     return {
       ok: false,
       reason: `this account already uses personas in ${MAX_PERSONAS_GROUPS} groups`,
@@ -556,10 +578,10 @@ export async function adoptPhantomBundle(
     );
     return 'conflict';
   }
-  if (held.size >= MAX_PERSONAS_GROUPS) {
+  if (atGroupLimit()) {
     log.warn(
-      `adoptPhantomBundle: ignoring a bundle from ${from}: this account already uses ` +
-        `personas in ${MAX_PERSONAS_GROUPS} groups`
+      `adoptPhantomBundle: not adopting a bundle from ${from} yet: this account already ` +
+        `uses personas in ${MAX_PERSONAS_GROUPS} groups (kept; adopted once it leaves one)`
     );
     return 'full';
   }
@@ -589,13 +611,16 @@ export function isFellowGroupMember(conversationId: string, groupId: string): bo
   );
 }
 
-// Bundles that arrived from someone who was not (yet) a fellow group member.
+// Bundles not adopted yet: from someone who was not (yet) a fellow group member, or
+// refused because this account was at its group limit.
 //
 // The creator sends the bundle the moment it adds a member, so the 1:1 bundle can beat
 // the group update that tells this member it was added. Dropping it then would be
-// permanent: the sender has already marked us as sent. So it is held and re-checked on
-// every sweep, and adopted once the sender shows up as a fellow member. In memory only,
-// bounded, and never adopted without that check.
+// permanent: the sender has already marked us as sent. Likewise a bundle refused at the
+// limit: leaving a group later must not leave this one without personas for good. So it
+// is held and re-checked on every sweep, adopted once the sender is a fellow member and
+// there is room. Persisted (a restart must not lose it), bounded, and never adopted
+// without the membership check.
 const MAX_PENDING_BUNDLES = 8;
 const pendingBundles = new Map<
   string,
@@ -613,21 +638,58 @@ export function holdPendingBundle(
     return;
   }
   pendingBundles.set(key, { wire, from, conversationId });
-  log.info(`holdPendingBundle: holding a bundle from ${from} until they share a group with us`);
+  log.info(`holdPendingBundle: holding a bundle from ${from} until it can be adopted`);
+  drop(savePending());
+}
+
+async function savePending(): Promise<void> {
+  await itemStorage.put(
+    'personasPhantomPending',
+    JSON.stringify(Object.fromEntries(pendingBundles))
+  );
+}
+
+function loadPending(): void {
+  const stored = itemStorage.get('personasPhantomPending');
+  if (!stored) {
+    return;
+  }
+  try {
+    for (const [key, value] of Object.entries(
+      JSON.parse(stored) as Record<
+        string,
+        { wire: PersonaPhantomBundleWire; from: string; conversationId: string }
+      >
+    )) {
+      pendingBundles.set(key, value);
+    }
+  } catch (error) {
+    log.error(`loadPending: stored pending bundles unreadable: ${toLogFormat(error)}`);
+  }
 }
 
 async function retryPendingBundles(): Promise<void> {
+  let changed = false;
   for (const [key, { wire, from, conversationId }] of [...pendingBundles]) {
     if (held.has(wire.groupId)) {
       pendingBundles.delete(key);
+      changed = true;
       continue;
     }
     if (isFellowGroupMember(conversationId, wire.groupId)) {
-      pendingBundles.delete(key);
       // oxlint-disable-next-line no-await-in-loop
       const result = await adoptPhantomBundle(wire, from);
+      if (result === 'full') {
+        // Still no room: kept, and tried again next sweep.
+        continue;
+      }
       log.info(`retryPendingBundles: bundle from ${from}: ${result}`);
+      pendingBundles.delete(key);
+      changed = true;
     }
+  }
+  if (changed) {
+    await savePending();
   }
 }
 
@@ -673,6 +735,19 @@ export async function distributePhantomBundle(): Promise<void> {
   }
 }
 
+// Whether a member's join has reached this group's engine; undefined while unknown (no
+// engine yet). Registered by personasEngine, which this module cannot import.
+let memberHasJoined: (groupId: string, serviceId: string) => boolean | undefined = () =>
+  undefined;
+export function setPhantomJoinCheck(check: typeof memberHasJoined): void {
+  memberHasJoined = check;
+}
+
+// A member we sent the bundle to whose join never arrived (it refused or lost the
+// bundle) is sent it again, at most this often. In memory, so also once per restart.
+const RESEND_EVERY_MS = 10 * 60_000;
+const lastSentAt = new Map<string, number>();
+
 async function distributeOne(mat: PhantomMaterial, json: string): Promise<void> {
   const fingerprint = bundleFingerprint(mat);
   const sent = new Set(itemStorage.get('personasPhantomSentTo') ?? []);
@@ -684,7 +759,14 @@ async function distributeOne(mat: PhantomMaterial, json: string): Promise<void> 
       if (!serviceId || isMe(member.attributes)) {
         continue;
       }
-      if (!sent.has(`${fingerprint}:${serviceId}`)) {
+      const key = `${fingerprint}:${serviceId}`;
+      if (!sent.has(key)) {
+        pending.set(serviceId, member);
+      } else if (
+        memberHasJoined(mat.groupId, serviceId) === false &&
+        Date.now() - (lastSentAt.get(key) ?? 0) >= RESEND_EVERY_MS
+      ) {
+        log.info(`distributePhantomBundle: ${serviceId} has not joined; sending it again`);
         pending.set(serviceId, member);
       }
     }
@@ -722,6 +804,7 @@ async function distributeOne(mat: PhantomMaterial, json: string): Promise<void> 
         { hideFromTimeline: true }
       );
       sent.add(`${fingerprint}:${serviceId}`);
+      lastSentAt.set(`${fingerprint}:${serviceId}`, Date.now());
       // oxlint-disable-next-line no-await-in-loop
       await itemStorage.put('personasPhantomSentTo', [...sent]);
       log.info(`distributePhantomBundle: sent bundle ${fingerprint} to ${serviceId}`);

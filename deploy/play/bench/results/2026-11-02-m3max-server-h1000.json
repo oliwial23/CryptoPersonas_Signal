@@ -1,0 +1,186 @@
+{
+  "machine": {
+    "label": "M3 Max, server-based",
+    "os": "macos",
+    "arch": "aarch64",
+    "cpu": "Apple M3 Max",
+    "cores": 14,
+    "rayon_threads": null
+  },
+  "implementation": "server-based, Privacy Pass + folding",
+  "iterations": 10,
+  "warmup": 2,
+  "history": 1000,
+  "callbacks": 16,
+  "fold_width": 1,
+  "operations": {
+    "fold": {
+      "client": {
+        "n": 1,
+        "mean_ms": 4396.094,
+        "median_ms": 4396.094,
+        "stdev_ms": 0.0,
+        "p95_ms": 4396.094,
+        "min_ms": 4396.094,
+        "max_ms": 4396.094
+      },
+      "server": {
+        "n": 1,
+        "mean_ms": 7.926,
+        "median_ms": 7.926,
+        "stdev_ms": 0.0,
+        "p95_ms": 7.926,
+        "min_ms": 7.926,
+        "max_ms": 7.926
+      },
+      "round_trip": {
+        "n": 1,
+        "mean_ms": 65.854,
+        "median_ms": 65.854,
+        "stdev_ms": 0.0,
+        "p95_ms": 65.854,
+        "min_ms": 65.854,
+        "max_ms": 65.854
+      }
+    },
+    "fold_steps": {
+      "client": {
+        "n": 1,
+        "mean_ms": 3183.154,
+        "median_ms": 3183.154,
+        "stdev_ms": 0.0,
+        "p95_ms": 3183.154,
+        "min_ms": 3183.154,
+        "max_ms": 3183.154
+      },
+      "server": null,
+      "round_trip": null,
+      "client_after": {
+        "n": 1,
+        "mean_ms": 382.31,
+        "median_ms": 382.31,
+        "stdev_ms": 0.0,
+        "p95_ms": 382.31,
+        "min_ms": 382.31,
+        "max_ms": 382.31
+      }
+    },
+    "post": {
+      "client": {
+        "n": 10,
+        "mean_ms": 117.3679,
+        "median_ms": 117.56,
+        "stdev_ms": 1.9308965361544683,
+        "p95_ms": 120.725,
+        "min_ms": 114.036,
+        "max_ms": 120.725
+      },
+      "server": {
+        "n": 10,
+        "mean_ms": 3.4471999999999996,
+        "median_ms": 3.447,
+        "stdev_ms": 0.0690133642452275,
+        "p95_ms": 3.576,
+        "min_ms": 3.361,
+        "max_ms": 3.576
+      },
+      "round_trip": {
+        "n": 10,
+        "mean_ms": 12.4994,
+        "median_ms": 12.599,
+        "stdev_ms": 0.7606357282636093,
+        "p95_ms": 13.829,
+        "min_ms": 11.318,
+        "max_ms": 13.829
+      }
+    },
+    "pp_post": {
+      "client": {
+        "n": 10,
+        "mean_ms": 0.08959999999999999,
+        "median_ms": 0.09,
+        "stdev_ms": 0.0012649110640673528,
+        "p95_ms": 0.092,
+        "min_ms": 0.088,
+        "max_ms": 0.092
+      },
+      "server": {
+        "n": 10,
+        "mean_ms": 4.8925,
+        "median_ms": 4.721,
+        "stdev_ms": 0.41277495886580473,
+        "p95_ms": 5.476,
+        "min_ms": 4.403,
+        "max_ms": 5.476
+      },
+      "round_trip": {
+        "n": 10,
+        "mean_ms": 5.5977,
+        "median_ms": 5.42,
+        "stdev_ms": 0.45122181044606235,
+        "p95_ms": 6.249,
+        "min_ms": 5.076,
+        "max_ms": 6.249
+      }
+    },
+    "pp_request": {
+      "client": {
+        "n": 10,
+        "mean_ms": 200.71980000000002,
+        "median_ms": 201.99,
+        "stdev_ms": 2.037804417613343,
+        "p95_ms": 203.297,
+        "min_ms": 197.766,
+        "max_ms": 203.297
+      },
+      "server": {
+        "n": 10,
+        "mean_ms": 7.363399999999999,
+        "median_ms": 7.343,
+        "stdev_ms": 0.0719524534366659,
+        "p95_ms": 7.509,
+        "min_ms": 7.254,
+        "max_ms": 7.509
+      },
+      "round_trip": null,
+      "client_after": {
+        "n": 10,
+        "mean_ms": 0.9953999999999998,
+        "median_ms": 0.992,
+        "stdev_ms": 0.00776316086827177,
+        "p95_ms": 1.011,
+        "min_ms": 0.989,
+        "max_ms": 1.011
+      }
+    },
+    "scan": {
+      "client": {
+        "n": 16,
+        "mean_ms": 215.98006249999997,
+        "median_ms": 215.688,
+        "stdev_ms": 2.09579367523778,
+        "p95_ms": 218.423,
+        "min_ms": 211.837,
+        "max_ms": 219.49
+      },
+      "server": {
+        "n": 16,
+        "mean_ms": 1.6198125,
+        "median_ms": 1.618,
+        "stdev_ms": 0.009516433155337123,
+        "p95_ms": 1.635,
+        "min_ms": 1.606,
+        "max_ms": 1.637
+      },
+      "round_trip": {
+        "n": 16,
+        "mean_ms": 3.9459999999999997,
+        "median_ms": 3.926,
+        "stdev_ms": 0.11955417182181477,
+        "p95_ms": 4.167,
+        "min_ms": 3.805,
+        "max_ms": 4.259
+      }
+    }
+  }
+}

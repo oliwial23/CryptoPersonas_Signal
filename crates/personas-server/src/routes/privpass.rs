@@ -14,6 +14,7 @@ use personas_core::privpass::{
 use personas_core::{F, persona};
 use transport_api::{ConversationId, MessageId, Outgoing};
 
+use crate::bench;
 use crate::bulletin::{self, bulk, epoch, verify_and_store};
 use crate::error::{AppError, AppResult, ok};
 use crate::routes::moderation::call;
@@ -46,6 +47,7 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
     // via `derive(Clone)` (it requires `Snark: Clone`, which `Groth16` doesn't
     // implement), hence the manual `clone_exec_meth`.
     let exec_meth_for_append = clone_exec_meth(&request.exec_meth);
+    let start = std::time::SystemTime::now();
     verify_and_store(
         &mut st.db,
         &standard_vk,
@@ -68,6 +70,11 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
         &st.privpass.issuer,
     )
     .map_err(|e| AppError::Rejected(format!("ticket blinding rejected: {e}")))?;
+    let millis = start
+        .elapsed()
+        .map(|d| d.as_secs_f64() * 1e3)
+        .unwrap_or_default();
+    bench::verified("pp_issue", start, millis);
 
     tracing::info!("issued a privacy-pass ticket");
     let bytes = encode_validated_tickets(&validated)
@@ -121,6 +128,7 @@ async fn redeem_post(
         .map_err(|e| AppError::BadRequest(format!("that is not a post redemption: {e}")))?;
 
     let mut st = state.write().await;
+    let start = std::time::SystemTime::now();
     if !verify_redemption(&st.privpass.issuer, &request.redemption) {
         return Err(AppError::Rejected("the ticket did not verify".into()));
     }
@@ -130,6 +138,11 @@ async fn redeem_post(
             "this ticket has already been redeemed".into(),
         ));
     }
+    let millis = start
+        .elapsed()
+        .map(|d| d.as_secs_f64() * 1e3)
+        .unwrap_or_default();
+    bench::verified("pp_redeem", start, millis);
     drop(st);
 
     let mut msg = Outgoing::new(ConversationId(request.channel), request.message);

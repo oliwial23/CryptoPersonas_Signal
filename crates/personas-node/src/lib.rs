@@ -940,6 +940,15 @@ impl Engine {
         })
     }
 
+    /// What kind of record `record` is ("Post", "Join", "Vote", ...), read from its bytes
+    /// alone: nothing is verified or applied. For a record the replica is holding
+    /// (`buffered`), so the timeline can keep a place for a post that applies later.
+    #[napi]
+    pub fn record_kind(&self, record: Buffer) -> Option<String> {
+        let (rec, _) = personas_bulletin::replica::record::decode(record.as_ref()).ok()?;
+        Some(rec.kind().to_string())
+    }
+
     /// Emit a pseudonymous post under `context` (the thread/topic the persona is
     /// scoped to). Generates a real Groth16 proof — seconds at production heights.
     #[napi]

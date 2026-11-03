@@ -30,7 +30,7 @@ import {
 import { trackPersonaPost } from '../services/personasRegistry.std.ts';
 import {
   answerCatchUpRequest,
-  holdRecordForCatchUp,
+  requestCatchUpIfNeeded,
   ingestCatchUpPart,
 } from '../services/personasCatchUp.preload.ts';
 import { recordTimestamp } from '../services/personasBarrier.preload.ts';
@@ -214,6 +214,10 @@ export async function handleDataMessage(
       if (isFellowGroupMember(conversationId, phantomBundle.groupId)) {
         const result = await adoptPhantomBundle(phantomBundle, from);
         log.info(`${idLog}: phantom bundle from ${from}: ${result}`);
+        if (result === 'full') {
+          // At this account's group limit: kept, adopted once it leaves a group.
+          holdPendingBundle(conversationId, phantomBundle, from);
+        }
       } else {
         // Possibly just ahead of the group update that adds us; re-checked each sweep.
         holdPendingBundle(conversationId, phantomBundle, from);
@@ -317,8 +321,9 @@ export async function handleDataMessage(
       decodeRelayBody(initialMessage.body)
     ) {
       await waitForPersonasEngineIfStarting(personasGroupId);
-      // A member added late waits for the group state, so this record can be shown.
-      await holdRecordForCatchUp(conversation);
+      // A member added late asks for the group state (without waiting for it: a record
+      // the engine cannot apply yet is held and shown once it applies).
+      requestCatchUpIfNeeded(conversation);
       // A join must come from the account it names, and a re-join approval from a
       // group admin. Dropped otherwise, before the engine sees it (personasReset).
       const senderProblem = recordSenderProblem(
@@ -843,6 +848,7 @@ export async function handleDataMessage(
           personaFlagged: personasRecord.flagged,
           personaEh: personasRecord.eh,
           personaAnonymous: personasRecord.persona == null,
+          personaPending: personasRecord.pending === true,
           // The sender's UNVERIFIED badge claim, read off the carriage rather than the
           // record — the engine has no notion of badges in the serverless model. Stored
           // as sent, with no validation beyond "is a string": validating it would imply
@@ -863,7 +869,8 @@ export async function handleDataMessage(
         // actually read rather than what the wire contained.
         log.info(
           `personas: received post eh=${personasRecord.eh.slice(0, 12)} ` +
-          `persona=${personasRecord.persona ?? '(anonymous)'} ` +
+          `persona=${personasRecord.persona ?? '(anonymous)'}` +
+          `${personasRecord.pending ? ' (held until it applies)' : ''} ` +
           `context=${decodePostContextName(initialMessage.body) ?? '(none)'} ` +
           `badge=${decodePostBadge(initialMessage.body) ?? '(none)'}`
         );

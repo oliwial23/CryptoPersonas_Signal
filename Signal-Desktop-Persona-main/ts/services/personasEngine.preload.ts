@@ -45,6 +45,7 @@ import {
 import {
   getPhantomBundleFingerprint,
   hasPhantomMaterial,
+  setPhantomJoinCheck,
 } from './personasPhantom.preload.ts';
 import {
   initPersonasPersistence,
@@ -115,6 +116,20 @@ type GroupRuntime = {
   readyWaiters: Array<() => void>;
 };
 const runtimes = new Map<string, GroupRuntime>();
+
+// For bundle distribution: has `serviceId`'s join reached this group's engine? A member
+// that never joined is sent the group's bundle again (personasPhantom).
+setPhantomJoinCheck((groupId, serviceId) => {
+  const engine = runtimes.get(groupId)?.engine;
+  if (!engine) {
+    return undefined;
+  }
+  try {
+    return engine.joinCounts(serviceId.replaceAll('-', '').toLowerCase()).joins > 0;
+  } catch {
+    return undefined;
+  }
+});
 
 function runtimeFor(groupId: string): GroupRuntime {
   let runtime = runtimes.get(groupId);
@@ -358,6 +373,26 @@ export function warmPersonasEngine(groupId?: string): void {
   );
 }
 
+// What a held post shows until the engine applies it (see `ingestRecordForTimeline`).
+export const PENDING_POST_BODY = 'Verifying this post\u2026';
+
+/**
+ * A held post, once the engine has applied it: what to show in place of the
+ * placeholder. Undefined while it is still held (or if it never applies).
+ */
+export function appliedPost(
+  groupId: string | undefined,
+  eh: string
+): { body: string; persona?: string; flagged: boolean } | undefined {
+  // Peek at what is already built, never build (this runs from a timer).
+  const engine = groupId ? runtimes.get(groupId)?.engine : undefined;
+  const entry = engine?.logEntry(eh);
+  if (!entry || entry.kind !== 'Post') {
+    return undefined;
+  }
+  return { body: entry.body, persona: entry.author, flagged: entry.flagged };
+}
+
 // The result of examining an incoming message body for a personas record.
 export type RecordIngestResult =
   // Ordinary chatter — let it flow through the normal message pipeline untouched.
@@ -372,6 +407,8 @@ export type RecordIngestResult =
       persona?: string;
       body: string;
       flagged: boolean;
+      // Held by the engine, not yet applied: `body` is a placeholder until it is.
+      pending?: boolean;
     }
   // A poll to render as its own bubble. `eh` is the handle a ballot references.
   | { kind: 'poll'; eh: string; descriptor: PersonaPollDescriptor }
@@ -485,6 +522,20 @@ export function ingestRecordForTimeline(
     const descriptor = decodePollDescriptor(body);
     if (descriptor) {
       return { kind: 'poll', eh: status.eh, descriptor };
+    }
+
+    // A post the replica is holding (it names group state we do not have yet, such as
+    // a member's join before our catch-up) has no log entry until it applies. Dropping
+    // it here lost it for good: it applied later but was never shown. Keep its place
+    // with a placeholder; the flag refresher fills it in once it applies.
+    if (status.status === 'buffered' && currentEngine.recordKind(record) === 'Post') {
+      return {
+        kind: 'post',
+        eh: status.eh,
+        body: PENDING_POST_BODY,
+        flagged: false,
+        pending: true,
+      };
     }
 
     const entry = currentEngine.logEntry(status.eh);

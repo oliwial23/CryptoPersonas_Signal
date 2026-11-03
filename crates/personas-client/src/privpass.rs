@@ -17,6 +17,8 @@
 //! that produced it, because it goes through real blind issuance — holds regardless
 //! of how much time passes between the two calls.
 
+use std::time::SystemTime;
+
 use anyhow::{Context, Result, anyhow};
 use personas_core::privpass::{
     self, BadgeRedemption, PostRedemption, PrivPassUser, decode_validated_tickets,
@@ -24,6 +26,7 @@ use personas_core::privpass::{
 };
 
 use crate::PersonaClient;
+use crate::flows::record;
 
 impl PersonaClient {
     /// Request one anonymous ticket, unblind and verify the server's response, and
@@ -66,9 +69,11 @@ impl PersonaClient {
         let batch_pk = self.privpass_batch_pk();
         let mut rng = rand::rngs::OsRng;
 
+        let start = SystemTime::now();
         let request =
             privpass::request_ticket(batch_user, &mut rng, &self.bul, &standard_pk, &batch_pk)
                 .map_err(|e| anyhow!("failed to build the ticket request: {e}"))?;
+        record("pp_request", start);
 
         let body = encode_ticket_request(&request)
             .map_err(|e| anyhow!("failed to encode the ticket request: {e}"))?;
@@ -90,12 +95,14 @@ impl PersonaClient {
             .map_err(|e| anyhow!("server returned an undecodable ticket: {e}"))?;
 
         let issuer_pubkey = self.privpass_issuer_pubkey();
+        let start = SystemTime::now();
         batch_user
             .store_validated_tickets::<personas_core::H, personas_core::Args, personas_core::Cr, { privpass::TICKET_BATCH_SIZE }>(
                 issuer_pubkey,
                 validated,
             )
             .map_err(|e| anyhow!("the server's blind-issuance proof did not verify: {e}"))?;
+        record("pp_unblind", start);
 
         // The user object didn't change (the standard method's own predicate is
         // identity-preserving here), but saving keeps this consistent with every
@@ -167,8 +174,10 @@ impl PersonaClient {
     ) -> Result<()> {
         let mut batch_user = self.take_stashed_ticket()?;
 
+        let start = SystemTime::now();
         let redemption = batch_user
             .use_validated_ticket::<personas_core::H, personas_core::Args, personas_core::Cr>(&[]);
+        record("pp_redeem", start);
         let body = encode_post_redemption(&PostRedemption {
             redemption,
             message,

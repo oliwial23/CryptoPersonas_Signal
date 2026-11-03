@@ -16,7 +16,8 @@ FROM rust:1-bookworm AS engine
 WORKDIR /src
 # The toolchain file pins the nightly; copy it first so the toolchain install is cached.
 COPY rust-toolchain.toml ./
-RUN rustup show active-toolchain || rustup toolchain install
+# Installs the toolchain rust-toolchain.toml names (no argument: read from the file).
+RUN rustup toolchain install
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY batch-zkc ./batch-zkc

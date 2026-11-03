@@ -81,6 +81,18 @@ the file, so a running gateway keeps the old routes. When the pull changed `Cadd
 docker compose up -d --force-recreate gateway
 ```
 
+When the pull changed the Rust crates or `Signal-Desktop-Persona-main/`, rebuild the member
+image and recreate the members. Every member runs the same `personas-play` image, so build
+it through ONE service: `docker compose build` with no service builds it once per member,
+in parallel, which multiplies the disk the build needs (several GB each).
+
+```sh
+docker compose build alice
+docker compose up -d --force-recreate alice bob carol
+```
+
+The members' data lives in volumes and survives recreation.
+
 ## Playing
 
 Open `https://signalserver.umiacs.umd.edu/play/`, log in, pick a member. The first launch

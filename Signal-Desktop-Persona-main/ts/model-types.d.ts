@@ -207,6 +207,10 @@ export type MessageAttributesType = {
   // records. Without it, an anonymous post falls through to the sender contact, which
   // is the phantom ACI (not a real account), and Signal renders "Deleted Account".
   personaAnonymous?: boolean;
+  // True while a received persona post is held by the engine (it names group state this
+  // member does not have yet, e.g. before catch-up). The bubble shows a placeholder; the
+  // flag refresher fills in the post once the engine applies it (personasFlags).
+  personaPending?: boolean;
   // Personas demo: the UNVERIFIED badge claim carried beside a persona post. Stored so
   // the chip survives a reload; never trusted (personasBadges.std.ts).
   personaBadge?: string;

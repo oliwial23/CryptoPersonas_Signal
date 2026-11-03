@@ -4,7 +4,7 @@
 //! client stamps [`save_start_time`] before it sends, and the server calls
 //! [`load_start_time`] when the message lands to close the interval. The `bench/*.py`
 //! harness reads the resulting `.jsonl` files, so the paths and field names here are
-//! a wire format — do not rename them casually.
+//! a wire format — do not rename them casually. Durations are fractional milliseconds.
 
 use serde_json::json;
 use std::{
@@ -58,7 +58,7 @@ pub fn load_start_time(label: &str) -> std::io::Result<SystemTime> {
 pub fn append_timing_line_with_filename(
     label: &str,
     start: SystemTime,
-    duration_ms: u128,
+    duration_ms: f64,
     filename: &str,
 ) -> std::io::Result<()> {
     let line = json!({
@@ -71,11 +71,7 @@ pub fn append_timing_line_with_filename(
 }
 
 /// Appends a timing to `json_files/<label>/timings.jsonl`.
-pub fn append_timing_line(
-    label: &str,
-    start: SystemTime,
-    duration_ms: u128,
-) -> std::io::Result<()> {
+pub fn append_timing_line(label: &str, start: SystemTime, duration_ms: f64) -> std::io::Result<()> {
     let line = json!({
         "start_ms": millis_since_epoch(start),
         "duration_ms": duration_ms,
@@ -90,7 +86,7 @@ pub fn append_timing_line(
 pub fn append_timing_line_fold(
     label: &str,
     start: SystemTime,
-    duration_ms: u128,
+    duration_ms: f64,
     num_scans: usize,
     file_suffix: &str,
 ) -> std::io::Result<()> {

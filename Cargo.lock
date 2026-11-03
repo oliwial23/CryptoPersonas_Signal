@@ -3421,13 +3421,16 @@ dependencies = [
  "ark-std",
  "folding-schemes",
  "personas-bulletin",
+ "personas-client",
  "personas-core",
  "personas-messenger",
  "rand 0.8.7",
+ "reqwest",
  "serde",
  "serde_json",
  "transport-api",
  "transport-mock",
+ "url",
  "zk-callbacks",
 ]
 

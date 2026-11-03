@@ -576,9 +576,12 @@ fn stamp(label: &str) {
 
 fn record(label: &str, start: SystemTime) {
     let Ok(elapsed) = start.elapsed() else { return };
-    if let Err(e) =
-        timing::append_timing_line_with_filename(label, start, elapsed.as_millis(), "features")
-    {
+    if let Err(e) = timing::append_timing_line_with_filename(
+        label,
+        start,
+        elapsed.as_secs_f64() * 1e3,
+        "features",
+    ) {
         eprintln!("failed to record timing for {label}: {e}");
     }
 }

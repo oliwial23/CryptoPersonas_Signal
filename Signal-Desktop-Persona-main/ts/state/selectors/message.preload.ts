@@ -22,6 +22,7 @@ import type {
 } from '../smart/MessageDetail.preload.tsx';
 import type { TimelineItemType } from '../../components/conversation/TimelineItem.dom.tsx';
 import { getPollStatusLine } from '../../services/personasEngine.preload.ts';
+import { trackPersonaPost } from '../../services/personasRegistry.std.ts';
 import {
   badgeNameForSlot,
   isBadgeRequestPending,
@@ -401,6 +402,11 @@ const getAuthorForMessage = (
   // An anonymous post has no petname, so there is nothing to fall back TO: its
   // sender is the phantom ACI, which is not a real account, and Signal would render
   // the placeholder "Deleted Account". Label it for what it is.
+  // A post still held by the engine (shown as a placeholder) must be tracked for the
+  // flag refresher to fill it in; after a restart, rendering it is what re-tracks it.
+  if (message.personaPending && message.personaEh) {
+    trackPersonaPost(message.personaEh, message.id);
+  }
   let personaTitle: string | undefined;
   if (message.persona != null) {
     personaTitle = `${message.personaFlagged ? '⚠ ' : ''}~${message.persona}`;
