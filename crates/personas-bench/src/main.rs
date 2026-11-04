@@ -70,6 +70,12 @@ struct Args {
     server_dir: PathBuf,
     /// Callbacks the server-based run answers by scanning and by folding.
     callbacks: usize,
+    /// Drive a validation server that is already running, not one started here.
+    server_url: Option<url::Url>,
+    /// Load-test the server instead of measuring one operation at a time.
+    load: bool,
+    load_requests: usize,
+    load_concurrency: Vec<usize>,
 }
 
 fn parse_args() -> Args {
@@ -88,6 +94,10 @@ fn parse_args() -> Args {
         server: false,
         server_dir: server::default_work_dir(),
         callbacks: 16,
+        server_url: None,
+        load: false,
+        load_requests: 128,
+        load_concurrency: vec![1, 4, 16, 64],
     };
     let list = |v: String, flag: &str| -> Vec<usize> {
         v.split(',')
@@ -123,6 +133,20 @@ fn parse_args() -> Args {
             "--callbacks" => {
                 args.callbacks = value().parse().unwrap_or_else(|_| usage("bad --callbacks"))
             }
+            "--server-url" => {
+                args.server_url = Some(
+                    value()
+                        .parse()
+                        .unwrap_or_else(|_| usage("bad --server-url")),
+                )
+            }
+            "--load" => args.load = true,
+            "--load-requests" => {
+                args.load_requests = value()
+                    .parse()
+                    .unwrap_or_else(|_| usage("bad --load-requests"))
+            }
+            "--load-concurrency" => args.load_concurrency = list(value(), "--load-concurrency"),
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),
         }
@@ -142,8 +166,12 @@ fn usage(problem: &str) -> ! {
          \x20                     [--fold-k 1,2,4,8,16,32,64] [--iters N] [--out FILE]\n\
          \x20                     (Nova-folded scans of k callbacks, N per fold step)\n\
          \x20      personas-bench --server [--history N] [--callbacks K] [--iters N]\n\
-         \x20                     [--server-dir DIR] [--out FILE]\n\
-         \x20                     (server-based: proved posts, Privacy Pass, scan vs fold)\n\
+         \x20                     [--server-dir DIR] [--server-url URL] [--out FILE]\n\
+         \x20                     (server-based: proved posts, Privacy Pass, scan vs fold;\n\
+         \x20                     with --server-url, against that server, not a local one)\n\
+         \x20      personas-bench --server --load [--load-requests N]\n\
+         \x20                     [--load-concurrency 1,4,16,64] [--server-url URL] [--out FILE]\n\
+         \x20                     (how many posts per second the server handles)\n\
          ops: {}",
         OPS.join(", ")
     );

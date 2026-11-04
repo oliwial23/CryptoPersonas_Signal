@@ -5,13 +5,21 @@
 //! are large — tens of MB for the folding parameters — so a flow fetches only the key it
 //! needs, at the moment it needs it.
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
 use ark_serialize::{CanonicalDeserialize, Compress, Validate};
 use personas_core::{PK, circuits::NP};
 
 use crate::PersonaClient;
 
+/// Parameter bytes already fetched by this process, by URL. They are fixed for a server's
+/// lifetime and a key is megabytes: fetching one for every proof goes unnoticed on
+/// loopback but dominates over a real network.
+static FETCHED: LazyLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = LazyLock::new(Default::default);
+
 impl PersonaClient {
-    /// GET `route` and canonical-deserialize a parameter.
+    /// GET `route` (once per process) and canonical-deserialize a parameter.
     ///
     /// Panics on failure: without the key there is no proof to produce, and every caller
     /// is a proving flow that cannot proceed. The message names the route so a missing
@@ -22,16 +30,31 @@ impl PersonaClient {
             .url(route)
             .unwrap_or_else(|e| panic!("bad parameter route: {e}"));
 
-        let bytes = self
-            .bul
-            .client
-            .get(url)
-            .send()
-            .unwrap_or_else(|e| panic!("failed to fetch {route} from the server: {e}"))
-            .bytes()
-            .unwrap_or_else(|e| panic!("server returned no body for {route}: {e}"));
+        let cached = FETCHED.lock().unwrap().get(url.as_str()).cloned();
+        let bytes = cached.unwrap_or_else(|| {
+            let response = self
+                .bul
+                .client
+                .get(url.clone())
+                .send()
+                .unwrap_or_else(|e| panic!("failed to fetch {route} from the server: {e}"));
+            assert!(
+                response.status().is_success(),
+                "server answered {} for {route}",
+                response.status()
+            );
+            let bytes = response
+                .bytes()
+                .unwrap_or_else(|e| panic!("server returned no body for {route}: {e}"));
+            let bytes = Arc::new(bytes.to_vec());
+            FETCHED
+                .lock()
+                .unwrap()
+                .insert(url.to_string(), bytes.clone());
+            bytes
+        });
 
-        T::deserialize_with_mode(&*bytes, Compress::No, Validate::No)
+        T::deserialize_with_mode(bytes.as_slice(), Compress::No, Validate::No)
             .unwrap_or_else(|e| panic!("server returned an undecodable parameter for {route}: {e}"))
     }
 

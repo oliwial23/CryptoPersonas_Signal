@@ -86,7 +86,37 @@ services:
     volumes: [keys:/shared/keys, erin:/home/member]
     environment: { <<: *member-env, PERSONAS_INSTANCE: erin, PERSONAS_NUMBER: "+12025550005" }
 
+  # The server-based implementation and the benchmarks, for comparing it with serverless on
+  # this hardware (bench/README.md). Not part of the demo: profile `compare` keeps them out
+  # of a plain `docker compose up` or `build`. Its chat is the in-process mock, its keys and
+  # Privacy Pass issuer key its own, in the `validator` volume.
+  validator:
+    profiles: [compare]
+    image: personas-validator
+    build:
+      context: ../..
+      dockerfile: deploy/play/Dockerfile.validator
+    restart: unless-stopped
+    mem_limit: 3g
+    working_dir: /data    # the server writes its timings to json_files/ here
+    command: ["server"]
+    environment:
+      PERSONAS_CONFIG: /app/deploy/profiles/local.toml
+      PERSONAS_BIND: 0.0.0.0:3000
+      PERSONAS_DATA_DIR: /data
+    volumes:
+      - validator:/data
+  bench:
+    profiles: [compare]
+    image: personas-validator
+    entrypoint: ["personas-bench"]
+    volumes:
+      # Read-only: a benchmark must never be able to replace the group's proving keys.
+      - keys:/shared/keys:ro
+      - ./bench/results:/results
+
 volumes:
+  validator:
   directory:
   keys:
   alice:

@@ -1,0 +1,11 @@
+# This image needs only the Rust workspace, so Signal Desktop stays out of the build context.
+**/.git
+**/node_modules
+**/target
+**/.DS_Store
+Signal-Desktop-Persona-main
+crypto_personas
+experiments
+json_files
+deploy/play/download
+deploy/play/bench

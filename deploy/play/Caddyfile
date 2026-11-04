@@ -12,8 +12,9 @@
 	# noVNC page IS that member, so this is the only thing standing between the public
 	# internet and the demo accounts.
 	# The same password guards the app download (/download/), so only invited testers get
-	# it. The installed app itself never needs it.
-	@play path /play /play/* /download /download/*
+	# it. The installed app itself never needs it. It also guards the validation server
+	# (/validator/), which is only there for benchmarking.
+	@play path /play /play/* /download /download/* /validator /validator/*
 	basic_auth @play {
 		{$PLAY_USER:demo} {$PLAY_PASSWORD_HASH}
 	}
@@ -47,6 +48,12 @@
 			file_server {
 				hide .*
 			}
+		}
+
+		# --- the server-based implementation, for the comparison ------------------------
+		# Compose profile `compare`; a 502 here just means it is not running.
+		handle_path /validator/* {
+			reverse_proxy validator:3000
 		}
 
 		# --- member directory (directory.js): how clients find each other -----------

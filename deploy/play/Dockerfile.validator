@@ -1,0 +1,28 @@
+# The server-based implementation, for comparing it with serverless on this VM: the
+# validation server and `personas-bench`. Not part of the demo (compose profile `compare`).
+#
+# Build from the CryptoPersonas_Signal root, or through compose:
+#
+#   cd deploy/play && docker compose --profile compare build validator
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY batch-zkc ./batch-zkc
+# Cargo.toml [patch]es these paths; cargo wants them present.
+COPY third_party ./third_party
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p personas-server --bin server -p personas-bench --bin personas-bench \
+ && cp target/release/server target/release/personas-bench /usr/local/bin/
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /usr/local/bin/server /usr/local/bin/personas-bench /usr/local/bin/
+WORKDIR /app
+# `personas-bench --server` starts the server with this profile (relative to its cwd).
+COPY deploy/profiles ./deploy/profiles

@@ -86,7 +86,59 @@ step and the object root is a constant of the tie-in key, so a deployment would 
 the setup whenever the roots change (every barrier). That is why setup is reported
 separately.
 
-## 2. End-to-end in the real app
+## 2. Serverless against the server-based implementation
+
+`personas-bench --server` runs the real validation server with both of its optimizations
+(Privacy Pass tickets and folded scans) and drives it with the real client library:
+proved posts, ticket requests and redemptions, K callbacks scanned one by one or folded.
+
+```bash
+cargo build --release -p personas-bench --bin personas-bench -p personas-server --bin server
+./target/release/personas-bench --server --history 1000 --iters 20 --warmup 3 --callbacks 16 --out server.json
+python3 deploy/play/bench/compare.py --serverless serverless.json --server server.json
+```
+
+`compare.py` puts it beside an ordinary `personas-bench` run with the same `--history`: what
+the sender pays and when, who checks each post, and CPU per day for a group.
+
+- `--server-url URL` drives a server that is already running, instead of starting one, so
+  a real network sits between client and server. The server's own timings stay on that
+  server; only the client's and the round trips are reported.
+- `--load` measures capacity: for each `--load-concurrency` level it sends
+  `--load-requests` prepared requests that many at a time, and reports posts per second and
+  latency. Proofs and tickets are made first, so client proving is not measured.
+
+### On the VM
+
+`compose.yml` has the validation server and the benchmarks under the profile `compare`, so
+they stay out of the demo. The server's chat is the in-process mock: nothing reaches Signal.
+On the VM, from `deploy/play`:
+
+```bash
+docker compose --profile compare build validator
+docker compose up -d validator
+docker compose up -d --force-recreate gateway     # once, for the /validator/ route
+./bench/vm-compare.sh quick
+nohup ./bench/vm-compare.sh long > ~/vm-compare-long.log 2>&1 &
+```
+
+Then, from a laptop, the same measurements with the real network in the way, through the
+load balancer and the gateway. `/validator/` takes the `/play` password; percent-encode it
+if it has special characters:
+
+```bash
+U="https://demo:PASSWORD@signalserver.umiacs.umd.edu/validator/"
+./target/release/personas-bench --server --server-url "$U" --iters 20 --warmup 3 --callbacks 16 --label "laptop to VM" --server-dir target/server-bench-remote --out remote.json
+./target/release/personas-bench --server --load --server-url "$U" --label "laptop to VM" --server-dir target/server-bench-remote --out remote-load.json
+```
+
+A server restart forgets its bulletin (`docker compose restart validator`); otherwise each
+run adds to it. Stop it with `docker compose stop validator`.
+
+The client downloads the whole user bulletin for every proof (`BulNet::get_membership_data`),
+so with a real network and a long history, `client` includes that transfer.
+
+## 3. End-to-end in the real app
 
 Start each desktop instance with the log variable set. Every extra member opened from
 that app inherits it, and all instances append to the same file:

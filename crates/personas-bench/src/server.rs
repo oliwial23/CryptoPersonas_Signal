@@ -3,10 +3,10 @@
 //! two designs can be compared on one machine.
 //!
 //! This starts the real validation server (the `server` binary built beside this one, the
-//! `local` profile: an in-process mock chat, no credentials) in a work directory, drives it with the real
-//! client library (`personas-client`, what the `personas` CLI runs), and reads back the
-//! timings both sides already write to `json_files/<label>/` (client proving, server
-//! verification). It also times each HTTP round trip itself.
+//! `local` profile: an in-process mock chat, no credentials) in a work directory, drives it
+//! with the real client library (`personas-client`, what the `personas` CLI runs), and reads
+//! back the timings both sides already write to `json_files/<label>/` (client proving,
+//! server verification). It also times each HTTP round trip itself.
 //!
 //! Measured, per iteration:
 //!
@@ -19,9 +19,22 @@
 //!
 //! `--history N` first posts N proved messages from other members, so the server's
 //! numbers are taken with N objects on its bulletin (they should not grow with it).
+//!
+//! `--server-url URL` drives a validation server that is already running instead of
+//! starting one, which puts a real network between client and server. The server's own
+//! timings are then on that server, so only the client's and the round trips are reported.
+//! Credentials go in the URL (`https://user:password@host/validator/`). Each run adds to
+//! that server's bulletin.
+//!
+//! `--load` measures capacity instead. Every post goes through this one server, so the
+//! question is how many it handles at once: for each concurrency level it sends a batch of
+//! prepared requests, that many at a time, and reports posts per second and latency.
+//! Proved posts are proved first, one per member (a member's next proof needs its last on
+//! the bulletin), so the clients' proving is not part of what is measured.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use personas_client::{ClientConfig, Namespace, PersonaClient};
@@ -32,6 +45,9 @@ use crate::{Args, Summary, machine, micros, summarize};
 
 /// Posts a member can make before it must scan (`NUM_INTS_BEFORE_SCAN`, minus slack).
 const POSTS_PER_MEMBER: usize = 150;
+/// The most `--load-requests`: at concurrency 1 one member takes every ticket, and the
+/// levels together must stay under that same cap.
+const MAX_LOAD_REQUESTS: usize = 128;
 
 #[derive(Serialize)]
 struct ServerOp {
@@ -50,6 +66,8 @@ struct ServerOp {
 struct ServerReport {
     machine: crate::Machine,
     implementation: &'static str,
+    /// Where the server was: `local` (started here) or `remote` (`--server-url`).
+    target: &'static str,
     iterations: usize,
     warmup: usize,
     history: usize,
@@ -57,6 +75,26 @@ struct ServerReport {
     callbacks: usize,
     fold_width: usize,
     operations: std::collections::BTreeMap<String, ServerOp>,
+}
+
+/// One concurrency level of a load test.
+#[derive(Serialize)]
+struct LoadRun {
+    op: &'static str,
+    concurrency: usize,
+    requests: usize,
+    errors: usize,
+    wall_s: f64,
+    per_second: f64,
+    latency: Option<Summary>,
+}
+
+#[derive(Serialize)]
+struct LoadReport {
+    machine: crate::Machine,
+    target: &'static str,
+    history: usize,
+    runs: Vec<LoadRun>,
 }
 
 /// The server process, killed when dropped.
@@ -70,6 +108,14 @@ impl Drop for Server {
 }
 
 fn post_json(http: &reqwest::blocking::Client, url: Url, proof: Vec<u8>) -> u64 {
+    try_post_json(http, url, proof).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn try_post_json(
+    http: &reqwest::blocking::Client,
+    url: Url,
+    proof: Vec<u8>,
+) -> Result<u64, String> {
     #[derive(Serialize)]
     struct PostRequest {
         message: String,
@@ -85,14 +131,16 @@ fn post_json(http: &reqwest::blocking::Client, url: Url, proof: Vec<u8>) -> u64 
             proof,
         })
         .send()
-        .expect("post request failed");
+        .map_err(|e| format!("post request failed: {e}"))?;
     let us = micros(start);
-    assert!(
-        res.status().is_success(),
-        "post rejected: {}",
-        res.text().unwrap_or_default()
-    );
-    us
+    if !res.status().is_success() {
+        return Err(format!(
+            "post rejected ({}): {}",
+            res.status(),
+            res.text().unwrap_or_default()
+        ));
+    }
+    Ok(us)
 }
 
 fn post_bytes(http: &reqwest::blocking::Client, url: Url, body: Vec<u8>) -> u64 {
@@ -171,6 +219,125 @@ fn wait_ready(api: &Url) {
     panic!("server did not come up; see server.log");
 }
 
+/// Hand `items` to `concurrency` workers and time the whole batch. `send` returns one
+/// latency (or error) per request it made.
+fn burst<T: Send>(
+    op: &'static str,
+    concurrency: usize,
+    items: Vec<T>,
+    send: impl Fn(T) -> Vec<Result<u64, String>> + Sync,
+) -> LoadRun {
+    let queue = Mutex::new(items);
+    let results = Mutex::new((Vec::new(), 0usize));
+    let start = Instant::now();
+    std::thread::scope(|scope| {
+        for _ in 0..concurrency {
+            scope.spawn(|| {
+                loop {
+                    let item = queue.lock().unwrap().pop();
+                    let Some(item) = item else { break };
+                    let outcomes = send(item);
+                    let mut results = results.lock().unwrap();
+                    for outcome in outcomes {
+                        match outcome {
+                            Ok(us) => results.0.push(us),
+                            Err(e) => {
+                                if results.1 == 0 {
+                                    eprintln!("{op}: first error: {e}");
+                                }
+                                results.1 += 1;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let wall_s = start.elapsed().as_secs_f64();
+    let (latencies, errors) = results.into_inner().unwrap();
+    let run = LoadRun {
+        op,
+        concurrency,
+        requests: latencies.len() + errors,
+        errors,
+        wall_s,
+        per_second: latencies.len() as f64 / wall_s,
+        latency: summarize(&latencies),
+    };
+    eprintln!(
+        "{op} at concurrency {concurrency}: {:.1}/s, {errors} errors",
+        run.per_second
+    );
+    run
+}
+
+fn run_load(
+    args: &Args,
+    member: &(impl Fn(&str) -> PersonaClient + Sync),
+    http: &reqwest::blocking::Client,
+    jsonrpc: &Url,
+) -> Vec<LoadRun> {
+    let total = args.load_requests;
+    assert!(
+        (1..=MAX_LOAD_REQUESTS).contains(&total),
+        "--load-requests must be 1 to {MAX_LOAD_REQUESTS}"
+    );
+    let levels: Vec<usize> = args
+        .load_concurrency
+        .iter()
+        .map(|&c| c.clamp(1, total))
+        .collect();
+    let members: Vec<PersonaClient> = (0..total).map(|i| member(&format!("load-{i}"))).collect();
+    let mut runs = Vec::new();
+
+    for &concurrency in &levels {
+        let proofs: Vec<Vec<u8>> = members
+            .iter()
+            .map(|m| m.gen_cb_for_msg().expect("post failed"))
+            .collect();
+        runs.push(burst("post", concurrency, proofs, |proof| {
+            vec![try_post_json(http, jsonrpc.clone(), proof)]
+        }));
+    }
+
+    // A member's ticket stash is one file, so each worker keeps to its own member.
+    for &concurrency in &levels {
+        let per_member = total / concurrency;
+        let workers = &members[..concurrency];
+        for m in workers {
+            for _ in 0..per_member {
+                m.privpass_request().expect("ticket request failed");
+            }
+        }
+        runs.push(burst(
+            "pp_post",
+            concurrency,
+            workers.iter().collect(),
+            |m| {
+                (0..per_member)
+                    .map(|_| {
+                        let start = Instant::now();
+                        m.privpass_redeem_post("bench".into(), "bench".into(), None)
+                            .map(|()| micros(start))
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect()
+            },
+        ));
+    }
+    runs
+}
+
+fn write_report(out: &Path, report: &impl Serialize) {
+    match serde_json::to_string_pretty(report) {
+        Ok(json) => match std::fs::write(out, json) {
+            Ok(()) => eprintln!("wrote {}", out.display()),
+            Err(e) => eprintln!("could not write {}: {e}", out.display()),
+        },
+        Err(e) => eprintln!("could not serialize results: {e}"),
+    }
+}
+
 pub fn run(args: &Args, work: &Path, callbacks: usize) {
     let repo = std::env::current_dir().expect("no working directory");
     let work = if work.is_absolute() {
@@ -179,9 +346,25 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         repo.join(work)
     };
     std::fs::create_dir_all(&work).expect("cannot create the work dir");
-    let port = 3700;
-    let api = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-    let _server = start_server(&repo, &work, port);
+    let out = if args.out.is_absolute() {
+        args.out.clone()
+    } else {
+        repo.join(&args.out)
+    };
+    let (api, _server, target) = match &args.server_url {
+        Some(url) => {
+            let mut api = url.clone();
+            if !api.path().ends_with('/') {
+                api.set_path(&format!("{}/", api.path()));
+            }
+            (api, None, "remote")
+        }
+        None => {
+            let port = 3700;
+            let api = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+            (api, Some(start_server(&repo, &work, port)), "local")
+        }
+    };
     // Client and server write `json_files/` relative to their working directory.
     std::env::set_current_dir(&work).expect("cannot enter the work dir");
     wait_ready(&api);
@@ -216,6 +399,31 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         );
     }
     let _ = std::fs::remove_dir_all("json_files");
+
+    if args.load {
+        let report = LoadReport {
+            machine: machine(&args.label),
+            target,
+            history: args.history,
+            runs: run_load(args, &member, &http, &jsonrpc),
+        };
+        println!(
+            "\n{:<10}{:>12}{:>10}{:>8}{:>12}{:>12}{:>12}",
+            "operation", "concurrency", "requests", "errors", "per second", "median ms", "p95 ms"
+        );
+        for r in &report.runs {
+            let (median, p95) = r
+                .latency
+                .as_ref()
+                .map_or((f64::NAN, f64::NAN), |s| (s.median_ms, s.p95_ms));
+            println!(
+                "{:<10}{:>12}{:>10}{:>8}{:>12.1}{:>12.1}{:>12.1}",
+                r.op, r.concurrency, r.requests, r.errors, r.per_second, median, p95
+            );
+        }
+        write_report(&out, &report);
+        return;
+    }
 
     let total = args.warmup + args.iters;
     let mut ops = std::collections::BTreeMap::new();
@@ -337,6 +545,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     let report = ServerReport {
         machine: machine(&args.label),
         implementation: "server-based, Privacy Pass + folding",
+        target,
         iterations: args.iters,
         warmup: args.warmup,
         history: args.history,
@@ -361,18 +570,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             f(&op.client_after)
         );
     }
-    let out = if args.out.is_absolute() {
-        args.out.clone()
-    } else {
-        repo.join(&args.out)
-    };
-    match serde_json::to_string_pretty(&report) {
-        Ok(json) => match std::fs::write(&out, json) {
-            Ok(()) => eprintln!("wrote {}", out.display()),
-            Err(e) => eprintln!("could not write {}: {e}", out.display()),
-        },
-        Err(e) => eprintln!("could not serialize results: {e}"),
-    }
+    write_report(&out, &report);
 }
 
 /// Where `--server` keeps the server's data and the clients' state between runs.

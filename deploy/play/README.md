@@ -93,6 +93,9 @@ docker compose up -d --force-recreate alice bob carol
 
 The members' data lives in volumes and survives recreation.
 
+The validation server (the server-based implementation) can run beside the demo for
+comparison; see `bench/README.md`.
+
 ## Playing
 
 Open `https://signalserver.umiacs.umd.edu/play/`, log in, pick a member. The first launch
