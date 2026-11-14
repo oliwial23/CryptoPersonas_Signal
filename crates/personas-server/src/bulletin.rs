@@ -73,7 +73,9 @@ where
         FakeSigPrivkey::sk(),
         pub_args,
         &db.obj_bul.clone(),
-        get_callbacks(),
+        // One expected callback per committed one: every interaction leaves the standard
+        // callback, a Privacy Pass ticket request `N` of them.
+        (0..N).map(|_| get_callbacks().remove(0)).collect(),
         epoch,
         db.obj_bul.get_pubkey(),
         true,

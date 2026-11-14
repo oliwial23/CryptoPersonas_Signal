@@ -46,6 +46,18 @@ use crate::{Args, Summary, machine, micros, summarize};
 /// Posts or ticket requests a member can make before it must scan (`NUM_INTS_BEFORE_SCAN`,
 /// minus slack). Members who would need more are replaced by fresh ones, untimed.
 const POSTS_PER_MEMBER: usize = 15;
+
+/// Tickets per Privacy Pass request (this build's `PERSONAS_TICKET_BATCH`).
+const TICKET_BATCH: usize = personas_core::privpass::TICKET_BATCH_SIZE;
+/// Ticket requests one member makes before it would have to scan: each request counts
+/// `TICKET_BATCH` interactions, and members stay within POSTS_PER_MEMBER of them.
+const REQUESTS_PER_MEMBER: usize = if TICKET_BATCH > POSTS_PER_MEMBER {
+    1
+} else {
+    POSTS_PER_MEMBER / TICKET_BATCH
+};
+/// Tickets one member holds after its requests.
+const TICKETS_PER_MEMBER: usize = REQUESTS_PER_MEMBER * TICKET_BATCH;
 /// The most `--load-requests`.
 const MAX_LOAD_REQUESTS: usize = 128;
 
@@ -74,6 +86,8 @@ struct ServerReport {
     /// Callbacks answered by `scan` and `fold`.
     callbacks: usize,
     fold_width: usize,
+    /// Tickets issued per Privacy Pass request; `pp_request` times are per request.
+    ticket_batch: usize,
     operations: std::collections::BTreeMap<String, ServerOp>,
 }
 
@@ -310,9 +324,9 @@ fn run_load(
                 let mut stashes = Vec::new();
                 let mut left = per_worker;
                 while left > 0 {
-                    let n = left.min(POSTS_PER_MEMBER);
+                    let n = left.min(TICKETS_PER_MEMBER);
                     let m = member(&format!("load-pp-{concurrency}-{w}-{}", stashes.len()));
-                    for _ in 0..n {
+                    for _ in 0..n.div_ceil(TICKET_BATCH) {
                         m.privpass_request().expect("ticket request failed");
                     }
                     stashes.push((m, n));
@@ -466,15 +480,15 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     eprintln!("post: done");
 
     // --- Privacy Pass: request tickets offline, redeem them to post -------------------------
-    // Ticket requests count toward the interaction cap too: a fresh member every
-    // POSTS_PER_MEMBER requests, and each redeems its own tickets.
-    let ticketed: Vec<PersonaClient> = (0..total.div_ceil(POSTS_PER_MEMBER))
+    // Ticket requests count toward the interaction cap too (TICKET_BATCH each): a fresh
+    // member every REQUESTS_PER_MEMBER requests, and each redeems its own tickets.
+    let ticketed: Vec<PersonaClient> = (0..total.div_ceil(REQUESTS_PER_MEMBER))
         .map(|k| member(&format!("ticketed-{k}")))
         .collect();
     let mut rt = Vec::new();
     for i in 0..total {
         let start = Instant::now();
-        ticketed[i / POSTS_PER_MEMBER]
+        ticketed[i / REQUESTS_PER_MEMBER]
             .privpass_request()
             .expect("ticket request failed");
         rt.push(micros(start));
@@ -491,7 +505,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     let mut rt = Vec::new();
     for i in 0..total {
         let start = Instant::now();
-        ticketed[i / POSTS_PER_MEMBER]
+        ticketed[i / TICKETS_PER_MEMBER]
             .privpass_redeem_post("bench".into(), "bench".into(), None)
             .expect("redemption failed");
         rt.push(micros(start));
@@ -576,6 +590,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         history: args.history,
         callbacks,
         fold_width: personas_core::circuits::NUM_SCANS_PER_FOLD,
+        ticket_batch: TICKET_BATCH,
         operations: ops,
     };
     let f = |s: &Option<Summary>| {

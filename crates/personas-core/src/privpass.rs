@@ -39,14 +39,35 @@ use zk_callbacks::generic::object::{Com, Nul};
 use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
 use crate::circuits::{
-    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, MsgUser, StandInt, get_standard_interaction,
+    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, MsgUser, TicketInt, get_ticket_interaction,
 };
 use crate::params::ParamsError;
 use crate::{Args, ArgsVar, Cr, F, H, OStore, PK, Snark, VK};
 
-/// One anonymized ticket per request (Option A, see module docs) — reuses the
-/// existing post interaction, no new circuit for the interaction itself.
-pub const TICKET_BATCH_SIZE: usize = 1;
+/// Tickets issued per request, set at build time with `PERSONAS_TICKET_BATCH` (default 1).
+/// One request is one ticket interaction (`get_ticket_interaction`) leaving this many
+/// callbacks, so it counts this many interactions toward the scan cap and must stay
+/// below `NUM_INTS_BEFORE_SCAN`.
+pub const TICKET_BATCH_SIZE: usize = match option_env!("PERSONAS_TICKET_BATCH") {
+    Some(s) => parse_usize(s),
+    None => 1,
+};
+const _: () = assert!(
+    TICKET_BATCH_SIZE >= 1 && TICKET_BATCH_SIZE < crate::circuits::NUM_INTS_BEFORE_SCAN,
+    "PERSONAS_TICKET_BATCH must be at least 1 and below NUM_INTS_BEFORE_SCAN"
+);
+
+const fn parse_usize(s: &str) -> usize {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    while i < b.len() {
+        assert!(b[i] >= b'0' && b[i] <= b'9', "PERSONAS_TICKET_BATCH must be a number");
+        n = n * 10 + (b[i] - b'0') as usize;
+        i += 1;
+    }
+    n
+}
 
 /// A member wrapping their own [`User`] with the bookkeeping `batch-zkc` needs to
 /// track which locally-held tickets are still blinded vs. already validated.
@@ -85,7 +106,8 @@ impl IssuerKeys {
 fn privpass_cache_dir(cache_root: &Path, obj_pubkey_bytes: &[u8]) -> std::path::PathBuf {
     use blake2::{Blake2s256, Digest};
     let mut hasher = Blake2s256::new();
-    hasher.update(b"personas-privpass;v1;batchsize=1;");
+    hasher.update(b"personas-privpass;v2;ticket-interaction;batchsize=");
+    hasher.update(TICKET_BATCH_SIZE.to_le_bytes());
     hasher.update(obj_pubkey_bytes);
     cache_root.join(hex::encode(&hasher.finalize()[..16]))
 }
@@ -119,14 +141,25 @@ pub fn load_or_create_issuer_keys(
     Ok(keys)
 }
 
-/// Generate (or load, cached by the object bulletin's public key) the Groth16 keys
-/// for the blind-issuance circuit. Additive only — the existing `ServerKeys`/
-/// `ensure_params` cache is never read or written here.
+/// The Groth16 keys for one ticket request: the ticket interaction itself (`N`
+/// callbacks, see [`TICKET_BATCH_SIZE`]) and the blind-issuance circuit over its `N`
+/// callbacks.
+pub struct TicketKeys {
+    pub interaction_pk: PK,
+    pub interaction_vk: VK,
+    pub batch_pk: PK,
+    pub batch_vk: VK,
+}
+
+/// Generate (or load, cached by the object bulletin's public key and the batch size)
+/// the [`TicketKeys`]. Additive only — the existing `ServerKeys`/`ensure_params` cache
+/// is never read or written here.
 pub fn ensure_batch_ticket_keys(
     rng: &mut (impl CryptoRng + RngCore),
+    obj_pubkey: <OStore as PublicUserBul<F, MsgUser>>::MembershipPub,
     obj_pubkey_bytes: &[u8],
     cache_root: &Path,
-) -> Result<(PK, VK), ParamsError> {
+) -> Result<TicketKeys, ParamsError> {
     let dir = privpass_cache_dir(cache_root, obj_pubkey_bytes);
     fs::create_dir_all(&dir)?;
     let path = dir.join(BATCH_KEYS_FILE);
@@ -134,13 +167,19 @@ pub fn ensure_batch_ticket_keys(
     if path.exists() {
         let bytes = fs::read(&path)?;
         let mut reader = &bytes[..];
-        let pk = PK::deserialize_with_mode(&mut reader, Compress::No, Validate::No)?;
-        let vk = VK::deserialize_with_mode(&mut reader, Compress::No, Validate::No)?;
-        return Ok((pk, vk));
+        return Ok(TicketKeys {
+            interaction_pk: PK::deserialize_with_mode(&mut reader, Compress::No, Validate::No)?,
+            interaction_vk: VK::deserialize_with_mode(&mut reader, Compress::No, Validate::No)?,
+            batch_pk: PK::deserialize_with_mode(&mut reader, Compress::No, Validate::No)?,
+            batch_vk: VK::deserialize_with_mode(&mut reader, Compress::No, Validate::No)?,
+        });
     }
 
-    let interaction: StandInt = get_standard_interaction();
-    let (pk, vk) = generate_keys_for_batch_tickets::<
+    let interaction: TicketInt<TICKET_BATCH_SIZE> = get_ticket_interaction();
+    let (interaction_pk, interaction_vk) = interaction
+        .clone()
+        .generate_keys::<H, Snark, Cr, OStore>(rng, Some(obj_pubkey), F::from(0), false);
+    let (batch_pk, batch_vk) = generate_keys_for_batch_tickets::<
         H,
         MsgUser,
         F,
@@ -155,27 +194,29 @@ pub fn ensure_batch_ticket_keys(
     >(rng, interaction);
 
     let mut bytes = Vec::new();
-    pk.serialize_with_mode(&mut bytes, Compress::No)?;
-    vk.serialize_with_mode(&mut bytes, Compress::No)?;
+    interaction_pk.serialize_with_mode(&mut bytes, Compress::No)?;
+    interaction_vk.serialize_with_mode(&mut bytes, Compress::No)?;
+    batch_pk.serialize_with_mode(&mut bytes, Compress::No)?;
+    batch_vk.serialize_with_mode(&mut bytes, Compress::No)?;
     fs::write(&path, &bytes)?;
 
-    Ok((pk, vk))
+    Ok(TicketKeys { interaction_pk, interaction_vk, batch_pk, batch_vk })
 }
 
-/// The member's side of requesting a ticket: prove the standard interaction (the
-/// same proof an anonymous post already makes) and, in the same call, blind one
-/// resulting callback ticket for anonymous redemption later.
+/// The member's side of requesting tickets: prove the ticket interaction (like a post,
+/// but leaving [`TICKET_BATCH_SIZE`] callbacks) and, in the same call, blind one ticket
+/// per callback for anonymous redemption later.
 pub fn request_ticket<Bul: PublicUserBul<F, MsgUser>>(
     user: &mut PrivPassUser,
     rng: &mut (impl CryptoRng + RngCore),
     bul: &Bul,
-    standard_pk: &PK,
+    interaction_pk: &PK,
     batch_pk: &PK,
 ) -> Result<TicketRequest, ark_relations::r1cs::SynthesisError> {
     let bul_data = bul.get_membership_data(user.commit::<H>()).unwrap();
     user.batch_issue_tickets::<H, F, ArgsVar, (), (), Args, ArgsVar, Cr, Snark, Bul, TICKET_BATCH_SIZE>(
         rng,
-        get_standard_interaction(),
+        get_ticket_interaction::<TICKET_BATCH_SIZE>(),
         core::array::from_fn(|_| FakeSigPubkey::pk()),
         zk_callbacks::generic::object::Time::from(0),
         bul_data,
@@ -185,7 +226,7 @@ pub fn request_ticket<Bul: PublicUserBul<F, MsgUser>>(
         // side or an honest request fails to verify (the exact O10-adjacent mistake
         // already made once this session).
         true,
-        standard_pk,
+        interaction_pk,
         batch_pk,
         F::from(0),
         (),
@@ -303,7 +344,7 @@ pub fn issue_tickets(
     object: Com<F>,
     old_nul: Nul<F>,
     memb_data: <OStore as PublicUserBul<F, MsgUser>>::MembershipPub,
-    standard_vk: &VK,
+    interaction_vk: &VK,
     batch_vk: &VK,
     bul: &OStore,
     issuer: &IssuerKeys,
@@ -316,7 +357,7 @@ pub fn issue_tickets(
         request.exec_meth.proof.clone(),
         memb_data,
         true,
-        standard_vk,
+        interaction_vk,
         bul,
         request.pub_blinded_tickets,
         request.proof.clone(),
@@ -435,12 +476,25 @@ pub struct BadgeRedemption {
 // than a versioned record.
 // ---------------------------------------------------------------------------------------
 
+/// [`TICKET_BATCH_SIZE`] curve points, in order (one per ticket).
+fn read_tickets(
+    reader: &mut &[u8],
+) -> Result<[IssuerGroup; TICKET_BATCH_SIZE], ark_serialize::SerializationError> {
+    let mut out = [IssuerGroup::default(); TICKET_BATCH_SIZE];
+    for t in out.iter_mut() {
+        *t = CanonicalDeserialize::deserialize_compressed(&mut *reader)?;
+    }
+    Ok(out)
+}
+
 pub fn encode_ticket_request(
     req: &TicketRequest,
 ) -> Result<Vec<u8>, ark_serialize::SerializationError> {
     let mut bytes = Vec::new();
     req.exec_meth.serialize_compressed(&mut bytes)?;
-    req.pub_blinded_tickets[0].serialize_compressed(&mut bytes)?;
+    for t in &req.pub_blinded_tickets {
+        t.serialize_compressed(&mut bytes)?;
+    }
     req.proof.serialize_compressed(&mut bytes)?;
     Ok(bytes)
 }
@@ -450,11 +504,11 @@ pub fn decode_ticket_request(
 ) -> Result<TicketRequest, ark_serialize::SerializationError> {
     let mut reader = bytes;
     let exec_meth = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
-    let ticket: IssuerGroup = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    let tickets = read_tickets(&mut reader)?;
     let proof = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
     Ok(TicketRequest {
         exec_meth,
-        pub_blinded_tickets: [ticket],
+        pub_blinded_tickets: tickets,
         proof,
     })
 }
@@ -463,7 +517,9 @@ pub fn encode_validated_tickets(
     tickets: &ValidatedTicketBatch,
 ) -> Result<Vec<u8>, ark_serialize::SerializationError> {
     let mut bytes = Vec::new();
-    tickets.vtickets[0].serialize_compressed(&mut bytes)?;
+    for t in &tickets.vtickets {
+        t.serialize_compressed(&mut bytes)?;
+    }
     tickets.proof.0.serialize_compressed(&mut bytes)?;
     tickets.proof.1.serialize_compressed(&mut bytes)?;
     Ok(bytes)
@@ -473,11 +529,11 @@ pub fn decode_validated_tickets(
     bytes: &[u8],
 ) -> Result<ValidatedTicketBatch, ark_serialize::SerializationError> {
     let mut reader = bytes;
-    let ticket: IssuerGroup = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
+    let tickets = read_tickets(&mut reader)?;
     let c: IssuerScalar = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
     let s: IssuerScalar = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
     Ok(ValidatedTickets {
-        vtickets: [ticket],
+        vtickets: tickets,
         proof: (c, s),
     })
 }

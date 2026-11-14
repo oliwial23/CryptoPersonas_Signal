@@ -115,6 +115,10 @@ pub fn router(state: ServerLock) -> Router {
             "/api/privpass/batch_proving_key",
             get(privpass::batch_proving_key),
         )
+        .route(
+            "/api/privpass/interaction_proving_key",
+            get(privpass::interaction_proving_key),
+        )
         // -- interactions that do not relay -------------------------------------------
         .route("/api/interact/standard", post_route(interact::standard))
         .route("/api/interact/scan", post_route(interact::scan))

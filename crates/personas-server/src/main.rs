@@ -77,8 +77,12 @@ async fn main() -> Result<()> {
         )?;
         bytes
     };
-    let (privpass_batch_pk, privpass_batch_vk) =
-        ensure_batch_ticket_keys(&mut rng, &obj_pubkey_bytes, &data_dir.join("params"))?;
+    let privpass_keys = ensure_batch_ticket_keys(
+        &mut rng,
+        db.obj_bul.get_pubkey(),
+        &obj_pubkey_bytes,
+        &data_dir.join("params"),
+    )?;
     span.exit();
 
     let signal = signal_transport(&cfg);
@@ -97,8 +101,7 @@ async fn main() -> Result<()> {
         signal,
         slack,
         privpass_issuer,
-        privpass_batch_pk,
-        privpass_batch_vk,
+        privpass_keys,
     )?));
 
     // Slack's socket-mode listener, and with it the 👍/👎 rating buttons and reaction events.

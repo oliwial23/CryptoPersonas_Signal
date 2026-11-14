@@ -31,8 +31,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use personas_core::Store;
 use personas_core::params::{FoldingParams, ServerKeys};
-use personas_core::privpass::IssuerKeys;
-use personas_core::{PK, VK};
+use personas_core::privpass::{IssuerKeys, TicketKeys};
+
 use transport_api::Transport;
 
 /// Privacy Pass: the issuer keypair, the (additive, separately-cached) batch-ticket
@@ -40,8 +40,8 @@ use transport_api::Transport;
 /// O7 and `personas_core::privpass`.
 pub struct PrivPassState {
     pub issuer: IssuerKeys,
-    pub batch_proving_key: PK,
-    pub batch_verifying_key: VK,
+    /// The ticket interaction and blind-issuance keys, for `TICKET_BATCH_SIZE` tickets.
+    pub keys: TicketKeys,
     pub spent: SpentTicketLog,
 }
 
@@ -116,8 +116,7 @@ impl ServerState {
         signal: Arc<dyn Transport>,
         slack: Arc<dyn Transport>,
         privpass_issuer: IssuerKeys,
-        privpass_batch_proving_key: PK,
-        privpass_batch_verifying_key: VK,
+        privpass_keys: TicketKeys,
     ) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
 
@@ -140,8 +139,7 @@ impl ServerState {
             badges: BadgeLog::open(data_dir.join("badge_requests.jsonl"))?,
             privpass: PrivPassState {
                 issuer: privpass_issuer,
-                batch_proving_key: privpass_batch_proving_key,
-                batch_verifying_key: privpass_batch_verifying_key,
+                keys: privpass_keys,
                 spent: SpentTicketLog::open(data_dir.join("privpass_spent.jsonl"))?,
             },
         })

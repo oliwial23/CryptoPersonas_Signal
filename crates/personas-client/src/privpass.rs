@@ -65,13 +65,13 @@ impl PersonaClient {
     /// below — everything up to the point of deciding what to redeem for is
     /// identical.
     fn request_and_validate(&self, batch_user: &mut PrivPassUser) -> Result<()> {
-        let standard_pk = self.standard_pk();
+        let interaction_pk = self.privpass_interaction_pk();
         let batch_pk = self.privpass_batch_pk();
         let mut rng = rand::rngs::OsRng;
 
         let start = SystemTime::now();
         let request =
-            privpass::request_ticket(batch_user, &mut rng, &self.bul, &standard_pk, &batch_pk)
+            privpass::request_ticket(batch_user, &mut rng, &self.bul, &interaction_pk, &batch_pk)
                 .map_err(|e| anyhow!("failed to build the ticket request: {e}"))?;
         record("pp_request", start);
 

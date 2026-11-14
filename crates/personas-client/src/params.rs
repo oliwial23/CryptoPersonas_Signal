@@ -148,6 +148,11 @@ impl PersonaClient {
         self.fetch_pk("api/privpass/batch_proving_key")
     }
 
+    /// Privacy Pass: the ticket interaction (one request, `TICKET_BATCH_SIZE` callbacks).
+    pub fn privpass_interaction_pk(&self) -> PK {
+        self.fetch_pk("api/privpass/interaction_proving_key")
+    }
+
     /// Privacy Pass: the issuer's VOPRF public key, needed to unblind a validated batch.
     pub fn privpass_issuer_pubkey(&self) -> ark_grumpkin::Projective {
         self.fetch_param("api/privpass/pubkey")

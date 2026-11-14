@@ -987,6 +987,55 @@ pub type PseudoRateStandInt = Interaction<
 pub type BadgeRequestStandInt =
     Interaction<F, MsgUser, BadgesArgs<F>, BadgesArgsVar<F>, (), (), Args, ArgsVar, 1>;
 
+/// Privacy Pass issuance of `N` tickets in one proof: one interaction that leaves `N`
+/// callbacks (one per ticket) and counts as `N` interactions toward the scan cap.
+pub type TicketInt<const N: usize> =
+    Interaction<F, MsgUser, F, FpVar<F>, (), (), Args, ArgsVar, N>;
+
+fn ticket_method<const N: usize>(tu: &User<F, MsgUser>, _args: F, _priv: ()) -> User<F, MsgUser> {
+    let mut u = tu.clone();
+    u.data.num_interactions_since_last_scan += F::from(N as u64);
+    u
+}
+
+/// Like `standard_predicate`, but the counter grows by `N`. The post predicate only
+/// checks `counter != NUM_INTS_BEFORE_SCAN`, which is sound for steps of 1; a jump of `N`
+/// could skip over the cap, so here the new counter must be one of `N..NUM_INTS_BEFORE_SCAN`
+/// (the old one is always below the cap, so this is `old + N < cap`).
+fn ticket_predicate<'a, const N: usize>(
+    tu_old: &'a UserVar<F, MsgUser>,
+    tu_new: &'a UserVar<F, MsgUser>,
+    args: FpVar<F>,
+    _priv: (),
+) -> ArkResult<Boolean<F>> {
+    bind_public_input(&args)?;
+    let new_count = &tu_new.data.num_interactions_since_last_scan;
+    let x1 = new_count.is_eq(
+        &(tu_old.data.num_interactions_since_last_scan.clone()
+            + FpVar::Constant(F::from(N as u64))),
+    )?;
+    let mut under_cap = Boolean::FALSE;
+    for v in N..NUM_INTS_BEFORE_SCAN {
+        under_cap = under_cap | new_count.is_eq(&FpVar::Constant(F::from(v as u64)))?;
+    }
+    let x2 = tu_new.data.reputation.is_eq(&tu_old.data.reputation)?;
+    let x4 = tu_new.data.banned.is_eq(&FpVar::Constant(F::from(0)))?;
+    let x5 = tu_new.data.sk.is_eq(&tu_old.data.sk)?;
+    let x6 = tu_new.data.badge1.is_eq(&tu_old.data.badge1)?;
+    let x7 = tu_new.data.badge2.is_eq(&tu_old.data.badge2)?;
+    let x8 = tu_new.data.badge3.is_eq(&tu_old.data.badge3)?;
+    let x9 = tu_old.zk_fields.is_ingest_over.clone();
+    Ok(x1 & under_cap & x2 & x4 & x5 & x6 & x7 & x8 & x9)
+}
+
+pub fn get_ticket_interaction<const N: usize>() -> TicketInt<N> {
+    let cb = get_callbacks().remove(0);
+    Interaction {
+        meth: (ticket_method::<N>, ticket_predicate::<N>),
+        callbacks: core::array::from_fn(|_| cb.clone()),
+    }
+}
+
 pub fn get_standard_interaction() -> StandInt {
     Interaction {
         meth: (standard_method, standard_predicate),
@@ -1501,5 +1550,68 @@ mod rate_limit_circuit_tests {
         for i in [3, 4, 5, 100] {
             assert!(!accepts(i), "persona index {i} must NOT be provable");
         }
+    }
+}
+
+/// A Privacy Pass request for `N` tickets counts `N` interactions, and must leave the
+/// member below the scan cap: a batch may not jump the counter past it.
+#[cfg(test)]
+mod ticket_predicate_tests {
+    use super::*;
+    use ark_r1cs_std::R1CSVar;
+    use ark_relations::r1cs::ConstraintSystem;
+
+    fn allowed<const N: usize>(old_count: usize) -> bool {
+        let mut rng = rand::thread_rng();
+        let mut old = User::create(
+            MsgUser {
+                sk: F::from(1234u64),
+                ..Default::default()
+            },
+            &mut rng,
+        );
+        old.data.num_interactions_since_last_scan = F::from(old_count as u64);
+        let new = ticket_method::<N>(&old, F::from(0u64), ());
+
+        let cs = ConstraintSystem::<F>::new_ref();
+        let old_var = UserVar::new_witness(cs.clone(), || Ok(old.clone())).unwrap();
+        let new_var = UserVar::new_witness(cs.clone(), || Ok(new.clone())).unwrap();
+        let args = FpVar::new_input(cs.clone(), || Ok(F::from(0u64))).unwrap();
+        let ok = ticket_predicate::<N>(&old_var, &new_var, args, ()).unwrap();
+        ok.value().unwrap() && cs.is_satisfied().unwrap()
+    }
+
+    fn check<const N: usize>() {
+        for old in 0..NUM_INTS_BEFORE_SCAN {
+            assert_eq!(
+                allowed::<N>(old),
+                old + N < NUM_INTS_BEFORE_SCAN,
+                "batch of {N} from {old} interactions"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_stays_under_the_scan_cap() {
+        check::<1>();
+        check::<5>();
+        check::<10>();
+        check::<15>();
+        check::<19>();
+    }
+
+    #[test]
+    fn a_batch_cannot_hide_its_size() {
+        // The new object must count all N interactions, not fewer.
+        let mut rng = rand::thread_rng();
+        let old = User::create(MsgUser::default(), &mut rng);
+        let mut new = ticket_method::<10>(&old, F::from(0u64), ());
+        new.data.num_interactions_since_last_scan = F::from(1u64);
+        let cs = ConstraintSystem::<F>::new_ref();
+        let old_var = UserVar::new_witness(cs.clone(), || Ok(old)).unwrap();
+        let new_var = UserVar::new_witness(cs.clone(), || Ok(new)).unwrap();
+        let args = FpVar::new_input(cs.clone(), || Ok(F::from(0u64))).unwrap();
+        let ok = ticket_predicate::<10>(&old_var, &new_var, args, ()).unwrap();
+        assert!(!(ok.value().unwrap() && cs.is_satisfied().unwrap()));
     }
 }

@@ -23,7 +23,12 @@ use crate::state::{Namespace, ServerLock};
 /// The batch-ticket proving key a client needs to build a [`TicketRequest`]
 /// (`personas_core::privpass::request_ticket`).
 pub async fn batch_proving_key(State(state): State<ServerLock>) -> AppResult<Bytes> {
-    bulk(&state.read().await.privpass.batch_proving_key)
+    bulk(&state.read().await.privpass.keys.batch_pk)
+}
+
+/// The ticket-interaction proving key (`TICKET_BATCH_SIZE` callbacks per request).
+pub async fn interaction_proving_key(State(state): State<ServerLock>) -> AppResult<Bytes> {
+    bulk(&state.read().await.privpass.keys.interaction_pk)
 }
 
 /// Request one anonymous ticket: prove the standard interaction (the same proof an
@@ -36,7 +41,7 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
         .map_err(|e| AppError::BadRequest(format!("that is not a ticket request: {e}")))?;
 
     let mut st = state.write().await;
-    let standard_vk = st.keys.standard_verifying_key.clone();
+    let interaction_vk = st.privpass.keys.interaction_vk.clone();
     let current = epoch(&st.db);
 
     let object = request.exec_meth.new_object;
@@ -50,7 +55,7 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
     let start = std::time::SystemTime::now();
     verify_and_store(
         &mut st.db,
-        &standard_vk,
+        &interaction_vk,
         exec_meth_for_append,
         F::from(0),
         current,
@@ -58,13 +63,13 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
     )?;
 
     let memb_data = st.db.obj_bul.get_pubkey();
-    let batch_vk = st.privpass.batch_verifying_key.clone();
+    let batch_vk = st.privpass.keys.batch_vk.clone();
     let validated = issue_tickets(
         &request,
         object,
         old_nul,
         memb_data,
-        &standard_vk,
+        &interaction_vk,
         &batch_vk,
         &st.db.obj_bul,
         &st.privpass.issuer,
