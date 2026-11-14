@@ -84,16 +84,6 @@ pub struct JsBadgeRequest {
     pub slot: u32,
 }
 
-/// The two petnames an authorship proof actually proves about.
-///
-/// Derived from the proof's own public inputs by `Engine::verify_authorship`. A caller
-/// that renders these is sound; one that renders names taken from the wire is not.
-#[napi(object)]
-pub struct JsAuthorship {
-    pub first: String,
-    pub second: String,
-}
-
 #[napi(object)]
 pub struct JsEmitted {
     pub bytes: Buffer,
@@ -153,6 +143,10 @@ pub struct JsLogEntry {
     /// `true` once the author's persona was revoked by a settled ban — render the
     /// post flagged, never delete it (the rendering gate).
     pub flagged: bool,
+    /// What a post with a claim proves about its author ("shows the Faculty badge",
+    /// "is also <petname>", "has reputation at least 3"), read from the record's proved
+    /// public inputs. `None` for a plain post and for every other record.
+    pub claim: Option<String>,
 }
 
 /// How long the last operation took (personas_messenger::OpTimings), in milliseconds.
@@ -217,12 +211,6 @@ fn account_from_hex(account: &str) -> napi::Result<F> {
 pub struct Engine {
     inner: Engine32,
     rng: StdRng,
-    /// Verifying key for `authorship_pred`, kept so a RECIPIENT can check an authorship
-    /// proof. It ships in the same `ServerKeys` bundle every instance already generates,
-    /// so holding it costs nothing extra.
-    authorship_vk: personas_core::PreparedVk,
-    /// Verifying key for `badge_pred`, so a recipient can check a badge proof.
-    badge_vk: personas_core::PreparedVk,
     /// Verifying key for `not_banned_pred`, so an admin can check a reset request.
     not_banned_vk: personas_core::PreparedVk,
     /// The record journal, when persistence is on.
@@ -414,8 +402,6 @@ impl Engine {
 
         // Prepared once for verification (personas_core::verify): same checks, without
         // re-preparing the key on every proof.
-        let authorship_vk = personas_core::PreparedVk::new(&keys.authorship_pred_verifying_key);
-        let badge_vk = personas_core::PreparedVk::new(&keys.badge_pred_verifying_key);
         let not_banned_vk = personas_core::PreparedVk::new(&keys.not_banned_pred_verifying_key);
 
         let heartbeat = match (options.heartbeat_anchor_ms, options.heartbeat_period_ms) {
@@ -464,8 +450,6 @@ impl Engine {
         Ok(Self {
             inner,
             rng,
-            authorship_vk,
-            badge_vk,
             not_banned_vk,
             journal,
         })
@@ -608,53 +592,61 @@ impl Engine {
             .map_err(|e| napi::Error::from_reason(format!("discard failed: {e}")))
     }
 
-    /// Prove that two of MY pseudonyms share an author. Returns the encoded proof plus
-    /// its public inputs, for the caller to ship as display payload.
-    ///
-    /// Both pseudonyms are named by their CONTEXT — for Desktop's unlimited pseudonyms
-    /// that is the nonce the UI already stores per persona. The claimed values are
-    /// derived from our secret key INSIDE the circuit, so this cannot be used to assert
-    /// anything about a persona we do not own.
-    ///
-    /// Produces no record and folds nothing: an authorship proof is a read-only
-    /// statement, which is why it needed no protocol change (see
-    /// PERSONAS_ZK_WORKPLAN.md step 3).
+    /// MergePersonas: a post under the persona of `context` that also proves the persona
+    /// of `other_context` is the same author. Both are named by their CONTEXT (for
+    /// Desktop's unlimited pseudonyms, the nonce the UI stores per persona); the second
+    /// pseudonym is derived from our own secret key inside the circuit, so this cannot
+    /// claim a persona we do not own. An interaction with a callback, like any post.
     #[napi]
-    pub fn emit_authorship(&mut self, context_a: f64, context_b: f64) -> napi::Result<Buffer> {
-        self.guard_not_scanning("emit_authorship")?;
-        if context_a == context_b {
-            // A pseudonym is trivially itself; the proof would verify and say nothing.
+    pub fn emit_post_merge_personas(
+        &mut self,
+        body: String,
+        context: f64,
+        other_context: f64,
+    ) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_post_merge_personas")?;
+        if context == other_context {
             return napi::Result::Err(napi::Error::from_reason(
-                "emit_authorship: the two contexts are identical, which claims nothing",
+                "emit_post_merge_personas: the two contexts are identical, which claims nothing",
             ));
         }
-        let a = F::from(context_a as u64);
-        let b = F::from(context_b as u64);
-        self.inner
-            .prove_authorship(&mut self.rng, a, b)
-            .map(Buffer::from)
-            .map_err(|e| napi::Error::from_reason(format!("emit_authorship failed: {e}")))
+        let r = self.inner.emit_post_merge_personas(
+            &mut self.rng,
+            body,
+            F::from(context as u64),
+            F::from(other_context as u64),
+        );
+        self.emit(r)
     }
 
-    /// VERIFY an authorship proof, returning the two petnames it actually proves about
-    /// — or `None` if it does not verify.
-    ///
-    /// The returned names are derived from the proof's OWN public inputs, never from
-    /// anything the sender wrote beside it. That is the difference between a checkmark
-    /// that means something and one that can be attached to someone else's persona
-    /// names: a sender can hold a valid proof about two pseudonyms they really own and
-    /// still display any names they like next to it. Callers must render THESE.
+    /// RepAtLeast: a post under the persona of `context` proving the author's reputation
+    /// is at least `rho` (an integer, possibly negative).
     #[napi]
-    pub fn verify_authorship(&self, proof: Buffer) -> Option<JsAuthorship> {
-        let inputs = personas_core::verify_authorship_proof(&self.authorship_vk, proof.as_ref())?;
-        // Made against OUR group's tree, not one the prover built (inputs[4] is the root).
-        if !self.inner.replica().has_produced_root(inputs[4]) {
-            return None;
+    pub fn emit_post_rep_at_least(
+        &mut self,
+        body: String,
+        context: f64,
+        rho: f64,
+    ) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_post_rep_at_least")?;
+        if rho.fract() != 0.0 {
+            return napi::Result::Err(napi::Error::from_reason(
+                "emit_post_rep_at_least: the threshold must be a whole number",
+            ));
         }
-        Some(JsAuthorship {
-            first: personas_core::persona::petname(inputs[1]),
-            second: personas_core::persona::petname(inputs[3]),
-        })
+        let r = self.inner.emit_post_rep_at_least(
+            &mut self.rng,
+            body,
+            F::from(context as u64),
+            rho as i64,
+        );
+        self.emit(r)
+    }
+
+    /// My reputation, as an integer. `None` for an observer.
+    #[napi]
+    pub fn reputation(&self) -> Option<f64> {
+        self.inner.member().map(|m| m.reputation() as f64)
     }
 
     /// Badge requests that have NOT been approved yet, for an admin to act on.
@@ -722,42 +714,30 @@ impl Engine {
         }
     }
 
-    /// Prove we hold `badge` (by NAME) in its slot. Returns the encoded proof.
+    /// ShowBadge: a post under the persona of `context` showing the badge named `badge`
+    /// (Faculty, Student or Industry), which must be in my object. An interaction with a
+    /// callback, like any post.
     #[napi]
-    pub fn emit_badge_proof(&mut self, badge: String) -> napi::Result<Buffer> {
-        self.guard_not_scanning("emit_badge_proof")?;
-        let (slot, value) = personas_core::badge_value(&badge).ok_or_else(|| {
+    pub fn emit_post_show_badge(
+        &mut self,
+        body: String,
+        context: f64,
+        badge: String,
+    ) -> napi::Result<JsEmitted> {
+        self.guard_not_scanning("emit_post_show_badge")?;
+        let (slot, _) = personas_core::badge_value(&badge).ok_or_else(|| {
             napi::Error::from_reason(format!(
-                "emit_badge_proof: {badge:?} is not one of Faculty, Student, Industry. \
+                "emit_post_show_badge: {badge:?} is not one of Faculty, Student, Industry. \
                  Badge values are circuit constants, so no other name can be proved."
             ))
         })?;
-        self.inner
-            .prove_badge(&mut self.rng, F::from(slot as u64), value)
-            .map(Buffer::from)
-            .map_err(|e| napi::Error::from_reason(format!("emit_badge_proof failed: {e}")))
-    }
-
-    /// VERIFY a badge proof, returning the badge NAME it actually proves — or `None`.
-    ///
-    /// As with authorship, render what comes back from here, never a label carried in
-    /// the message: otherwise a valid Student proof could be displayed as Faculty.
-    #[napi]
-    pub fn verify_badge_proof(&self, proof: Buffer) -> Option<String> {
-        let (_slot, value, root) =
-            personas_core::verify_badge_proof(&self.badge_vk, proof.as_ref())?;
-        // THE ROOT CHECK. Without it a badge is forgeable: build a one-leaf tree around an
-        // object whose badge slot holds the public FACULTY constant, prove against that,
-        // and every recipient shows a verified badge nobody approved.
-        if !self.inner.replica().has_produced_root(root) {
-            return None;
-        }
-        // Map back through the same table the prover used, so an unrecognised value is
-        // reported as unverified rather than rendered as something plausible.
-        ["Faculty", "Student", "Industry"]
-            .iter()
-            .find(|name| personas_core::badge_value(name).map(|(_, v)| v) == Some(value))
-            .map(|name| (*name).to_string())
+        let r = self.inner.emit_post_show_badge(
+            &mut self.rng,
+            body,
+            F::from(context as u64),
+            slot as u8,
+        );
+        self.emit(r)
     }
 
     /// Which badges does MY object actually hold? Empty for an observer, or for a
@@ -1279,6 +1259,7 @@ impl Engine {
                 author: e.author.clone(),
                 body: e.body.clone(),
                 flagged: e.flagged,
+                claim: e.claim.clone(),
             })
             .collect()
     }
@@ -1299,6 +1280,7 @@ impl Engine {
                 author: e.author.clone(),
                 body: e.body.clone(),
                 flagged: e.flagged,
+                claim: e.claim.clone(),
             })
     }
 

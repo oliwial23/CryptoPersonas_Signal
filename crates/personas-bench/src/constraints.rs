@@ -78,12 +78,12 @@ pub fn circuit_sizes() -> Vec<(&'static str, CircuitSize)> {
         ("anon_post", k.standard.0),
         ("pseudo_post", k.standard_pseudo.0),
         ("rate_limited_post", k.standard_pseudor.0),
-        ("authorship", k.authorship_pred.0),
-        ("vote_or_rating", k.pseudonym_pred.0),
+        ("merge_personas", k.merge_personas.0),
+        ("rating", k.pseudonym_pred.0),
         ("badge_request", k.badge_request.0),
-        ("badge_proof", k.badge_pred.0),
+        ("show_badge", k.show_badge.0),
+        ("rep_at_least", k.rep_at_least.0),
         ("scan", k.scan.0),
         ("join", k.join_pred.0),
-        ("not_banned", k.not_banned_pred.0),
     ]
 }

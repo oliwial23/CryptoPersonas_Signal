@@ -41,9 +41,10 @@ use personas_bulletin::replica::record::{
     Ark, Eh, Flavour, PollKind, Record, ballot_payload, post_payload, rating_payload,
 };
 use personas_core::circuits::{
-    BadgesArgs, BadgesArgsVar, JoinArgs, JoinArgsVar, MsgUser, NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs,
-    PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, PubScan,
-    PubScanVar, ResetArgs, ResetArgsVar, authorship_pred, badge_pred, get_badge_request_interaction, get_callbacks,
+    BadgesArgs, BadgesArgsVar, Claim, ClaimArgs, ClaimArgsVar, JoinArgs, JoinArgsVar, MsgUser,
+    NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate, PseudonymArgsVar,
+    PubScan, PubScanVar, REP_THRESHOLD_MAX, ResetArgs, ResetArgsVar, get_badge_request_interaction,
+    get_callbacks, get_claim_interaction, rep_threshold,
     get_dummy_scan_interaction, get_scan_interaction, get_standard_interaction, get_standard_pseudo_interaction,
     get_standard_pseudo_rate_interaction, join_pred, not_banned_pred, pseudonym_pred,
 };
@@ -87,6 +88,9 @@ pub enum MemberError {
     /// ban absorbed.
     #[error("cannot prove 'not banned': {0}")]
     NotBannedUnprovable(&'static str),
+    /// A post with a claim this member's object does not satisfy (or a malformed one).
+    #[error("cannot make that claim: {0}")]
+    ClaimUnprovable(&'static str),
 }
 
 /// The **proving** keys a member needs — the mirror of
@@ -100,14 +104,10 @@ pub struct MemberKeys {
     pub pseudo_rate: PK,
     pub scan: PK,
     pub pseudonym_pred: PK,
-    /// Proving two of this member's pseudonyms share an author (`authorship_pred`).
-    ///
-    /// Already present in every `ServerKeys` bundle, so adding this costs no keygen and
-    /// no regeneration for existing users — the ~51 MB cache on disk already contains it.
-    pub authorship_pred: PK,
-    /// Proving possession of a badge in slot `i` (`badge_pred`). Also already in every
-    /// `ServerKeys` bundle — no keygen, no regeneration.
-    pub badge_pred: PK,
+    /// Posts with a claim (`get_claim_interaction`): ShowBadge, MergePersonas, RepAtLeast.
+    pub show_badge: PK,
+    pub merge_personas: PK,
+    pub rep_at_least: PK,
     /// The badge REQUEST interaction's proving key.
     pub badge_request: PK,
     /// A join's freshness proof (`join_pred`).
@@ -126,8 +126,9 @@ impl MemberKeys {
             pseudo_rate: keys.standard_pseudor_proving_key.clone(),
             scan: keys.scan_proving_key.clone(),
             pseudonym_pred: keys.pseudonym_pred_proving_key.clone(),
-            authorship_pred: keys.authorship_pred_proving_key.clone(),
-            badge_pred: keys.badge_pred_proving_key.clone(),
+            show_badge: keys.show_badge_proving_key.clone(),
+            merge_personas: keys.merge_personas_proving_key.clone(),
+            rep_at_least: keys.rep_at_least_proving_key.clone(),
             badge_request: keys.badge_request_proving_key.clone(),
             join: keys.join_pred_proving_key.clone(),
             not_banned: keys.not_banned_pred_proving_key.clone(),
@@ -523,25 +524,163 @@ impl Member {
         })
     }
 
-    /// A ballot in a poll. Proves `pseudonym_pred` under the poll's context; does
-    /// **not** advance the object (voting costs no rate-limit budget, §8), so `&self`.
+    /// A ballot in a poll (AnonVote): a Persona-post interaction under the poll's context,
+    /// with the ballot as its payload. Like every feature it advances the object and files
+    /// a callback, so it counts toward the scan cap (protocol version 5).
     pub fn vote<const OH: usize>(
-        &self,
+        &mut self,
         rng: &mut (impl CryptoRng + RngCore),
         obj: &MerkleObjStore<F, OH>,
         poll: Eh,
         option: u32,
     ) -> Result<Record, MemberError> {
+        self.require_allowance(obj)?;
+        let root = obj.root();
         let context = poll.context();
-        let payload = ballot_payload(poll, option);
-        let (root, claimed, proof) = self.pseudonym_statement(rng, obj, context, payload)?;
+        let claimed = persona::pseudonym(&self.user.data.sk, &context);
+        let exec = self
+            .user
+            .exec_method_create_cb::<H, PseudonymArgs<F>, PseudonymArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 1>(
+                rng,
+                get_standard_pseudo_interaction(),
+                [FakeSigPubkey::pk()],
+                Time::from(0),
+                obj,
+                false,
+                &self.keys.pseudo,
+                PseudonymArgs {
+                    context,
+                    claimed,
+                    payload: ballot_payload(poll, option),
+                },
+                (),
+            )?;
         Ok(Record::Vote {
             poll,
             option,
-            proof: Ark(proof),
+            exec: Ark(exec),
             claimed: Ark(claimed),
             obj_root: Ark(root),
         })
+    }
+
+    /// A post with a claim: a Persona post under `context` that also proves `claim` about
+    /// this member's object. `a`/`b` are the claim's public inputs (see `ClaimArgs`); the
+    /// typed wrappers below are what callers use.
+    #[allow(clippy::too_many_arguments)]
+    fn post_claim<const OH: usize>(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        body: String,
+        context: F,
+        flavour: Flavour,
+        a: F,
+        b: F,
+    ) -> Result<Record, MemberError> {
+        self.require_allowance(obj)?;
+        let root = obj.root();
+        let payload = post_payload(&body);
+        let claimed = persona::pseudonym(&self.user.data.sk, &context);
+        let claim = flavour.claim().expect("a claim flavour");
+        let pk = match claim {
+            Claim::ShowBadge => &self.keys.show_badge,
+            Claim::MergePersonas => &self.keys.merge_personas,
+            Claim::RepAtLeast => &self.keys.rep_at_least,
+        };
+        let exec = self
+            .user
+            .exec_method_create_cb::<H, ClaimArgs<F>, ClaimArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 1>(
+                rng,
+                get_claim_interaction(claim),
+                [FakeSigPubkey::pk()],
+                Time::from(0),
+                obj,
+                false,
+                pk,
+                ClaimArgs {
+                    post: PseudonymArgs {
+                        context,
+                        claimed,
+                        payload,
+                    },
+                    a,
+                    b,
+                },
+                (),
+            )?;
+        Ok(Record::Post {
+            flavour,
+            exec: Ark(exec),
+            extra: Ark(vec![context, claimed, a, b]),
+            body,
+            payload: Ark(payload),
+            obj_root: Ark(root),
+        })
+    }
+
+    /// ShowBadge: a post under the persona of `context` that shows the badge in `slot`
+    /// (1=Faculty, 2=Student, 3=Industry). Refused locally if the slot is empty.
+    pub fn post_show_badge<const OH: usize>(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        body: impl Into<String>,
+        context: F,
+        slot: u8,
+    ) -> Result<Record, MemberError> {
+        let d = &self.user.data;
+        let badge = match slot {
+            1 => d.badge1,
+            2 => d.badge2,
+            3 => d.badge3,
+            _ => return Err(MemberError::ClaimUnprovable("badge slot must be 1, 2 or 3")),
+        };
+        if badge == F::from(0u64) {
+            return Err(MemberError::ClaimUnprovable("no badge is held in that slot"));
+        }
+        self.post_claim(rng, obj, body.into(), context, Flavour::ShowBadge, F::from(u64::from(slot)), badge)
+    }
+
+    /// MergePersonas: a post under the persona of `context` that also proves the persona of
+    /// `other_context` is the same author.
+    pub fn post_merge_personas<const OH: usize>(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        body: impl Into<String>,
+        context: F,
+        other_context: F,
+    ) -> Result<Record, MemberError> {
+        if other_context == context {
+            return Err(MemberError::ClaimUnprovable("a persona cannot be merged with itself"));
+        }
+        let other = persona::pseudonym(&self.user.data.sk, &other_context);
+        self.post_claim(rng, obj, body.into(), context, Flavour::MergePersonas, other_context, other)
+    }
+
+    /// RepAtLeast: a post under the persona of `context` whose author's reputation is at
+    /// least `rho`. Refused locally if it is not.
+    pub fn post_rep_at_least<const OH: usize>(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        obj: &MerkleObjStore<F, OH>,
+        body: impl Into<String>,
+        context: F,
+        rho: i64,
+    ) -> Result<Record, MemberError> {
+        if !(-REP_THRESHOLD_MAX..=REP_THRESHOLD_MAX).contains(&rho) {
+            return Err(MemberError::ClaimUnprovable("the threshold is out of range"));
+        }
+        if self.reputation() < rho {
+            return Err(MemberError::ClaimUnprovable("reputation is below that threshold"));
+        }
+        self.post_claim(rng, obj, body.into(), context, Flavour::RepAtLeast, rep_threshold(rho), F::from(0u64))
+    }
+
+    /// This member's reputation as a signed integer.
+    pub fn reputation(&self) -> i64 {
+        personas_core::types::field_to_f64_signed(&self.user.data.reputation) as i64
     }
 
     /// A rating of another record (§10): the same `pseudonym_pred` statement, under
@@ -662,134 +801,8 @@ impl Member {
         })
     }
 
-    /// The shared `pseudonym_pred` proof for a vote or a rating: prove membership and
+    /// The shared `pseudonym_pred` proof for a rating: prove membership and
     /// `claimed = H(sk, context)`, returning `(root, claimed, proof)`.
-    /// Prove that TWO of this member's pseudonyms share an author, without revealing
-    /// which member or the secret key behind them.
-    ///
-    /// Returns the object root, both claimed pseudonyms, and the proof. The claimed
-    /// values are public inputs of the proof, which is what lets a recipient derive the
-    /// petnames to display from the proof itself rather than trusting names sent
-    /// alongside it — see `personas_core::verify_authorship_proof`.
-    ///
-    /// Read-only, like a vote or a rating: it is a statement ABOUT the object, so it
-    /// produces no interaction, advances nothing, and files no callback. That is why
-    /// this needs no new `Record` variant and no change to the replica's accept rules —
-    /// it is a claim shown, not state folded in.
-    ///
-    /// Shape is identical to `pseudonym_statement` with `PseudonymArgsPair` in place of
-    /// `PseudonymArgs`; `authorship_pred` is the two-pseudonym predicate and its proving
-    /// key already ships in `ServerKeys`.
-    pub fn authorship<const OH: usize>(
-        &self,
-        rng: &mut (impl CryptoRng + RngCore),
-        obj: &MerkleObjStore<F, OH>,
-        context_a: F,
-        context_b: F,
-    ) -> Result<(F, F, F, <Snark as ark_snark::SNARK<F>>::Proof), MemberError> {
-        let (root, path) =
-            <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
-                obj,
-                self.commitment(),
-            )
-            .ok_or(MemberError::NotJoined)?;
-
-        // Both derived from OUR OWN sk, which is the entire content of the claim: only
-        // the holder of that key can produce a satisfying witness for the pair.
-        let claimed_a = persona::pseudonym(&self.user.data.sk, &context_a);
-        let claimed_b = persona::pseudonym(&self.user.data.sk, &context_b);
-
-        let pair = PseudonymArgsPair {
-            a: PseudonymArgs {
-                context: context_a,
-                claimed: claimed_a,
-                ..Default::default()
-            },
-            b: PseudonymArgs {
-                context: context_b,
-                claimed: claimed_b,
-                ..Default::default()
-            },
-        };
-
-        let proof = self
-            .user
-            .prove_statement_and_in::<H, PseudonymArgsPair<F>, PseudonymArgsPairVar<F>, (), (), Snark, MerkleObjStore<F, OH>>(
-                rng,
-                authorship_pred,
-                &self.keys.authorship_pred,
-                (path, root),
-                false,
-                pair,
-                (),
-            )?;
-        Ok((root, claimed_a, claimed_b, proof))
-    }
-
-    /// Prove this member holds `badge` in slot `i`, without revealing who they are.
-    ///
-    /// Returns the object root and the proof; the caller pairs them with `(i, badge)` to
-    /// form the public inputs `[i, claimed, obj_root]` — pub_args first, then the
-    /// membership root, the same Merkle convention the replica documents for
-    /// `pseudonym_pred` and that authorship needed.
-    ///
-    /// NOTE the `true` below. `pseudonym_statement` passes `false` in this position and
-    /// the as-a-service `make_badge_proof` passes `true`; this follows the working badge
-    /// reference rather than the neighbouring pseudonym code, because the two statements
-    /// differ in whether membership is revealed to the verifier.
-    ///
-    /// Read-only, like authorship: no interaction, no callback, nothing folded in.
-    pub fn badge<const OH: usize>(
-        &self,
-        rng: &mut (impl CryptoRng + RngCore),
-        obj: &MerkleObjStore<F, OH>,
-        i: F,
-        badge: F,
-    ) -> Result<(F, <Snark as ark_snark::SNARK<F>>::Proof), MemberError> {
-        let (root, path) =
-            <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
-                obj,
-                self.commitment(),
-            )
-            .ok_or(MemberError::NotJoined)?;
-
-        let args = BadgesArgs { i, claimed: badge };
-        let proof = self
-            .user
-            .prove_statement_and_in::<H, BadgesArgs<F>, BadgesArgsVar<F>, (), (), Snark, MerkleObjStore<F, OH>>(
-                rng,
-                badge_pred,
-                &self.keys.badge_pred,
-                (path, root),
-                // `false`, and THE FLAG MUST MATCH THE MEMBERSHIP DATA ABOVE.
-                //
-                // This argument selects how membership is established, and therefore
-                // what the circuit exposes as public inputs:
-                //
-                //   false + (path, root)   -> Merkle membership. The ROOT is a public
-                //                             input, so the layout is pub_args ++ [root].
-                //   true  + (sig, pubkey) -> server-signed membership. There is no root,
-                //                             so the layout is pub_args alone.
-                //
-                // This call had `true` while passing `(path, root)`, which is why the
-                // proof never verified: `encode_badge_proof` supplied `[i, badge, root]`
-                // and the circuit, told to use signed membership, expected `[i, badge]`.
-                // The symptom was "the proof did not verify locally" with nothing wrong
-                // in either the prover or the verifier taken on its own.
-                //
-                // The `true` was copied from `personas-client::flows`, which is correct
-                // THERE — the as-a-service client has a server signature and encodes
-                // `vec![i_f, badge]` with no root. The serverless messenger has a Merkle
-                // store instead, which is why its two working proofs,
-                // `pseudonym_statement` and `authorship`, both pass `false`, and why the
-                // replica's own `memo_predicate` verifies `[context, claimed, obj_root]`.
-                false,
-                args,
-                (),
-            )?;
-        Ok((root, proof))
-    }
-
     fn pseudonym_statement<const OH: usize>(
         &self,
         rng: &mut (impl CryptoRng + RngCore),

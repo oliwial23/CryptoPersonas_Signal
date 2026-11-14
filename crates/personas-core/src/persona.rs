@@ -32,6 +32,38 @@ pub fn pseudonym_rate(sk: &F, context: &F, i: &F) -> F {
     H::hash(&[*sk, *context, *i])
 }
 
+/// Bind the transport and ballot choice to a server-backed vote proof.
+pub fn server_ballot_payload(transport: &str, choice: &str) -> F {
+    crate::circuits::string_hash_to_f(&format!("personas server ballot/{transport}/{choice}"))
+}
+
+/// Signal accepts both names and emoji for the same ballot choice.
+pub fn signal_ballot_choice(input: &str) -> Option<&'static str> {
+    if input.starts_with('👍') || input == "upvote" {
+        return Some("upvote");
+    }
+    if input.starts_with('👎') || input == "downvote" {
+        return Some("downvote");
+    }
+    match input {
+        "ban" | "❌" => Some("ban"),
+        "not ban" | "✅" => Some("not ban"),
+        _ => None,
+    }
+}
+
+/// Bind the destination and message text to a server-backed claim proof.
+pub fn server_claim_payload(destination: &str, message: &str) -> F {
+    use blake2::{Blake2s256, Digest};
+
+    let mut hash = Blake2s256::new();
+    hash.update(b"personas server claim");
+    hash.update((destination.len() as u64).to_le_bytes());
+    hash.update(destination.as_bytes());
+    hash.update(message.as_bytes());
+    F::from_le_bytes_mod_order(&hash.finalize())
+}
+
 /// A member's public key: what `join_pred` proves its `pk` input is. See
 /// [`member_pk_tag`](crate::circuits::member_pk_tag).
 pub fn member_pk(sk: &F) -> F {

@@ -1035,6 +1035,7 @@ const getPropsForMessage = (
     personaEh: message.personaEh,
     personaAnonymous: message.personaAnonymous,
     personaBadge: message.personaBadge,
+    personaClaim: message.personaClaim,
     personaContextName: message.personaContextName,
     personaAuthorship: message.personaAuthorship,
     // A VERIFIED badge proof. Passed through as stored: verification happened on

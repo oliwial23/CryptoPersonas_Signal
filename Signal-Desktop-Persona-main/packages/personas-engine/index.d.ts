@@ -83,6 +83,8 @@ export interface LogEntry {
   /** Persona petname, or undefined for an anonymous post. */
   author?: string;
   body: string;
+  /** Verified statement of a claim post. */
+  claim?: string;
   /** True once the author's persona was revoked; render flagged, never delete. */
   flagged: boolean;
 }
@@ -213,35 +215,24 @@ export class Engine {
    * a queryable directory, so there is no way to read another member's from here.
    */
   getReputation(): number | undefined;
-  /** Is a callback sweep unfinished? While true, every proving flow except scan aborts. */
-  /**
-   * Prove two of MY pseudonyms share an author. Args are the two CONTEXTS (for an
-   * unlimited pseudonym, its nonce). Returns the encoded proof + public inputs.
-   */
-  emitAuthorship(contextA: number, contextB: number): Buffer;
-  /**
-   * Verify an authorship proof. Returns the two petnames the proof ACTUALLY proves
-   * about, derived from its own public inputs — render these, never names from the
-   * wire — or null if it does not verify.
-   */
-  verifyAuthorship(proof: Buffer): { first: string; second: string } | null;
+  /** Post a proof that the same member owns both unlimited pseudonyms. */
+  emitPostMergePersonas(body: string, context: number, otherContext: number): Emitted;
+  emitPostRepAtLeast(body: string, context: number, threshold: number): Emitted;
+  emitPostShowBadge(body: string, context: number, badge: string): Emitted;
   /** Request a badge: 1=Faculty, 2=Student, 3=Industry. Files a ticket to approve. */
   emitBadgeRequest(slot: number): JsEmitted;
   /** Approve a badge request by its envelope hash. */
   emitBadgeApprove(request: string, slot: number): JsEmitted;
-  /** Prove possession of a badge by NAME. Returns the encoded proof. */
-  emitBadgeProof(badge: string): Buffer;
-  /** Verify a badge proof; returns the badge NAME it proves, or null. */
-  verifyBadgeProof(proof: Buffer): string | null;
   /** Badge requests not yet approved, for an admin to act on. */
   pendingBadgeRequests(): Array<{ eh: string; slot: number }>;
   /**
-   * Badges actually HELD in my zk object (not the decorative label a post carries).
+   * Badges held in this member’s object.
    * Arrives via approval -> my next scan. Empty for an observer.
    */
   getBadges(): Array<string>;
   /** Am I banned? undefined for an observer with no member object. */
   isBanned(): boolean | undefined;
+  /** Is a callback sweep unfinished? While true, every proving flow except scan aborts. */
   isScanning(): boolean;
   /** Callbacks still outstanding mid-sweep; scan until this reaches zero. */
   outstandingCallbacks(): number;

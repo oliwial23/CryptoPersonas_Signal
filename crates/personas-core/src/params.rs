@@ -34,9 +34,9 @@ use zk_callbacks::generic::object::Time;
 use zk_callbacks::generic::scan::PubScanArgs;
 
 use crate::circuits::{
-    BadgesArgs, BadgesArgsVar, MsgUser, NF, NP, NUM_SCANS_PER_FOLD, PseudonymArgs,
-    PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, PubScan, ScanInt,
-    authorship_pred, badge_pred, get_badge_request_interaction, get_callbacks,
+    BadgesArgs, Claim, ClaimArgs, MsgUser, NF, NP, NUM_SCANS_PER_FOLD, PseudonymArgs,
+    PseudonymArgsRate, PseudonymArgsVar, PubScan, ScanInt, get_badge_request_interaction,
+    get_callbacks, get_claim_interaction,
     get_extra_pubdata_for_scan, get_scan_interaction, get_standard_interaction,
     JoinArgs, JoinArgsVar, ResetArgs, ResetArgsVar, get_standard_pseudo_interaction,
     get_standard_pseudo_rate_interaction, join_pred,
@@ -45,7 +45,12 @@ use crate::circuits::{
 use crate::{Args, ArgsVar, CStore, Cr, F, H, OStore, PK, Snark, Store, VK};
 
 /// Bump to invalidate every previously cached artifact.
-pub const PARAMS_FORMAT_VERSION: u32 = 1;
+/// Bump whenever a circuit changes: the cache key does not otherwise see circuit edits, so a
+/// server upgraded across one would keep serving the old keys.
+///
+/// 2: every feature is an interaction with a callback (votes, ShowBadge, MergePersonas,
+///    RepAtLeast), and Privacy Pass tickets come in batches.
+pub const PARAMS_FORMAT_VERSION: u32 = 2;
 /// Dependency revisions the circuits are compiled against. Must be kept in
 /// sync with the `[workspace.dependencies]` git pins — a rev bump changes the
 /// circuits, so it must change the cache key too.
@@ -84,10 +89,14 @@ pub struct ServerKeys {
     pub scan_verifying_key: VK,
     pub pseudonym_pred_proving_key: PK,
     pub pseudonym_pred_verifying_key: VK,
-    pub authorship_pred_proving_key: PK,
-    pub authorship_pred_verifying_key: VK,
-    pub badge_pred_proving_key: PK,
-    pub badge_pred_verifying_key: VK,
+    /// Posts with a claim: a Persona post that also shows a badge, merges a second
+    /// persona, or proves reputation at least a threshold (`get_claim_interaction`).
+    pub show_badge_proving_key: PK,
+    pub show_badge_verifying_key: VK,
+    pub merge_personas_proving_key: PK,
+    pub merge_personas_verifying_key: VK,
+    pub rep_at_least_proving_key: PK,
+    pub rep_at_least_verifying_key: VK,
     pub standard_pseudo_proving_key: PK,
     pub standard_pseudo_verifying_key: VK,
     pub standard_pseudor_proving_key: PK,
@@ -295,48 +304,21 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
         dummy_pub_std_pseudo.clone(),
     );
 
-    let dummy_pub_author = PseudonymArgsPair {
-        a: dummy_pub_std_pseudo.clone(),
-        b: dummy_pub_std_pseudo,
-    };
-    let (authorship_pred_proving_key, authorship_pred_verifying_key) =
-        generate_keys_for_statement_in::<
-            F,
-            H,
-            MsgUser,
-            PseudonymArgsPair<F>,
-            PseudonymArgsPairVar<F>,
-            (),
-            (),
-            Snark,
-            OStore,
-        >(
+    // Posts with a claim (ShowBadge, MergePersonas, RepAtLeast): Persona posts with one
+    // more statement, each an interaction with the standard callback.
+    let claim_keys = |rng: &mut _, claim| {
+        get_claim_interaction(claim).generate_keys::<H, Snark, Cr, OStore>(
             rng,
-            authorship_pred,
             Some(db.obj_bul.get_pubkey()),
-            dummy_pub_author,
-        );
-
-    let dummy_pub_badge = BadgesArgs {
-        i: F::from(0),
-        claimed: F::from(0),
+            ClaimArgs::default(),
+            false,
+        )
     };
-    let (badge_pred_proving_key, badge_pred_verifying_key) = generate_keys_for_statement_in::<
-        F,
-        H,
-        MsgUser,
-        BadgesArgs<F>,
-        BadgesArgsVar<F>,
-        (),
-        (),
-        Snark,
-        OStore,
-    >(
-        rng,
-        badge_pred,
-        Some(db.obj_bul.get_pubkey()),
-        dummy_pub_badge,
-    );
+    let (show_badge_proving_key, show_badge_verifying_key) = claim_keys(rng, Claim::ShowBadge);
+    let (merge_personas_proving_key, merge_personas_verifying_key) =
+        claim_keys(rng, Claim::MergePersonas);
+    let (rep_at_least_proving_key, rep_at_least_verifying_key) =
+        claim_keys(rng, Claim::RepAtLeast);
 
     // A join proves its object is fresh: a statement about the object alone (no
     // membership — it is not in any tree yet), its commitment the first public input.
@@ -372,10 +354,12 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
         scan_verifying_key,
         pseudonym_pred_proving_key,
         pseudonym_pred_verifying_key,
-        authorship_pred_proving_key,
-        authorship_pred_verifying_key,
-        badge_pred_proving_key,
-        badge_pred_verifying_key,
+        show_badge_proving_key,
+        show_badge_verifying_key,
+        merge_personas_proving_key,
+        merge_personas_verifying_key,
+        rep_at_least_proving_key,
+        rep_at_least_verifying_key,
         standard_pseudo_proving_key,
         standard_pseudo_verifying_key,
         standard_pseudor_proving_key,

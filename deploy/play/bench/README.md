@@ -18,19 +18,22 @@ Build in release mode, always:
 cargo build --release -p personas-bench
 ```
 
-`--keys` is a directory containing `params/serverless-merkle/merkle_groth16_keys.bin`
-(the same file the app downloads; its SHA-256 is the pinned `--keys-sha256`).
+Point `--keys` at the root of a key cache generated for the current protocol
+(e.g. `$HOME/.personas-demo-keys-v5`). Within that root the bundle is at
+`params/params/serverless-merkle/merkle_groth16_keys.bin`. The benchmark opens a
+lock file alongside the bundle, so use a writable cache or copy the bundle into
+a writable directory with the same layout.
 
 ```bash
-./target/release/personas-bench --keys <keys-dir> --iters 30 --warmup 3 --history 150 --label "M2-arm64" --out results-m2.json
+./target/release/personas-bench --keys "$HOME/.personas-demo-keys-v5" --iters 30 --warmup 3 --history 150 --label "M3 Max" --out results-m3.json
 ```
 
 - `--iters` timed repetitions per operation (default 20); `--warmup` untimed first runs.
 - `--history N` pre-fills the group with N records first, so `handle` and `scan`
   reflect a group that has been in use rather than an empty one. Report the value you used.
 - `--only anon_post,scan,moderation` runs a subset; ops: `join, anon_post, pseudo_post,
-  rate_limited_post, authorship, vote, rating, badge_request, badge_proof, scan,
-  not_banned, moderation`.
+  rate_limited_post, merge_personas, vote, rating, badge_request, show_badge,
+  rep_at_least, scan, moderation`.
 - `--skip-constraints` skips the R1CS count (it is deterministic; run it once).
 
 Output: a printed table plus a JSON file with machine info and mean / median / stdev /
@@ -135,6 +138,9 @@ U="https://demo:PASSWORD@signalserver.umiacs.umd.edu/validator/"
 A server restart forgets its bulletin (`docker compose restart validator`); otherwise each
 run adds to it. Stop it with `docker compose stop validator`.
 
+The server-backed run measures full-proof votes, authorship posts and reputation
+threshold posts. Badge possession is measured in the serverless run.
+
 The client downloads the whole user bulletin for every proof (`BulNet::get_membership_data`),
 so with a real network and a long history, `client` includes that transfer.
 
@@ -148,8 +154,9 @@ PERSONAS_BENCH_LOG="$HOME/personas-e2e.jsonl" "/Applications/Signal Personas.app
 ```
 
 Then use the group normally: send anonymous / pseudonymous / topic posts, rate, vote,
-scan, send authorship and badge proofs. Each action writes one `emit` line on the sender
-and one `receive` (or `verify`) line on every other member; barriers that invoke
+scan, and send posts proving authorship, badge possession or a reputation threshold.
+Each action writes one `emit` line on the sender and one `receive` line on every
+other member; barriers that invoke
 callbacks write `settle` lines. Nothing is logged when the variable is unset.
 
 Analyse:

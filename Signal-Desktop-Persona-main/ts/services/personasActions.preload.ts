@@ -36,6 +36,7 @@ import {
   composePersonaRate,
   commitPersonaScan,
   composePersonaVote,
+  personaScanRequired,
   discardPersonaScan,
   personaScanStillValid,
   preparePersonaScan,
@@ -256,27 +257,43 @@ export async function sendPersonaVote(
   if (!isPersonasEngineEnabled()) {
     return false;
   }
-  try {
-    if (!(await ensureReadyToProveIdentity(conversation))) {
-      log.warn('sendPersonaVote: not joined; refusing to vote');
+  return inPersonaActionOrder(conversation.id, async () => {
+    const fail = (reason: string): false => {
+      window.reduxActions?.toast?.showToast({
+        toastType: ToastType.PersonaActionFailed,
+        parameters: { reason },
+      });
       return false;
+    };
+    try {
+      const groupId = groupIdOf(conversation);
+      if (isPersonaBanned(groupId) === true) {
+        window.reduxActions?.toast?.showToast({ toastType: ToastType.PersonaBanned });
+        return false;
+      }
+      if (!(await ensureReadyForPersonaAction(conversation))) {
+        return fail('could not join or wait for your last persona action to settle');
+      }
+      if (personaScanRequired(groupId)) {
+        return fail('you have reached the interaction limit — open Persona status and press Scan now');
+      }
+      const vote = composePersonaVote(groupId, pollEh, optionIndex);
+      if (!vote) {
+        return fail('could not prove your vote');
+      }
+      await conversation.enqueueMessageForSend(
+        { body: vote.body, attachments: [] },
+        { hideFromTimeline: true }
+      );
+      log.info(
+        `sendPersonaVote: voted option ${optionIndex} in ${pollEh.slice(0, 12)}… (eh ${vote.eh.slice(0, 12)}…)`
+      );
+      return true;
+    } catch (error) {
+      log.error(`sendPersonaVote failed: ${toLogFormat(error)}`);
+      return fail('could not send your vote');
     }
-    const vote = composePersonaVote(groupIdOf(conversation), pollEh, optionIndex);
-    if (!vote) {
-      return false;
-    }
-    await conversation.enqueueMessageForSend(
-      { body: vote.body, attachments: [] },
-      { hideFromTimeline: true }
-    );
-    log.info(
-      `sendPersonaVote: voted option ${optionIndex} in ${pollEh.slice(0, 12)}… (eh ${vote.eh.slice(0, 12)}…)`
-    );
-    return true;
-  } catch (error) {
-    log.error(`sendPersonaVote failed: ${toLogFormat(error)}`);
-    return false;
-  }
+  });
 }
 
 // If `messageId` is a persona poll, cast the ballot through the engine and report
@@ -286,6 +303,8 @@ export async function sendPersonaVote(
 // We also stash the chosen index on the message as `personaMyVote`. That is purely
 // local bookkeeping for our own UI: a ballot is anonymous by construction, so the
 // engine will never tell us — or anyone — which option was ours.
+const pendingPersonaVotes = new Set<string>();
+
 export async function maybeSendPersonaVote({
   messageId,
   optionIndexes,
@@ -304,21 +323,24 @@ export async function maybeSendPersonaVote({
   }
 
   const optionIndex = optionIndexes[0];
-  if (optionIndex == null) {
-    return false;
+  if (optionIndex == null || message.get('personaMyVote') != null || pendingPersonaVotes.has(messageId)) {
+    return true;
   }
-
   const conversation = window.ConversationController.get(
     message.get('conversationId')
   );
   if (!conversation) {
-    return false;
+    return true;
   }
 
-  const sent = await sendPersonaVote(conversation, pollEh, optionIndex);
-  if (sent) {
-    message.set({ personaMyVote: optionIndex });
-    await window.MessageCache.saveMessage(message.attributes);
+  pendingPersonaVotes.add(messageId);
+  try {
+    if (await sendPersonaVote(conversation, pollEh, optionIndex)) {
+      message.set({ personaMyVote: optionIndex });
+      await window.MessageCache.saveMessage(message.attributes);
+    }
+  } finally {
+    pendingPersonaVotes.delete(messageId);
   }
   return true;
 }
@@ -623,26 +645,42 @@ export async function runFullPersonaSweep(conversation: ConversationModel): Prom
   return false;
 }
 
-/**
- * Joined, and not in the middle of a sweep. The engine refuses every proving action while
- * a sweep is unfinished (a single "Scan now", or an interrupted drain, can leave one), so
- * ratings, votes, polls and badge actions finish it first instead of failing. Unlike a
- * post, they do not scan when nothing is under way — that stays the post's job.
- */
+// Posts and votes spend the same object. Queue them before waiting for settlement
+// so concurrent actions in one group observe each predecessor's state.
+const personaActionOrder = new Map<string, Promise<unknown>>();
+
+export async function inPersonaActionOrder<T>(
+  conversationId: string,
+  action: () => Promise<T>
+): Promise<T> {
+  const previous = personaActionOrder.get(conversationId) ?? Promise.resolve();
+  const next = previous.then(action, action);
+  personaActionOrder.set(conversationId, next);
+  try {
+    return await next;
+  } finally {
+    if (personaActionOrder.get(conversationId) === next) {
+      personaActionOrder.delete(conversationId);
+    }
+  }
+}
+
 export async function ensureReadyForPersonaAction(
   conversation: ConversationModel
 ): Promise<boolean> {
-  if (!(await ensurePersonaJoined(conversation))) {
+  if (!(await ensureReadyForUnprovenRecord(conversation))) {
     return false;
   }
-  if (getPersonasEngine(groupIdOf(conversation))?.isScanning()) {
-    return drainPersonaScans(conversation);
+  if (
+    getPersonasEngine(groupIdOf(conversation))?.isScanning() &&
+    !(await drainPersonaScans(conversation))
+  ) {
+    return false;
   }
   return waitUntilSettled(conversation);
 }
 
-// A vote or a rating needs a settled object, but not the newest, so it does not wait for
-// the member's last action, and a sweep under way does not hold it up either.
+// A rating can use the previous settled object while the current one settles.
 async function ensureReadyToProveIdentity(
   conversation: ConversationModel
 ): Promise<boolean> {

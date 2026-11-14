@@ -50,7 +50,22 @@ fn placeholder_keys() -> super::ReplicaKeys {
         pseudonym_pred: vk.clone(),
         badge_request: vk.clone(),
         join: vk.clone(),
-        not_banned: vk,
+        not_banned: vk.clone(),
+        show_badge: vk.clone(),
+        merge_personas: vk.clone(),
+        rep_at_least: vk,
+    }
+}
+
+/// An interaction with a placeholder proof, for a record that is never verified.
+fn placeholder_exec() -> super::record::PostExec {
+    zk_callbacks::generic::user::ExecutedMethod {
+        new_object: F::from(1),
+        old_nullifier: F::from(2),
+        cb_tik_list: [(Default::default(), Default::default())],
+        cb_com_list: [F::from(3)],
+        cur_time: zk_callbacks::generic::object::Time::from(0),
+        proof: ark_groth16::Proof::default(),
     }
 }
 
@@ -108,7 +123,7 @@ fn a_record_naming_an_unproduced_root_is_buffered_then_applied() {
     let vote = Record::Vote {
         poll: poll_eh,
         option: 0,
-        proof: Ark(ark_groth16::Proof::default()),
+        exec: Ark(placeholder_exec()),
         claimed: Ark(F::from(5)),
         obj_root: Ark(F::from(999)), // never produced
     };

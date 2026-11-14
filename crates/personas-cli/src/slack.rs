@@ -40,20 +40,6 @@ struct BadgeRequest {
 }
 
 #[derive(Serialize)]
-struct ClaimBadgeRequest {
-    channel: String,
-    badge_bytes: Vec<u8>,
-    badge_name: String,
-    proof: Vec<u8>,
-}
-
-#[derive(Serialize)]
-struct AuthorshipRequest {
-    channel: String,
-    proof: Vec<u8>,
-}
-
-#[derive(Serialize)]
 struct PollRequest {
     question: String,
     option1: String,
@@ -233,29 +219,40 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             show(res).await?;
         }
 
-        Command::Badge { i, channel, .. } => {
-            let claimed_str = personas
-                .claimed_by_badge_index(i)?
-                .filter(|c| c != "0")
-                .with_context(|| format!("badge {i} has not been granted yet"))?;
-
-            let claimed = persona::field_from_str(&claimed_str)
-                .context("badge log holds a malformed claimed value")?;
-
-            let badge_name = format!("badge{i}");
-            let badge_bytes = personas.badge_png(i)?;
-
+        Command::Badge {
+            i,
+            pseudo_idx,
+            message,
+            channel,
+        } => {
+            let payload = persona::server_claim_payload(&channel, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.make_badge_proof(i, claimed)).await??;
+            let proof = spawn_blocking(move || pc.post_show_badge(pseudo_idx, i, payload)).await??;
 
             let res = http
                 .post(url("api/slack/claim/badges")?)
-                .json(&ClaimBadgeRequest {
+                .json(&PostRequest {
                     channel,
-                    badge_bytes,
-                    badge_name,
+                    message,
                     proof,
                 })
+                .send()
+                .await?;
+            show(res).await?;
+        }
+
+        Command::RepAtLeast {
+            rho,
+            pseudo_idx,
+            message,
+            channel,
+        } => {
+            let payload = persona::server_claim_payload(&channel, &message);
+            let pc = personas.clone();
+            let proof = spawn_blocking(move || pc.post_rep_at_least(pseudo_idx, rho, payload)).await??;
+            let res = http
+                .post(url("api/slack/claim/rep")?)
+                .json(&PostRequest { channel, message, proof })
                 .send()
                 .await?;
             show(res).await?;
@@ -404,17 +401,19 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         Command::Authorship {
             pseudo_idx1,
             pseudo_idx2,
+            message,
             channel,
         } => {
+            let payload = persona::server_claim_payload(&channel, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.make_authorship_proof(pseudo_idx1, pseudo_idx2))
+            let proof = spawn_blocking(move || pc.post_merge_personas(pseudo_idx1, pseudo_idx2, payload))
                 .await??;
 
             println!("Authorship proof successfully generated");
 
             let res = http
                 .post(url("api/slack/claim/authorship")?)
-                .json(&AuthorshipRequest { channel, proof })
+                .json(&PostRequest { channel, message, proof })
                 .send()
                 .await?;
             show(res).await?;
@@ -492,8 +491,10 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
                 .context("server returned a malformed poll context")?;
             let claimed = personas.pseudo_for_poll(&context)?;
 
+            let payload = persona::server_ballot_payload("slack", &vote);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.pseudo_proof_vote(claimed, context)).await??;
+            let proof =
+                spawn_blocking(move || pc.pseudo_proof_vote(claimed, context, payload)).await??;
 
             let res = http
                 .post(url("api/slack/vote")?)

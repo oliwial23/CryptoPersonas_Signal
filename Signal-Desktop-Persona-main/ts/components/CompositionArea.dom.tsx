@@ -85,6 +85,7 @@ import { AxoDropdownMenu } from '../axo/AxoDropdownMenu.dom.tsx';
 import {
   MAX_PSEUDO,
   type PersonaChoice,
+  type PersonaPostClaim,
 } from '../services/personasCarriage.std.ts';
 import {
   isPersonaBadge,
@@ -199,6 +200,7 @@ export type OwnProps = Readonly<{
       voiceNoteAttachment?: InMemoryAttachmentDraftType;
       // Personas demo: post this message as a persona (routed through the engine).
       personaChoice?: PersonaChoice;
+      personaClaim?: PersonaPostClaim;
       /** The context (thread) selected in the composer, for display on the message. */
       personaContextName?: string;
     }
@@ -220,7 +222,6 @@ export type OwnProps = Readonly<{
   personaJoined: boolean;
   requestPersonaBadge: (conversationId: string, slot: number) => unknown;
   dismissPersonaBadgeRequest: (requestEh: string) => unknown;
-  provePersonaBadge: (conversationId: string, badge: string) => unknown;
   /** Join the bulletin if we have not already. Idempotent. */
   joinPersonaBulletin: (conversationId: string) => unknown;
   approvePersonaBadge: (
@@ -254,17 +255,9 @@ export type OwnProps = Readonly<{
   turnOnPersonas?: (conversationId: string) => unknown;
   approvePersonaReset: (conversationId: string, account: string) => unknown;
   dismissPersonaReset: (account: string) => unknown;
-  // Personas demo: the instance's UNVERIFIED badge claim, and the setter for it.
+  // Badge to prove when posting under an unlimited pseudonym.
   selectedBadge: string | undefined;
   setPersonaBadge: (badge: PersonaBadge | undefined) => unknown;
-  // Personas demo: send an UNVERIFIED authorship claim linking two personas.
-  sendPersonaAuthorshipClaim: (
-    conversationId: string,
-    // CONTEXTS (nonces), not names: the proof is built over the context, and the
-    // petnames are an output of verification.
-    contextA: number,
-    contextB: number
-  ) => unknown;
   quotedMessageId: string | null;
   quotedMessageProps: null | ReadonlyDeep<
     Omit<
@@ -378,7 +371,6 @@ export const CompositionArea = memo(function CompositionArea({
   requestPersonaBadge,
   approvePersonaBadge,
   dismissPersonaBadgeRequest,
-  provePersonaBadge,
   joinPersonaBulletin,
   refreshPersonaStatus,
   personaPseudonyms,
@@ -393,7 +385,6 @@ export const CompositionArea = memo(function CompositionArea({
   dismissPersonaReset,
   selectedBadge,
   setPersonaBadge,
-  sendPersonaAuthorshipClaim,
   setComposerFocus,
   setMessageToEdit,
   setQuoteByMessageId,
@@ -504,9 +495,27 @@ export const CompositionArea = memo(function CompositionArea({
   const [isTopicDialogOpen, setIsTopicDialogOpen] = useState(false);
   const [newTopicName, setNewTopicName] = useState('');
   const [isStatusDialogOpen, setIsStatusDialogOpen] = useState(false);
-  const [isAuthorshipDialogOpen, setIsAuthorshipDialogOpen] = useState(false);
-  const [authorshipFirst, setAuthorshipFirst] = useState('');
-  const [authorshipSecond, setAuthorshipSecond] = useState('');
+  const [claimDraft, setClaimDraft] = useState<
+    | { kind: 'merge_personas' }
+    | { kind: 'show_badge'; badge: string }
+    | { kind: 'rep_at_least' }
+  >();
+  const [claimPersona, setClaimPersona] = useState('');
+  const [claimOtherPersona, setClaimOtherPersona] = useState('');
+  const [claimThreshold, setClaimThreshold] = useState('');
+  const [claimMessage, setClaimMessage] = useState('');
+
+  function openClaimDialog(draft: NonNullable<typeof claimDraft>) {
+    setClaimPersona(
+      personaValue.startsWith('pseudo:')
+        ? personaValue.slice('pseudo:'.length)
+        : ''
+    );
+    setClaimOtherPersona('');
+    setClaimThreshold('');
+    setClaimMessage('');
+    setClaimDraft(draft);
+  }
 
   // Refresh while the panel is open: the barrier advances and peers reply, so a
   // snapshot taken once would show a stale — and possibly reassuring — picture.
@@ -533,10 +542,7 @@ export const CompositionArea = memo(function CompositionArea({
   // be impossible anyway — the circuit derives the pseudonym from our key and the
   // context, so the name is an OUTPUT of verification rather than an input.
   const namedPseudonyms = useMemo(
-    () =>
-      personaPseudonyms
-        .filter((p): p is typeof p & { petname: string } => Boolean(p.petname))
-        .map(p => ({ nonce: p.nonce, petname: p.petname })),
+    () => personaPseudonyms.filter(p => Boolean(p.petname)),
     [personaPseudonyms]
   );
 
@@ -1345,17 +1351,8 @@ export const CompositionArea = memo(function CompositionArea({
 
                 <AxoDropdownMenu.Separator />
 
-                {/* BADGES, now credentials rather than labels.
-              The selector offers ONLY badges this member actually holds in their zk
-              object — a badge you hold can be proved, and one you do not cannot be
-              attached at all. That is the whole difference from the old behaviour,
-              where any label could be typed on any message. */}
                 <AxoDropdownMenu.Sub>
                   <AxoDropdownMenu.SubTrigger symbol="person-circle">
-                    {/* The label reflects what will actually be SENT, not what is stored.
-                  A selection the member no longer holds (or never held — the
-                  preference file outlives a reset) is dropped by the send path, so
-                  showing it here would promise a badge the post will not carry. */}
                     {heldBadges.length === 0
                       ? 'Badge: none held'
                       : `Badge: ${
@@ -1366,6 +1363,11 @@ export const CompositionArea = memo(function CompositionArea({
                         }`}
                   </AxoDropdownMenu.SubTrigger>
                   <AxoDropdownMenu.SubContent>
+                    {heldBadges.length > 0 && (
+                      <AxoDropdownMenu.Label>
+                        Included on posts under an unlimited pseudonym
+                      </AxoDropdownMenu.Label>
+                    )}
                     {heldBadges.length === 0 ? (
                       <AxoDropdownMenu.Label>
                         You hold no approved badges yet — request one below.
@@ -1433,32 +1435,15 @@ export const CompositionArea = memo(function CompositionArea({
 
                 <AxoDropdownMenu.Separator />
 
-                {/* ZK-PROVED authorship claim. Needs two NAMED personas: the proof is built
-              over each pseudonym's nonce, but the picker has to show something a human
-              recognises, and a pseudonym has no petname until it has posted once (the
-              engine reveals the name when it first emits under that nonce). So this
-              stays disabled until two of this instance's pseudonyms have posted. */}
                 <AxoDropdownMenu.Item
                   symbol="link"
                   disabled={namedPseudonyms.length < 2}
-                  onSelect={() => setIsAuthorshipDialogOpen(true)}
+                  onSelect={() => openClaimDialog({ kind: 'merge_personas' })}
                 >
-                  {/* No longer "(unverified)": the claim carries a Groth16 proof over
-                authorship_pred and recipients verify it before rendering. The label was
-                the last place in the UI still describing the old behaviour. */}
                   {namedPseudonyms.length < 2
                     ? 'Prove authorship… (needs 2 posted personas)'
                     : 'Prove authorship…'}
                 </AxoDropdownMenu.Item>
-
-                {/* ZK-PROVED badge possession — the counterpart to "Prove authorship".
-              Offers only badges actually HELD, because the proof is unsatisfiable
-              otherwise: there is no witness for a badge that is not in the object. So
-              an empty list here is not a UI limitation, it is the security property,
-              and the disabled label says what to do about it.
-              Note this is a DIFFERENT action from the badge selector above. That
-              attaches a decorative label to a post; this publishes a proof. Both exist
-              because the gap between them is the thing worth demonstrating. */}
                 <AxoDropdownMenu.Sub>
                   <AxoDropdownMenu.SubTrigger symbol="check-circle">
                     {heldBadges.length === 0
@@ -1468,28 +1453,25 @@ export const CompositionArea = memo(function CompositionArea({
                   <AxoDropdownMenu.SubContent>
                     {heldBadges.length === 0 ? (
                       <AxoDropdownMenu.Label>
-                        No approved badges yet — request one above, then Scan
-                        now.
+                        No approved badges yet — request one above, then Scan now.
                       </AxoDropdownMenu.Label>
                     ) : (
-                      <>
-                        <AxoDropdownMenu.Label>
-                          Proves you hold it, without revealing who you are
-                        </AxoDropdownMenu.Label>
-                        {heldBadges.map(label => (
-                          <AxoDropdownMenu.Item
-                            key={label}
-                            onSelect={() =>
-                              provePersonaBadge(conversationId, label)
-                            }
-                          >
-                            {label}
-                          </AxoDropdownMenu.Item>
-                        ))}
-                      </>
+                      heldBadges.map(badge => (
+                        <AxoDropdownMenu.Item
+                          key={badge}
+                          onSelect={() => openClaimDialog({ kind: 'show_badge', badge })}
+                        >
+                          {badge}
+                        </AxoDropdownMenu.Item>
+                      ))
                     )}
                   </AxoDropdownMenu.SubContent>
                 </AxoDropdownMenu.Sub>
+                <AxoDropdownMenu.Item
+                  onSelect={() => openClaimDialog({ kind: 'rep_at_least' })}
+                >
+                  Prove reputation ≥ …
+                </AxoDropdownMenu.Item>
               </>
             )}
           </AxoDropdownMenu.Content>
@@ -1557,77 +1539,159 @@ export const CompositionArea = memo(function CompositionArea({
   // The authorship claim dialog. Two pickers and a permanent warning: the warning is
   // not a footnote here because the person about to SEND this should understand that it
   // proves nothing before they say it, not after.
-  const personaAuthorshipDialog = isAuthorshipDialogOpen ? (
-    <AxoDialog.Root open onOpenChange={setIsAuthorshipDialogOpen}>
+  // Match personas_core::circuits::REP_THRESHOLD_MAX.
+  const reputationThresholdLimit = 2 ** 20;
+  const threshold = Number(claimThreshold);
+  let personaClaim: PersonaPostClaim | undefined;
+  if (claimDraft?.kind === 'show_badge') {
+    personaClaim = claimDraft;
+  } else if (
+    claimDraft?.kind === 'merge_personas' &&
+    claimOtherPersona &&
+    claimPersona !== claimOtherPersona
+  ) {
+    personaClaim = { kind: 'merge_personas', otherNonce: Number(claimOtherPersona) };
+  } else if (
+    claimDraft?.kind === 'rep_at_least' &&
+    claimThreshold.trim() &&
+    Number.isInteger(threshold) &&
+    Math.abs(threshold) <= reputationThresholdLimit
+  ) {
+    personaClaim = { kind: 'rep_at_least', threshold };
+  }
+  const claimPersonas =
+    claimDraft?.kind === 'merge_personas' ? namedPseudonyms : personaPseudonyms;
+  const canSendClaim = Boolean(
+    personaClaim &&
+      claimPersonas.some(p => String(p.nonce) === claimPersona) &&
+      claimMessage.trim()
+  );
+  const claimInputClass = tw(
+    'border-primary bg-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
+  );
+  const personaClaimDialog = claimDraft ? (
+    <AxoDialog.Root
+      open
+      onOpenChange={open => {
+        if (!open) {
+          setClaimDraft(undefined);
+        }
+      }}
+    >
       <AxoDialog.Content size="sm" escape="cancel-is-destructive">
         <AxoDialog.Header>
-          <AxoDialog.Title>Claim authorship</AxoDialog.Title>
+          <AxoDialog.Title>
+            {{
+              merge_personas: 'Prove authorship',
+              show_badge: 'Prove badge possession',
+              rep_at_least: 'Prove a reputation threshold',
+            }[claimDraft.kind]}
+          </AxoDialog.Title>
           <AxoDialog.Close />
         </AxoDialog.Header>
         <AxoDialog.Body>
           <div className={tw('flex flex-col gap-3')}>
-            <div className={tw('text-secondary type-body-small')}>
-              {AUTHORSHIP_EXPLANATION}
-            </div>
-            <select
-              value={authorshipFirst}
-              onChange={event => setAuthorshipFirst(event.target.value)}
-              className={tw(
-                'border-primary bg-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
-              )}
-            >
-              <option value="">First persona…</option>
-              {namedPseudonyms.map(p => (
-                <option key={p.nonce} value={String(p.nonce)}>
-                  {p.petname}
-                </option>
-              ))}
-            </select>
-            <select
-              value={authorshipSecond}
-              onChange={event => setAuthorshipSecond(event.target.value)}
-              className={tw(
-                'border-primary bg-secondary w-full rounded-lg border px-3 py-2 type-body-medium text-primary'
-              )}
-            >
-              <option value="">Second persona…</option>
-              {namedPseudonyms
-                .filter(p => String(p.nonce) !== authorshipFirst)
-                .map(p => (
+            {claimDraft.kind === 'merge_personas' && (
+              <div className={tw('text-secondary type-body-small')}>
+                {AUTHORSHIP_EXPLANATION}
+              </div>
+            )}
+            {claimDraft.kind === 'show_badge' && (
+              <div className={tw('text-secondary type-body-small')}>
+                Proves that the posting persona’s author holds the {claimDraft.badge} badge.
+              </div>
+            )}
+            <label>
+              Post as
+              <select
+                className={claimInputClass}
+                value={claimPersona}
+                onChange={event => {
+                  setClaimPersona(event.target.value);
+                  if (claimOtherPersona === event.target.value) {
+                    setClaimOtherPersona('');
+                  }
+                }}
+              >
+                <option value="">Choose an unlimited persona…</option>
+                {claimPersonas.map(p => (
                   <option key={p.nonce} value={String(p.nonce)}>
-                    {p.petname}
+                    {p.petname ?? `Pseudonym #${p.index}`}
                   </option>
                 ))}
-            </select>
+              </select>
+            </label>
+            {claimPersonas.length === 0 && (
+              <div className={tw('text-secondary type-body-small')}>
+                Create an unlimited pseudonym in the personas menu first.
+              </div>
+            )}
+            {claimDraft.kind === 'merge_personas' && (
+              <label>
+                Second persona
+                <select
+                  className={claimInputClass}
+                  value={claimOtherPersona}
+                  onChange={event => setClaimOtherPersona(event.target.value)}
+                >
+                  <option value="">Choose the second persona…</option>
+                  {namedPseudonyms
+                    .filter(p => String(p.nonce) !== claimPersona)
+                    .map(p => (
+                      <option key={p.nonce} value={String(p.nonce)}>
+                        {p.petname}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            )}
+            {claimDraft.kind === 'rep_at_least' && (
+              <label>
+                Minimum reputation to disclose
+                <input
+                  className={claimInputClass}
+                  type="number"
+                  step={1}
+                  min={-reputationThresholdLimit}
+                  max={reputationThresholdLimit}
+                  value={claimThreshold}
+                  onChange={event => setClaimThreshold(event.target.value)}
+                />
+              </label>
+            )}
+            <label>
+              Message
+              <textarea
+                className={claimInputClass}
+                value={claimMessage}
+                onChange={event => setClaimMessage(event.target.value)}
+              />
+            </label>
           </div>
         </AxoDialog.Body>
         <AxoDialog.Footer>
           <AxoDialog.Actions>
             <AxoDialog.Action
               variant="strong-secondary"
-              onClick={() => setIsAuthorshipDialogOpen(false)}
+              onClick={() => setClaimDraft(undefined)}
             >
               {i18n('icu:cancel')}
             </AxoDialog.Action>
             <AxoDialog.Action
               variant="strong-primary"
-              disabled={
-                !authorshipFirst ||
-                !authorshipSecond ||
-                authorshipFirst === authorshipSecond
-              }
+              disabled={!canSendClaim}
               onClick={() => {
-                sendPersonaAuthorshipClaim(
-                  conversationId,
-                  Number(authorshipFirst),
-                  Number(authorshipSecond)
-                );
-                setAuthorshipFirst('');
-                setAuthorshipSecond('');
-                setIsAuthorshipDialogOpen(false);
+                if (canSendClaim && personaClaim) {
+                  sendMultiMediaMessage(conversationId, {
+                    message: claimMessage,
+                    personaChoice: { kind: 'pseudo', nonce: Number(claimPersona) },
+                    personaClaim,
+                  });
+                  setClaimDraft(undefined);
+                }
               }}
             >
-              Claim
+              Prove and post
             </AxoDialog.Action>
           </AxoDialog.Actions>
         </AxoDialog.Footer>
@@ -2117,7 +2181,7 @@ export const CompositionArea = memo(function CompositionArea({
         testId="attachfile-input-media"
       />
       {personaTopicDialog}
-      {personaAuthorshipDialog}
+      {personaClaimDialog}
       {isStatusDialogOpen && (
         <PersonaStatusDialog
           onScanNow={() => scanPersonaCallbacksNow(conversationId)}

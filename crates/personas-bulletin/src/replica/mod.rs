@@ -88,8 +88,9 @@ use zk_callbacks::generic::object::Time;
 use zk_callbacks::impls::centralized::crypto::FakeSigPrivkey;
 
 use personas_core::circuits::{
-    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, BadgesArgs, NUM_SCANS_PER_FOLD, PseudonymArgs,
-    PseudonymArgsRate, RATE_LIMITED_PERSONAS_PER_CONTEXT, arg_rep,
+    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, BadgesArgs, Claim, ClaimArgs,
+    NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsRate, RATE_LIMITED_PERSONAS_PER_CONTEXT,
+    arg_rep,
 };
 use personas_core::params::ServerKeys;
 use personas_core::{Cr, F, Snark, VK};
@@ -126,6 +127,10 @@ pub struct ReplicaKeys {
     pub join: VK,
     /// A re-join's proof about the object given up (`not_banned_pred`).
     pub not_banned: VK,
+    /// Posts with a claim: ShowBadge, MergePersonas, RepAtLeast.
+    pub show_badge: VK,
+    pub merge_personas: VK,
+    pub rep_at_least: VK,
 }
 
 /// [`ReplicaKeys`], each prepared once for verification ([`PreparedVk`]).
@@ -138,6 +143,9 @@ pub(crate) struct PreparedKeys {
     badge_request: PreparedVk,
     join: PreparedVk,
     not_banned: PreparedVk,
+    show_badge: PreparedVk,
+    merge_personas: PreparedVk,
+    rep_at_least: PreparedVk,
 }
 
 impl PreparedKeys {
@@ -151,6 +159,9 @@ impl PreparedKeys {
             badge_request: PreparedVk::new(&keys.badge_request),
             join: PreparedVk::new(&keys.join),
             not_banned: PreparedVk::new(&keys.not_banned),
+            show_badge: PreparedVk::new(&keys.show_badge),
+            merge_personas: PreparedVk::new(&keys.merge_personas),
+            rep_at_least: PreparedVk::new(&keys.rep_at_least),
         }
     }
 }
@@ -168,6 +179,9 @@ impl ReplicaKeys {
             badge_request: keys.badge_request_verifying_key.clone(),
             join: keys.join_pred_verifying_key.clone(),
             not_banned: keys.not_banned_pred_verifying_key.clone(),
+            show_badge: keys.show_badge_verifying_key.clone(),
+            merge_personas: keys.merge_personas_verifying_key.clone(),
+            rep_at_least: keys.rep_at_least_verifying_key.clone(),
         }
     }
 }
@@ -829,7 +843,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         let Record::Post { flavour, extra, .. } = &self.seen.get(eh)?.record else {
             return None;
         };
-        if *flavour == Flavour::Anon {
+        if !flavour.has_persona() {
             return None;
         }
         let key = f_key(*extra.0.first()?);
@@ -915,53 +929,16 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 payload,
                 obj_root,
                 ..
-            } => {
-                let exec = &exec.0;
-                match flavour {
-                    Flavour::Anon => memo_interaction::<OH, _, 1>(
-                        &mut cache,
-                        eh,
-                        &self.prepared.standard,
-                        exec.new_object,
-                        exec.old_nullifier,
-                        payload.0,
-                        exec.cb_com_list,
-                        &exec.proof,
-                        obj_root.0,
-                    ),
-                    Flavour::Pseudo => memo_interaction::<OH, _, 1>(
-                        &mut cache,
-                        eh,
-                        &self.prepared.pseudo,
-                        exec.new_object,
-                        exec.old_nullifier,
-                        PseudonymArgs {
-                            context: *extra.0.first()?,
-                            claimed: *extra.0.get(1)?,
-                            payload: payload.0,
-                        },
-                        exec.cb_com_list,
-                        &exec.proof,
-                        obj_root.0,
-                    ),
-                    Flavour::PseudoRate => memo_interaction::<OH, _, 1>(
-                        &mut cache,
-                        eh,
-                        &self.prepared.pseudo_rate,
-                        exec.new_object,
-                        exec.old_nullifier,
-                        PseudonymArgsRate {
-                            context: *extra.0.first()?,
-                            claimed: *extra.0.get(1)?,
-                            i: *extra.0.get(2)?,
-                            payload: payload.0,
-                        },
-                        exec.cb_com_list,
-                        &exec.proof,
-                        obj_root.0,
-                    ),
-                }
-            }
+            } => verify_post::<OH>(
+                &mut cache,
+                &self.prepared,
+                eh,
+                *flavour,
+                &exec.0,
+                &extra.0,
+                payload.0,
+                obj_root.0,
+            ),
             Record::BadgeRequest {
                 exec,
                 slot,
@@ -1020,19 +997,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             Record::Vote {
                 poll,
                 option,
-                proof,
+                exec,
                 claimed,
                 obj_root,
-            } => memo_predicate(
-                &mut cache,
-                eh,
-                &self.prepared.pseudonym_pred,
-                poll.context(),
-                claimed.0,
-                record::ballot_payload(*poll, *option),
-                obj_root.0,
-                &proof.0,
-            ),
+            } => verify_vote::<OH>(&mut cache, &self.prepared, eh, *poll, *option, &exec.0, claimed.0, obj_root.0),
             Record::RejoinApprove {
                 account,
                 spent: Some(spent),
@@ -1083,12 +1051,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 extra,
                 ..
             } => {
-                let expected = match flavour {
-                    Flavour::Anon => 0,
-                    Flavour::Pseudo => 2,
-                    Flavour::PseudoRate => 3,
-                };
-                if extra.0.len() != expected {
+                if extra.0.len() != flavour.arity() {
                     return Err("post has the wrong public arguments");
                 }
                 if !ticket_is_committed(&exec.0) {
@@ -1097,6 +1060,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             }
             Record::BadgeRequest { exec, .. } if !ticket_is_committed(&exec.0) => {
                 return Err("badge request ticket does not match its proof");
+            }
+            Record::Vote { exec, .. } if !ticket_is_committed(&exec.0) => {
+                return Err("vote ticket does not match its proof");
             }
             _ => {}
         }
@@ -1447,6 +1413,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     author: None,
                     body: hex::encode(key),
                     flagged: false,
+                    claim: None,
                 });
                 Status::Applied
             }
@@ -1465,6 +1432,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     author: None,
                     body: String::new(),
                     flagged: false,
+                    claim: None,
                 });
                 Status::Applied
             }
@@ -1496,6 +1464,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     author: None,
                     body: hex::encode(key),
                     flagged: false,
+                    claim: None,
                 });
                 Status::Applied
             }
@@ -1513,65 +1482,19 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 if !ticket_is_committed(exec) {
                     return Status::Rejected("post ticket does not match its proof");
                 }
-                let ok = match flavour {
-                    Flavour::Anon => memo_interaction::<OH, _, 1>(
-                        &mut self.verify_cache,
-                        eh,
-                        &self.prepared.standard,
-                        exec.new_object,
-                        exec.old_nullifier,
-                        payload.0,
-                        exec.cb_com_list,
-                        &exec.proof,
-                        root,
-                    ),
-                    Flavour::Pseudo => {
-                        let a = PseudonymArgs {
-                            context: extra.0[0],
-                            claimed: extra.0[1],
-                            payload: payload.0,
-                        };
-                        memo_interaction::<OH, _, 1>(
-                            &mut self.verify_cache,
-                            eh,
-                            &self.prepared.pseudo,
-                            exec.new_object,
-                            exec.old_nullifier,
-                            a,
-                            exec.cb_com_list,
-                            &exec.proof,
-                            root,
-                        )
-                    }
-                    Flavour::PseudoRate => {
-                        // THE RATE LIMIT, checked again here. The circuit proves `i` is
-                        // one of 0..MAX_PSEUDO since protocol version 3; `i` is also a
-                        // public input carried in the record, so the accept rule refuses
-                        // an out-of-range index outright — a second line, and a clear
-                        // reason, rather than a failed proof.
-                        let limit = F::from(RATE_LIMITED_PERSONAS_PER_CONTEXT as u64);
-                        if extra.0[2].into_bigint() >= limit.into_bigint() {
-                            return Status::Rejected("persona index out of range");
-                        }
-                        let a = PseudonymArgsRate {
-                            context: extra.0[0],
-                            claimed: extra.0[1],
-                            i: extra.0[2],
-                            payload: payload.0,
-                        };
-                        memo_interaction::<OH, _, 1>(
-                            &mut self.verify_cache,
-                            eh,
-                            &self.prepared.pseudo_rate,
-                            exec.new_object,
-                            exec.old_nullifier,
-                            a,
-                            exec.cb_com_list,
-                            &exec.proof,
-                            root,
-                        )
-                    }
-                };
+                if let Err(reason) = claim_is_meaningful(*flavour, &extra.0) {
+                    return Status::Rejected(reason);
+                }
+                let ok = verify_post::<OH>(
+                    &mut self.verify_cache,
+                    &self.prepared,
+                    eh,
+                    *flavour,
+                    exec,
+                    &extra.0,
+                    payload.0,
+                    root,
+                );
                 if !ok {
                     return Status::Rejected("post proof failed");
                 }
@@ -1591,10 +1514,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
 
                 // File the callback ticket the poster committed to (§7).
                 let callback = exec.cb_tik_list[0].0.clone();
-                let claimed = match flavour {
-                    Flavour::Anon => None,
-                    Flavour::Pseudo | Flavour::PseudoRate => Some(tally::f_key(extra.0[1])),
-                };
+                let claimed = flavour.has_persona().then(|| tally::f_key(extra.0[1]));
                 let mut ticket = Outstanding::new(callback, Time::from(0), barrier + w, claimed);
                 // A pseudonym a ban has reached: this post is flagged, and its ticket
                 // carries the ban to the member's object.
@@ -1604,16 +1524,17 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 derived.open_tickets.insert(eh);
 
                 // Render (minimally). A pseudonym gets a petname; an anon post none.
-                let author = match flavour {
-                    Flavour::Anon => None,
-                    Flavour::Pseudo | Flavour::PseudoRate => Some(derived.petname(extra.0[1])),
-                };
+                let author = flavour.has_persona().then(|| derived.petname(extra.0[1]));
+                let claim = flavour
+                    .claim()
+                    .map(|c| personas_core::circuits::describe_claim(c, extra.0[2], extra.0[3]));
                 derived.log.push(LogEntry {
                     eh,
                     kind: "Post",
                     author,
                     body: body.clone(),
                     flagged,
+                    claim,
                 });
                 Status::Applied
             }
@@ -1688,6 +1609,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     author: None,
                     body: format!("requested badge slot {slot}"),
                     flagged: false,
+                    claim: None,
                 });
                 Status::Applied
             }
@@ -1701,6 +1623,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 // BADGE flag, and the requester's next scan writes the badge in-circuit.
                 match derived.outstanding.get_mut(target) {
                     Some(out) => {
+                        if !out.targetable {
+                            return Status::Rejected(tally::NOT_TARGETABLE);
+                        }
                         if out.settled {
                             return Status::Rejected("badge request already settled");
                         }
@@ -1717,6 +1642,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     // requests are still pending.
                     body: format!("approved badge slot {slot} for {}", hex::encode(target.0)),
                     flagged: false,
+                    claim: None,
                 });
                 Status::Applied
             }
@@ -1759,6 +1685,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     author: None,
                     body: String::new(),
                     flagged: false,
+                    claim: None,
                 });
                 Status::Applied
             }
@@ -1769,6 +1696,13 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 kind,
                 target,
             } => {
+                if *kind == PollKind::Ban
+                    && target
+                        .and_then(|t| derived.outstanding.get(&t))
+                        .is_some_and(|out| !out.targetable)
+                {
+                    return Status::Rejected(tally::NOT_TARGETABLE);
+                }
                 derived.polls.insert(
                     eh,
                     Poll {
@@ -1789,30 +1723,50 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             Record::Vote {
                 poll,
                 option,
-                proof,
+                exec,
                 claimed,
                 obj_root,
             } => {
-                let context = poll.context();
-                let ok = memo_predicate(
+                let exec = &exec.0;
+                if !ticket_is_committed(exec) {
+                    return Status::Rejected("vote ticket does not match its proof");
+                }
+                if !verify_vote::<OH>(
                     &mut self.verify_cache,
+                    &self.prepared,
                     eh,
-                    &self.prepared.pseudonym_pred,
-                    context,
+                    *poll,
+                    *option,
+                    exec,
                     claimed.0,
-                    record::ballot_payload(*poll, *option),
                     obj_root.0,
-                    &proof.0,
-                );
-                if !ok {
+                ) {
                     return Status::Rejected("vote proof failed");
                 }
                 // Applicability guaranteed the poll exists.
-                let open = derived.polls.get_mut(poll).expect("poll present by is_applicable");
-                if open.closed {
+                if derived.polls.get(poll).expect("poll present by is_applicable").closed {
                     return Status::Rejected("poll closed");
                 }
-                open.cast(claimed.0, *option);
+                if obj.has_seen_nul(&exec.old_nullifier) {
+                    return Status::Rejected(NULLIFIER_SPENT);
+                }
+                obj.push(
+                    exec.new_object,
+                    exec.old_nullifier,
+                    exec.cb_com_list.to_vec(),
+                );
+                // A ballot files a ticket like any interaction, and it settles like any
+                // other, but it names no persona and nothing may target it.
+                let mut ticket =
+                    Outstanding::new(exec.cb_tik_list[0].0.clone(), Time::from(0), barrier + w, None);
+                ticket.targetable = false;
+                derived.outstanding.insert(eh, ticket);
+                derived.open_tickets.insert(eh);
+                derived
+                    .polls
+                    .get_mut(poll)
+                    .expect("poll present by is_applicable")
+                    .cast(claimed.0, *option);
                 Status::Applied
             }
 
@@ -1839,6 +1793,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 }
                 if delta.unsigned_abs() != 1 {
                     return Status::Rejected("a rating is +1 or -1");
+                }
+                if derived.outstanding.get(target).is_some_and(|out| !out.targetable) {
+                    return Status::Rejected(tally::NOT_TARGETABLE);
                 }
                 derived.rate(*target, claimed.0, *delta as i64);
                 Status::Applied
@@ -2155,6 +2112,152 @@ fn invoke<const MH: usize, const NH: usize>(
 ///
 /// The proof covers only the commitment, and the replica invokes the published ticket. A
 /// client that published any other ticket would have posts no ban could ever reach.
+/// Check a post's proof for its flavour: the interaction's key and public arguments, with
+/// the post's `payload` and the object root it names. `false` for the wrong number of
+/// public arguments.
+#[allow(clippy::too_many_arguments)]
+fn verify_post<const OH: usize>(
+    cache: &mut HashMap<Eh, bool>,
+    prepared: &PreparedKeys,
+    eh: Eh,
+    flavour: Flavour,
+    exec: &record::PostExec,
+    extra: &[F],
+    payload: F,
+    root: F,
+) -> bool {
+    if extra.len() != flavour.arity() {
+        return false;
+    }
+    let persona = || PseudonymArgs {
+        context: extra[0],
+        claimed: extra[1],
+        payload,
+    };
+    let check = |cache: &mut HashMap<Eh, bool>, vk: &PreparedVk, args| {
+        memo_interaction::<OH, ClaimArgs<F>, 1>(
+            cache,
+            eh,
+            vk,
+            exec.new_object,
+            exec.old_nullifier,
+            args,
+            exec.cb_com_list,
+            &exec.proof,
+            root,
+        )
+    };
+    match flavour {
+        Flavour::Anon => memo_interaction::<OH, _, 1>(
+            cache,
+            eh,
+            &prepared.standard,
+            exec.new_object,
+            exec.old_nullifier,
+            payload,
+            exec.cb_com_list,
+            &exec.proof,
+            root,
+        ),
+        Flavour::Pseudo => memo_interaction::<OH, _, 1>(
+            cache,
+            eh,
+            &prepared.pseudo,
+            exec.new_object,
+            exec.old_nullifier,
+            persona(),
+            exec.cb_com_list,
+            &exec.proof,
+            root,
+        ),
+        Flavour::PseudoRate => memo_interaction::<OH, _, 1>(
+            cache,
+            eh,
+            &prepared.pseudo_rate,
+            exec.new_object,
+            exec.old_nullifier,
+            PseudonymArgsRate {
+                context: extra[0],
+                claimed: extra[1],
+                i: extra[2],
+                payload,
+            },
+            exec.cb_com_list,
+            &exec.proof,
+            root,
+        ),
+        Flavour::ShowBadge | Flavour::MergePersonas | Flavour::RepAtLeast => {
+            let vk = match flavour.claim().expect("a claim flavour") {
+                Claim::ShowBadge => &prepared.show_badge,
+                Claim::MergePersonas => &prepared.merge_personas,
+                Claim::RepAtLeast => &prepared.rep_at_least,
+            };
+            let args = ClaimArgs {
+                post: persona(),
+                a: extra[2],
+                b: extra[3],
+            };
+            check(cache, vk, args)
+        }
+    }
+}
+
+/// Check a ballot's proof: a Persona-post interaction under the poll's context, with the
+/// ballot as its payload.
+#[allow(clippy::too_many_arguments)]
+fn verify_vote<const OH: usize>(
+    cache: &mut HashMap<Eh, bool>,
+    prepared: &PreparedKeys,
+    eh: Eh,
+    poll: Eh,
+    option: u32,
+    exec: &record::PostExec,
+    claimed: F,
+    root: F,
+) -> bool {
+    memo_interaction::<OH, _, 1>(
+        cache,
+        eh,
+        &prepared.pseudo,
+        exec.new_object,
+        exec.old_nullifier,
+        PseudonymArgs {
+            context: poll.context(),
+            claimed,
+            payload: record::ballot_payload(poll, option),
+        },
+        exec.cb_com_list,
+        &exec.proof,
+        root,
+    )
+}
+
+/// What the accept rule checks about a post's public arguments beyond its proof: the
+/// circuit proves the claim is TRUE of the author's object, this that it MEANS something.
+fn claim_is_meaningful(flavour: Flavour, extra: &[F]) -> Result<(), &'static str> {
+    if extra.len() != flavour.arity() {
+        return Err("post has the wrong public arguments");
+    }
+    match flavour {
+        Flavour::PseudoRate => {
+            // THE RATE LIMIT, checked again here. The circuit proves `i` is one of
+            // 0..MAX_PSEUDO since protocol version 3; `i` is also a public input carried in
+            // the record, so the accept rule refuses an out-of-range index outright — a
+            // second line, and a clear reason, rather than a failed proof.
+            let limit = F::from(RATE_LIMITED_PERSONAS_PER_CONTEXT as u64);
+            if extra[2].into_bigint() >= limit.into_bigint() {
+                return Err("persona index out of range");
+            }
+        }
+        Flavour::ShowBadge | Flavour::MergePersonas | Flavour::RepAtLeast => {
+            let claim = flavour.claim().expect("a claim flavour");
+            personas_core::circuits::check_claim(claim, extra[0], extra[2], extra[3])?;
+        }
+        Flavour::Anon | Flavour::Pseudo => {}
+    }
+    Ok(())
+}
+
 fn ticket_is_committed(exec: &record::PostExec) -> bool {
     exec.cb_tik_list[0].0.commit::<H>() == exec.cb_com_list[0]
 }

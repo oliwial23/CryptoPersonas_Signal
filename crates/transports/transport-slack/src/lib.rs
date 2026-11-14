@@ -150,8 +150,8 @@ impl SlackTransport {
         // `files.completeUploadExternal` answers with file ids, never with the ts of the
         // message Slack wraps the file in. Handing the file id back as a `MessageId` would
         // be a lie — nothing downstream could react to it or thread under it — so the id is
-        // empty, exactly as for an ephemeral. The only caller today (the badge claim) posts
-        // an image nobody rates and never looks at the id.
+        // empty, exactly as for an ephemeral. Callback-targetable posts use the
+        // normal chat-message path below.
         Ok(Sent {
             id: MessageId(String::new()),
             conversation: msg.conversation.clone(),

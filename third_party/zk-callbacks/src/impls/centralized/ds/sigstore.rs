@@ -878,7 +878,6 @@ where
         interaction: ExecutedMethod<F, Snark, A, NoEnc<F, A, AVar>, NUMCBS>,
         data: u64,
     ) -> Result<(), Self::Error> {
-        self.interaction_ids.push(data);
         let tiks = interaction.cb_tik_list.to_vec();
         let mut v = vec![];
         for tik in tiks {
@@ -887,6 +886,7 @@ where
             v.push(ser);
         }
 
+        self.interaction_ids.push(data);
         self.cb_tickets.push(v);
 
         Ok(())

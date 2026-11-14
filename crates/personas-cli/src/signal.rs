@@ -70,12 +70,6 @@ struct CountVotesRequest {
 }
 
 #[derive(Serialize)]
-struct ProofRequest {
-    proof: Vec<u8>,
-    group_id: String,
-}
-
-#[derive(Serialize)]
 struct ContextRequest {
     thread: String,
 }
@@ -354,8 +348,12 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
                 .context("server returned a malformed poll context")?;
             let claimed = personas.pseudo_for_poll(&context)?;
 
+            let choice = persona::signal_ballot_choice(&emoji)
+                .context("unsupported Signal ballot choice")?;
+            let payload = persona::server_ballot_payload("signal", choice);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.pseudo_proof_vote(claimed, context)).await??;
+            let proof =
+                spawn_blocking(move || pc.pseudo_proof_vote(claimed, context, payload)).await??;
 
             stamp("pseudo_vote");
             let res = http
@@ -492,19 +490,17 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         Command::Authorship {
             pseudo_idx1,
             pseudo_idx2,
+            message,
             channel,
         } => {
+            let payload = persona::server_claim_payload(&channel, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.make_authorship_proof(pseudo_idx1, pseudo_idx2))
+            let proof = spawn_blocking(move || pc.post_merge_personas(pseudo_idx1, pseudo_idx2, payload))
                 .await??;
-
             stamp("author");
             let res = http
                 .post(url("api/authorship")?)
-                .json(&ProofRequest {
-                    proof,
-                    group_id: channel,
-                })
+                .json(&PostRequest { message, group_id: channel, proof })
                 .send()
                 .await?;
             show(res).await?;
@@ -512,24 +508,35 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
 
         Command::Badge {
             i,
-            claimed,
+            pseudo_idx,
+            message,
             channel,
         } => {
-            let claimed =
-                claimed.context("the signal transport claims a badge with -b/--claimed")?;
-            let claimed = persona::field_from_str(&claimed)
-                .context("badge pseudonym is not a valid field element")?;
-
+            let payload = persona::server_claim_payload(&channel, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.make_badge_proof(i, claimed)).await??;
-
+            let proof = spawn_blocking(move || pc.post_show_badge(pseudo_idx, i, payload)).await??;
             stamp("badge");
             let res = http
                 .post(url("api/badges")?)
-                .json(&ProofRequest {
-                    proof,
-                    group_id: channel,
-                })
+                .json(&PostRequest { message, group_id: channel, proof })
+                .send()
+                .await?;
+            show(res).await?;
+        }
+
+        Command::RepAtLeast {
+            rho,
+            pseudo_idx,
+            message,
+            channel,
+        } => {
+            let payload = persona::server_claim_payload(&channel, &message);
+            let pc = personas.clone();
+            let proof = spawn_blocking(move || pc.post_rep_at_least(pseudo_idx, rho, payload)).await??;
+            stamp("rep_at_least");
+            let res = http
+                .post(url("api/rep_at_least")?)
+                .json(&PostRequest { message, group_id: channel, proof })
                 .send()
                 .await?;
             show(res).await?;

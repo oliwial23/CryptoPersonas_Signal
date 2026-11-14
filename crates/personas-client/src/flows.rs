@@ -20,12 +20,12 @@ use hex::FromHex;
 use personas_wire::{Kind, Payload};
 
 use personas_core::{
-    Args, ArgsVar, Cr, F, H, OStore, Snark,
+    Args, ArgsVar, Cr, F, H, Snark,
     circuits::{
-        BadgesArgs, BadgesArgsVar, FoldingProofData, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs,
-        PseudonymArgsPair, PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar,
-        authorship_pred, badge_pred, exec_badge_request_standint, exec_pseudo_rate_standint,
-        exec_pseudo_standint, exec_scanint, exec_standint, get_callbacks, pseudonym_pred,
+        BadgesArgs, Claim, ClaimArgs, FoldingProofData, MsgUser, NUM_SCANS_PER_FOLD,
+        PseudonymArgs, PseudonymArgsRate, check_claim, exec_badge_request_standint,
+        exec_claim_standint, exec_pseudo_rate_standint, exec_pseudo_standint, exec_scanint,
+        exec_standint, get_callbacks, rep_threshold,
     },
     timing::{append_proof_size_fold, append_timing_line, append_timing_line_fold},
 };
@@ -99,12 +99,6 @@ fn ensure_not_scanning(user: &User<F, MsgUser>) -> Result<()> {
     }
     Ok(())
 }
-
-/// A membership witness for the object bulletin: its public part and its witness.
-type Membership = (
-    <BulNet as PublicUserBul<F, MsgUser>>::MembershipPub,
-    <BulNet as PublicUserBul<F, MsgUser>>::MembershipWitness,
-);
 
 impl PersonaClient {
     /// The current epoch. Scans and pseudonymous posts are bound to it, so a callback
@@ -366,128 +360,112 @@ impl PersonaClient {
         Ok(payload)
     }
 
-    /// Prove a pseudonym for a vote. Unlike a post this proves the predicate *only* —
-    /// it does not advance the user object, so voting costs no rate-limit budget.
-    pub fn pseudo_proof_vote(&self, claimed: F, context: F) -> Result<Vec<u8>> {
+    /// A vote (AnonVote): a Persona-post interaction under the poll's `context`. Like every
+    /// feature it advances the user object and files a callback, so it counts toward the
+    /// interactions allowed between scans.
+    pub fn pseudo_proof_vote(&self, claimed: F, context: F, payload: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
-        let user = self.load_user()?;
+        let mut user = self.load_user()?;
         ensure_not_scanning(&user)?;
-
-        let (pubkey, sig) = self
-            .membership(&user)
-            .ok_or_else(|| anyhow!("this user is not on the bulletin; run `join` first"))?;
-        let pk = self.pseudonym_pred_pk();
+        let pk = self.standard_pseudo_pk();
+        let epoch = self.epoch()?;
 
         let pseudo = PseudonymArgs {
             context,
             claimed,
-            ..Default::default()
+            payload,
         };
 
         let start = SystemTime::now();
-        let proof = user
-            .prove_statement_and_in::<H, PseudonymArgs<F>, PseudonymArgsVar<F>, (), (), Snark, OStore>(
-                &mut rng,
-                pseudonym_pred,
-                &pk,
-                (sig, pubkey),
-                true,
-                pseudo,
-                (),
-            )
+        let exec = exec_pseudo_standint(&mut user, &mut rng, &self.bul, &pk, epoch, pseudo, ())
             .map_err(synthesis)?;
         record("pseudo_vote", start);
 
-        let payload = encode_record_with_inputs(Kind::Predicate, &proof, vec![context, claimed])?;
-
+        let payload = encode_record_with_inputs(Kind::PostPseudo, &exec, vec![context, claimed])?;
+        self.save_user(&user)?;
         Ok(payload)
     }
 
-    /// Prove that the pseudonyms at log indices `i1` and `i2` share an author — the
-    /// member claims both personas without revealing who they are.
-    pub fn make_authorship_proof(&self, i1: usize, i2: usize) -> Result<Vec<u8>> {
+    /// A post with a claim under the persona at log index `persona_idx`; `a`/`b` are the
+    /// claim's public inputs (see `ClaimArgs`).
+    fn claim_post(
+        &self,
+        persona_idx: usize,
+        claim: Claim,
+        inputs: [F; 2],
+        payload: F,
+        label: &str,
+    ) -> Result<Vec<u8>> {
         let mut rng = OsRng;
-        let user = self.load_user()?;
+        let mut user = self.load_user()?;
         ensure_not_scanning(&user)?;
+        let (claimed, context) = self.pseudonym_at(persona_idx)?;
+        let [a, b] = inputs;
+        check_claim(claim, context, a, b).map_err(|why| anyhow!("cannot make that claim: {why}"))?;
+        let pk = match claim {
+            Claim::ShowBadge => self.show_badge_pk(),
+            Claim::MergePersonas => self.merge_personas_pk(),
+            Claim::RepAtLeast => self.rep_at_least_pk(),
+        };
+        let epoch = self.epoch()?;
+        let args = ClaimArgs {
+            post: PseudonymArgs {
+                context,
+                claimed,
+                payload,
+            },
+            a,
+            b,
+        };
 
-        let (pubkey, sig) = self
-            .membership(&user)
-            .ok_or_else(|| anyhow!("this user is not on the bulletin; run `join` first"))?;
-        let pk = self.authorship_pred_pk();
+        let start = SystemTime::now();
+        let exec = exec_claim_standint(&mut user, &mut rng, &self.bul, &pk, epoch, claim, args)
+            .map_err(synthesis)?;
+        record(label, start);
 
-        let (claimed1, context1) = self.pseudonym_at(i1)?;
+        let payload =
+            encode_record_with_inputs(Kind::PostClaim, &exec, vec![context, claimed, a, b])?;
+        self.save_user(&user)?;
+        Ok(payload)
+    }
+
+    /// MergePersonas: a post under the persona at `i1` proving the persona at `i2` is the
+    /// same member, without revealing who.
+    pub fn post_merge_personas(&self, i1: usize, i2: usize, payload: F) -> Result<Vec<u8>> {
         let (claimed2, context2) = self.pseudonym_at(i2)?;
-
-        let pair = PseudonymArgsPair {
-            a: PseudonymArgs {
-                context: context1,
-                claimed: claimed1,
-                ..Default::default()
-            },
-            b: PseudonymArgs {
-                context: context2,
-                claimed: claimed2,
-                ..Default::default()
-            },
-        };
-
-        let start = SystemTime::now();
-        let proof = user
-            .prove_statement_and_in::<H, PseudonymArgsPair<F>, PseudonymArgsPairVar<F>, (), (), Snark, OStore>(
-                &mut rng,
-                authorship_pred,
-                &pk,
-                (sig, pubkey),
-                true,
-                pair,
-                (),
-            )
-            .map_err(synthesis)?;
-        record("author", start);
-
-        let payload = encode_record_with_inputs(
-            Kind::Predicate,
-            &proof,
-            vec![context1, claimed1, context2, claimed2],
-        )?;
-
-        Ok(payload)
+        self.claim_post(i1, Claim::MergePersonas, [context2, claimed2], payload, "author")
     }
 
-    /// Prove badge slot `i` is held under the pseudonym `badge`.
-    pub fn make_badge_proof(&self, i: u32, badge: F) -> Result<Vec<u8>> {
-        let mut rng = OsRng;
+    /// ShowBadge: a post under the persona at `persona_idx` showing badge slot `i`
+    /// (1 = Faculty, 2 = Student, 3 = Industry), which must be in the user object.
+    pub fn post_show_badge(&self, persona_idx: usize, i: u32, payload: F) -> Result<Vec<u8>> {
         let user = self.load_user()?;
-        ensure_not_scanning(&user)?;
-
-        let (pubkey, sig) = self
-            .membership(&user)
-            .ok_or_else(|| anyhow!("this user is not on the bulletin; run `join` first"))?;
-        let pk = self.badge_pred_pk();
-
-        let i_f = F::from(i);
-        let args = BadgesArgs {
-            i: i_f,
-            claimed: badge,
+        let badge = match i {
+            1 => user.data.badge1,
+            2 => user.data.badge2,
+            3 => user.data.badge3,
+            _ => return Err(anyhow!("badge slot must be 1, 2 or 3")),
         };
+        if badge == F::from(0u64) {
+            return Err(anyhow!("badge {i} has not been granted yet (scan after approval)"));
+        }
+        self.claim_post(persona_idx, Claim::ShowBadge, [F::from(i), badge], payload, "badge")
+    }
 
-        let start = SystemTime::now();
-        let proof = user
-            .prove_statement_and_in::<H, BadgesArgs<F>, BadgesArgsVar<F>, (), (), Snark, OStore>(
-                &mut rng,
-                badge_pred,
-                &pk,
-                (sig, pubkey),
-                true,
-                args,
-                (),
-            )
-            .map_err(synthesis)?;
-        record("badge", start);
-
-        let payload = encode_record_with_inputs(Kind::Predicate, &proof, vec![i_f, badge])?;
-
-        Ok(payload)
+    /// RepAtLeast: a post under the persona at `persona_idx` proving reputation `>= rho`.
+    pub fn post_rep_at_least(&self, persona_idx: usize, rho: i64, payload: F) -> Result<Vec<u8>> {
+        let user = self.load_user()?;
+        let rep = personas_core::types::field_to_f64_signed(&user.data.reputation) as i64;
+        if rep < rho {
+            return Err(anyhow!("reputation is {rep}, below {rho}"));
+        }
+        self.claim_post(
+            persona_idx,
+            Claim::RepAtLeast,
+            [rep_threshold(rho), F::from(0u64)],
+            payload,
+            "rep_at_least",
+        )
     }
 
     /// Fetch the callback the server minted for `msg` and hand it back to `endpoint`,
@@ -597,11 +575,6 @@ impl PersonaClient {
         }
 
         Ok(())
-    }
-
-    /// The membership witness proving this user is on the object bulletin.
-    fn membership(&self, user: &User<F, MsgUser>) -> Option<Membership> {
-        <BulNet as PublicUserBul<F, MsgUser>>::get_membership_data(&self.bul, user.commit::<H>())
     }
 
     /// The `(claimed, context)` field elements at a 1-based pseudonym-log index.

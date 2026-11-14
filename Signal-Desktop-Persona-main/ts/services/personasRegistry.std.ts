@@ -27,7 +27,7 @@ export type PreparedPersonaPost = {
   personaEh?: string;
   personaAnonymous?: boolean;
   personaRecordBase64?: string;
-  personaBadge?: string;
+  personaClaim?: string;
   personaContextName?: string;
 };
 

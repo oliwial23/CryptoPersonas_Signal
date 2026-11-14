@@ -47,7 +47,7 @@ use personas_core::{Args, Cr, F, Snark};
 /// 4: proofs bind their payload, a join carries the member's public key, a re-join
 /// approval can spend the object given up, and a record's identity no longer depends on
 /// its proof bytes or view claim.
-pub const SERVERLESS_VERSION: u16 = 4;
+pub const SERVERLESS_VERSION: u16 = 5;
 
 /// Records are compressed, matching `personas_wire`'s reasoning: every member
 /// downloads every record forever, so halving a proof is worth the point
@@ -170,6 +170,42 @@ pub enum Flavour {
     /// A pseudonym plus an index `i`, holding a member to `RATE_LIMITED_PERSONAS_PER_CONTEXT` (3) pseudonyms
     /// per context.
     PseudoRate,
+    /// A pseudonym that also shows a badge: `extra = [context, claimed, slot, badge]`.
+    ShowBadge,
+    /// A pseudonym that also proves a second pseudonym is the same author:
+    /// `extra = [context, claimed, context2, claimed2]`.
+    MergePersonas,
+    /// A pseudonym whose author's reputation is at least `rho`:
+    /// `extra = [context, claimed, rho, 0]`.
+    RepAtLeast,
+}
+
+impl Flavour {
+    /// How many public arguments (`extra`) a post of this flavour carries.
+    pub fn arity(self) -> usize {
+        match self {
+            Flavour::Anon => 0,
+            Flavour::Pseudo => 2,
+            Flavour::PseudoRate => 3,
+            Flavour::ShowBadge | Flavour::MergePersonas | Flavour::RepAtLeast => 4,
+        }
+    }
+
+    /// The claim a post of this flavour proves beyond its persona, if any.
+    pub fn claim(self) -> Option<personas_core::circuits::Claim> {
+        use personas_core::circuits::Claim;
+        match self {
+            Flavour::ShowBadge => Some(Claim::ShowBadge),
+            Flavour::MergePersonas => Some(Claim::MergePersonas),
+            Flavour::RepAtLeast => Some(Claim::RepAtLeast),
+            _ => None,
+        }
+    }
+
+    /// Whether the post names a pseudonym (`extra[1]`).
+    pub fn has_persona(self) -> bool {
+        self != Flavour::Anon
+    }
 }
 
 /// Whether a poll merely gauges opinion or, if it carries and passes, revokes a
@@ -323,13 +359,16 @@ pub enum Record {
         target: Option<Eh>,
     },
 
-    /// A ballot in a poll. Proves `pseudonym_pred` under the poll's context; the
-    /// replica records it against `claimed` (one member, one vote) and a later
-    /// ballot from the same `claimed` replaces the earlier one.
+    /// A ballot in a poll (AnonVote). An interaction like a Persona post, under the poll's
+    /// context and with the ballot as its payload, so it advances the voter's object and
+    /// files a callback (version 5; before, a read-only `pseudonym_pred` proof). The
+    /// replica records it against `claimed` (one member, one vote) and a later ballot from
+    /// the same `claimed` replaces the earlier one. Its ticket settles like any other, but
+    /// nothing can target it: nobody is banned or rated for how they voted.
     Vote {
         poll: Eh,
         option: u32,
-        proof: Ark<PredProof>,
+        exec: Ark<PostExec>,
         claimed: Ark<F>,
         obj_root: Ark<F>,
     },
@@ -576,12 +615,16 @@ pub fn identity(record: &Record) -> Result<Eh, CodecError> {
         Record::Vote {
             poll,
             option,
+            exec,
             claimed,
             obj_root,
-            ..
         } => {
             h.update(poll.0);
             h.update(option.to_le_bytes());
+            hash_fields(
+                &mut h,
+                &[exec.0.new_object, exec.0.old_nullifier, exec.0.cb_com_list[0]],
+            );
             hash_fields(&mut h, &[claimed.0, obj_root.0]);
         }
         Record::RejoinApprove { account, spent } => {

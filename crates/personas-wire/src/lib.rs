@@ -68,6 +68,9 @@ pub enum Kind {
     FoldScan,
     /// A callback commitment: `CallbackCom`.
     Callback,
+    /// A post with a claim (ShowBadge, MergePersonas, RepAtLeast): `ExecutedMethod`, then
+    /// `[context, claimed, a, b]`. The route names the claim, and so the verifying key.
+    PostClaim,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -211,18 +211,6 @@ pub struct BadgesArgsVar<F: PrimeField> {
     pub claimed: FpVar<F>,
 }
 
-#[derive(Clone, Default)]
-pub struct PseudonymArgsPair<F: PrimeField> {
-    pub a: PseudonymArgs<F>,
-    pub b: PseudonymArgs<F>,
-}
-
-#[derive(Clone)]
-pub struct PseudonymArgsPairVar<F: PrimeField> {
-    pub a: PseudonymArgsVar<F>,
-    pub b: PseudonymArgsVar<F>,
-}
-
 impl<F: PrimeField> AllocVar<PseudonymArgs<F>, F> for PseudonymArgsVar<F> {
     fn new_variable<T: Borrow<PseudonymArgs<F>>>(
         cs: impl Into<Namespace<F>>,
@@ -315,97 +303,6 @@ impl<F: PrimeField> ToConstraintField<F> for BadgesArgs<F> {
     fn to_field_elements(&self) -> Option<Vec<F>> {
         Some(vec![self.i, self.claimed])
     }
-}
-
-pub fn badge_pred(
-    tu: &UserVar<F, MsgUser>,
-    _com: &FpVar<F>,
-    pub_args: BadgesArgsVar<F>,
-    _priv_args: (),
-) -> ArkResult<Boolean<F>> {
-    let claimed = pub_args.claimed;
-
-    let is_one = pub_args.i.is_eq(&FpVar::Constant(F::from(1)))?;
-    let is_two = pub_args.i.is_eq(&FpVar::Constant(F::from(2)))?;
-
-    // SLOT SELECTION. The nesting matters, and it was previously inverted:
-    //
-    //   let badge12 = select(is_one, badge1, badge2);   // i==1 -> badge1, else badge2
-    //   let badge   = select(is_two, badge12, badge3);  // i==2 -> badge12, else badge3
-    //
-    // which resolves as:
-    //
-    //   i=1 -> is_one picks badge1 into badge12, then is_two is FALSE, so the second
-    //          select discards badge12 entirely and yields badge3.   <-- WRONG
-    //   i=2 -> badge12 = badge2, is_two true  -> badge2.             ok
-    //   i=3 -> badge12 = badge2, is_two false -> badge3.             ok
-    //
-    // So slot 1 compared the claim against the INDUSTRY slot. For anyone holding
-    // Faculty and nothing else, badge3 is zero, `badge.is_eq(&claimed)` is false, and
-    // the predicate is unsatisfiable — "the proof did not verify". Slots 2 and 3 were
-    // correct, which is why this hid: it only ever broke Faculty, and only when
-    // PROVING. Holding a Faculty badge was unaffected, because the assignment side
-    // (`standard_callback_method` below) selects each slot independently, and so was
-    // `badge_labels`, which reads the three slots directly. The status panel therefore
-    // showed "Badges held: Faculty" while a Faculty proof could not be produced.
-    //
-    // Chaining the fallbacks instead of the selected value makes each slot reachable:
-    let badge23 = FpVar::conditionally_select(&is_two, &tu.data.badge2, &tu.data.badge3)?;
-    let badge = FpVar::conditionally_select(&is_one, &tu.data.badge1, &badge23)?;
-
-    let x1 = badge.is_eq(&claimed)?;
-
-    Ok(x1)
-}
-
-impl<F: PrimeField> AllocVar<PseudonymArgsPair<F>, F> for PseudonymArgsPairVar<F> {
-    fn new_variable<T: Borrow<PseudonymArgsPair<F>>>(
-        cs: impl Into<Namespace<F>>,
-        f: impl FnOnce() -> Result<T, SynthesisError>,
-        mode: AllocationMode,
-    ) -> Result<Self, SynthesisError> {
-        let ns = cs.into();
-        let cs = ns.cs();
-
-        let pair = f()?;
-        let pair = pair.borrow();
-
-        // An authorship proof is about the pseudonyms alone, so it carries no payload.
-        let a_var = PseudonymArgsVar {
-            context: FpVar::new_variable(cs.clone(), || Ok(pair.a.context), mode)?,
-            claimed: FpVar::new_variable(cs.clone(), || Ok(pair.a.claimed), mode)?,
-            payload: FpVar::Constant(F::ZERO),
-        };
-
-        let b_var = PseudonymArgsVar {
-            context: FpVar::new_variable(cs.clone(), || Ok(pair.b.context), mode)?,
-            claimed: FpVar::new_variable(cs, || Ok(pair.b.claimed), mode)?,
-            payload: FpVar::Constant(F::ZERO),
-        };
-
-        Ok(Self { a: a_var, b: b_var })
-    }
-}
-
-pub fn authorship_pred(
-    tu: &UserVar<F, MsgUser>,
-    _com: &FpVar<F>,
-    pub_args: PseudonymArgsPairVar<F>,
-    _priv_args: (),
-) -> ArkResult<Boolean<F>> {
-    let context = pub_args.a.context;
-    let claimed = pub_args.a.claimed;
-    let derived = Poseidon::<2>::hash_in_zk(&[tu.data.sk.clone(), context.clone()])?;
-
-    let x1 = derived.is_eq(&claimed)?;
-
-    let context2 = pub_args.b.context;
-    let claimed2 = pub_args.b.claimed;
-    let derived2 = Poseidon::<2>::hash_in_zk(&[tu.data.sk.clone(), context2.clone()])?;
-
-    let x2 = derived2.is_eq(&claimed2)?;
-
-    Ok(x1 & x2)
 }
 
 /// A Groth16 public input is bound to the proof only through constraints that use it: an
@@ -1016,7 +913,7 @@ fn ticket_predicate<'a, const N: usize>(
     )?;
     let mut under_cap = Boolean::FALSE;
     for v in N..NUM_INTS_BEFORE_SCAN {
-        under_cap = under_cap | new_count.is_eq(&FpVar::Constant(F::from(v as u64)))?;
+        under_cap |= new_count.is_eq(&FpVar::Constant(F::from(v as u64)))?;
     }
     let x2 = tu_new.data.reputation.is_eq(&tu_old.data.reputation)?;
     let x4 = tu_new.data.banned.is_eq(&FpVar::Constant(F::from(0)))?;
@@ -1067,6 +964,268 @@ pub fn get_badge_request_interaction() -> BadgeRequestStandInt {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Posts with a claim: a Persona post that also proves one statement about its author's
+// object. Every one is an interaction that leaves the standard callback, like any post.
+// ---------------------------------------------------------------------------------------
+
+/// How far reputation may sit above a `RepAtLeast` threshold: `rep - rho` is proved to fit
+/// in this many bits, so `rep >= rho` as integers when both are well below `2^(bits-1)`
+/// (the replica bounds `rho` by [`REP_THRESHOLD_MAX`]; a ±1 rating per post keeps
+/// reputation far inside it).
+pub const REP_RANGE_BITS: usize = 32;
+/// The largest `|rho|` a `RepAtLeast` post may name.
+pub const REP_THRESHOLD_MAX: i64 = 1 << 20;
+
+/// What a post with a claim proves, beyond its Persona: `post` is the persona (context,
+/// claimed pseudonym, payload), `a` and `b` the claim's own public inputs.
+///
+/// - ShowBadge: `a` = badge slot `j` (1..=3), `b` = the badge held there (nonzero).
+/// - MergePersonas: `a` = the second context, `b` = the second pseudonym.
+/// - RepAtLeast: `a` = the threshold `rho` (a field element, negative values wrap), `b` = 0.
+#[derive(Clone, Debug, Default, CanonicalDeserialize, CanonicalSerialize)]
+pub struct ClaimArgs<F: PrimeField> {
+    pub post: PseudonymArgs<F>,
+    pub a: F,
+    pub b: F,
+}
+
+#[derive(Clone)]
+pub struct ClaimArgsVar<F: PrimeField> {
+    pub post: PseudonymArgsVar<F>,
+    pub a: FpVar<F>,
+    pub b: FpVar<F>,
+}
+
+impl<F: PrimeField> AllocVar<ClaimArgs<F>, F> for ClaimArgsVar<F> {
+    fn new_variable<T: Borrow<ClaimArgs<F>>>(
+        cs: impl Into<Namespace<F>>,
+        f: impl FnOnce() -> Result<T, SynthesisError>,
+        mode: AllocationMode,
+    ) -> Result<Self, SynthesisError> {
+        let ns = cs.into();
+        let cs = ns.cs();
+        let args = f()?;
+        let args = args.borrow();
+        Ok(Self {
+            post: PseudonymArgsVar::new_variable(cs.clone(), || Ok(args.post.clone()), mode)?,
+            a: FpVar::new_variable(cs.clone(), || Ok(args.a), mode)?,
+            b: FpVar::new_variable(cs, || Ok(args.b), mode)?,
+        })
+    }
+}
+
+impl<F: PrimeField> ToConstraintField<F> for ClaimArgs<F> {
+    fn to_field_elements(&self) -> Option<Vec<F>> {
+        let mut v = self.post.to_field_elements()?;
+        v.extend([self.a, self.b]);
+        Some(v)
+    }
+}
+
+/// Everything a Persona post proves: one more interaction, below the scan cap, nothing
+/// else about the object changed, not banned, no sweep in progress, and
+/// `claimed = H(sk, context)`. The same checks as `standard_pseudo_predicate`.
+fn persona_post_checks(
+    tu_old: &UserVar<F, MsgUser>,
+    tu_new: &UserVar<F, MsgUser>,
+    post: &PseudonymArgsVar<F>,
+) -> ArkResult<Boolean<F>> {
+    bind_public_input(&post.payload)?;
+    let derived = Poseidon::<2>::hash_in_zk(&[tu_new.data.sk.clone(), post.context.clone()])?;
+    Boolean::kary_and(&[
+        tu_new.data.num_interactions_since_last_scan.is_eq(
+            &(tu_old.data.num_interactions_since_last_scan.clone() + FpVar::Constant(F::from(1))),
+        )?,
+        tu_new
+            .data
+            .num_interactions_since_last_scan
+            .is_neq(&FpVar::Constant(F::from(NUM_INTS_BEFORE_SCAN as u64)))?,
+        tu_new.data.reputation.is_eq(&tu_old.data.reputation)?,
+        tu_new.data.banned.is_eq(&FpVar::Constant(F::from(0)))?,
+        tu_new.data.sk.is_eq(&tu_old.data.sk)?,
+        tu_new.data.badge1.is_eq(&tu_old.data.badge1)?,
+        tu_new.data.badge2.is_eq(&tu_old.data.badge2)?,
+        tu_new.data.badge3.is_eq(&tu_old.data.badge3)?,
+        derived.is_eq(&post.claimed)?,
+        tu_old.zk_fields.is_ingest_over.clone(),
+    ])
+}
+
+fn claim_post_method(tu: &User<F, MsgUser>, _args: ClaimArgs<F>, _priv: ()) -> User<F, MsgUser> {
+    let mut u = tu.clone();
+    u.data.num_interactions_since_last_scan += F::from(1);
+    u
+}
+
+/// SHOW BADGE: a Persona post whose author holds badge `b` in slot `a`.
+fn show_badge_predicate<'a>(
+    tu_old: &'a UserVar<F, MsgUser>,
+    tu_new: &'a UserVar<F, MsgUser>,
+    args: ClaimArgsVar<F>,
+    _priv: (),
+) -> ArkResult<Boolean<F>> {
+    let base = persona_post_checks(tu_old, tu_new, &args.post)?;
+    let is_one = args.a.is_eq(&FpVar::Constant(F::from(1)))?;
+    let is_two = args.a.is_eq(&FpVar::Constant(F::from(2)))?;
+    let is_three = args.a.is_eq(&FpVar::Constant(F::from(3)))?;
+    // SLOT SELECTION. The nesting matters, and it was previously inverted:
+    //
+    //   let badge12 = select(is_one, badge1, badge2);   // i==1 -> badge1, else badge2
+    //   let badge   = select(is_two, badge12, badge3);  // i==2 -> badge12, else badge3
+    //
+    // which resolves as:
+    //
+    //   i=1 -> is_one picks badge1 into badge12, then is_two is FALSE, so the second
+    //          select discards badge12 entirely and yields badge3.   <-- WRONG
+    //   i=2 -> badge12 = badge2, is_two true  -> badge2.             ok
+    //   i=3 -> badge12 = badge2, is_two false -> badge3.             ok
+    //
+    // So slot 1 compared the claim against the INDUSTRY slot. For anyone holding
+    // Faculty and nothing else, badge3 is zero, `badge.is_eq(&claimed)` is false, and
+    // the predicate is unsatisfiable — "the proof did not verify". Slots 2 and 3 were
+    // correct, which is why this hid: it only ever broke Faculty, and only when
+    // PROVING. Holding a Faculty badge was unaffected, because the assignment side
+    // (`standard_callback_method` below) selects each slot independently, and so was
+    // `badge_labels`, which reads the three slots directly. The status panel therefore
+    // showed "Badges held: Faculty" while a Faculty proof could not be produced.
+    //
+    // Chaining the fallbacks instead of the selected value makes each slot reachable:
+    let badge23 = FpVar::conditionally_select(&is_two, &tu_new.data.badge2, &tu_new.data.badge3)?;
+    let badge = FpVar::conditionally_select(&is_one, &tu_new.data.badge1, &badge23)?;
+    Boolean::kary_and(&[
+        base,
+        &is_one | &is_two | &is_three,
+        badge.is_eq(&args.b)?,
+        // Holding "no badge" is not a claim.
+        args.b.is_neq(&FpVar::Constant(F::from(0)))?,
+    ])
+}
+
+/// MERGE PERSONAS: a Persona post whose author also owns pseudonym `b = H(sk, a)`.
+fn merge_personas_predicate<'a>(
+    tu_old: &'a UserVar<F, MsgUser>,
+    tu_new: &'a UserVar<F, MsgUser>,
+    args: ClaimArgsVar<F>,
+    _priv: (),
+) -> ArkResult<Boolean<F>> {
+    let base = persona_post_checks(tu_old, tu_new, &args.post)?;
+    let derived = Poseidon::<2>::hash_in_zk(&[tu_new.data.sk.clone(), args.a.clone()])?;
+    Ok(base & derived.is_eq(&args.b)?)
+}
+
+/// REP AT LEAST: a Persona post whose author's reputation is at least `rho = a`.
+///
+/// Reputation and `rho` are field elements in which negative values wrap around, so
+/// `rep >= rho` is proved as `rep - rho` having a `REP_RANGE_BITS`-bit decomposition: a
+/// negative difference wraps to a huge field element that has none.
+fn rep_at_least_predicate<'a>(
+    tu_old: &'a UserVar<F, MsgUser>,
+    tu_new: &'a UserVar<F, MsgUser>,
+    args: ClaimArgsVar<F>,
+    _priv: (),
+) -> ArkResult<Boolean<F>> {
+    use ark_ff::BigInteger;
+    use ark_r1cs_std::R1CSVar;
+    let base = persona_post_checks(tu_old, tu_new, &args.post)?;
+    bind_public_input(&args.b)?;
+    let diff = &tu_new.data.reputation - &args.a;
+    let cs = diff.cs();
+    let mut recomposed = FpVar::Constant(F::from(0));
+    let mut weight = F::from(1);
+    for i in 0..REP_RANGE_BITS {
+        let bit = Boolean::new_witness(cs.clone(), || {
+            Ok(diff.value()?.into_bigint().get_bit(i))
+        })?;
+        recomposed += FpVar::from(bit) * FpVar::Constant(weight);
+        weight.double_in_place();
+    }
+    Ok(base & recomposed.is_eq(&diff)? & args.b.is_eq(&FpVar::Constant(F::from(0)))?)
+}
+
+pub type ClaimInt = Interaction<F, MsgUser, ClaimArgs<F>, ClaimArgsVar<F>, (), (), Args, ArgsVar, 1>;
+
+/// The claim a post makes beyond its Persona.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    ShowBadge,
+    MergePersonas,
+    RepAtLeast,
+}
+
+pub fn get_claim_interaction(claim: Claim) -> ClaimInt {
+    let predicate = match claim {
+        Claim::ShowBadge => show_badge_predicate,
+        Claim::MergePersonas => merge_personas_predicate,
+        Claim::RepAtLeast => rep_at_least_predicate,
+    };
+    Interaction {
+        meth: (claim_post_method, predicate),
+        callbacks: get_callbacks().try_into().unwrap(),
+    }
+}
+
+/// What a verifier checks about a claim's public inputs beyond its proof: the circuit proves
+/// the claim is TRUE of the author's object, this that it MEANS something. Shared by the
+/// serverless replica and the validation server.
+pub fn check_claim(claim: Claim, context: F, a: F, b: F) -> Result<(), &'static str> {
+    use ark_ff::PrimeField;
+    match claim {
+        Claim::ShowBadge => {
+            let expected = match a {
+                s if s == F::from(1u64) => *FACULTY_F,
+                s if s == F::from(2u64) => *STUDENT_F,
+                s if s == F::from(3u64) => *INDUSTRY_F,
+                _ => return Err("badge slot out of range"),
+            };
+            if b != expected {
+                return Err("not a badge of that slot");
+            }
+        }
+        Claim::MergePersonas => {
+            if a == context {
+                return Err("a persona merged with itself");
+            }
+        }
+        Claim::RepAtLeast => {
+            // `rho` or `-rho` is a small non-negative integer.
+            let max = rep_threshold(REP_THRESHOLD_MAX).into_bigint();
+            if !(a.into_bigint() <= max || (-a).into_bigint() <= max) || b != F::from(0u64) {
+                return Err("reputation threshold out of range");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A one-line description of what a claim proves, for display ("shows the Faculty badge",
+/// "is also <petname>", "has reputation at least 3"). Assumes [`check_claim`] passed.
+pub fn describe_claim(claim: Claim, a: F, b: F) -> String {
+    match claim {
+        Claim::ShowBadge => {
+            let badge = [(1u64, "Faculty"), (2, "Student"), (3, "Industry")]
+                .into_iter()
+                .find(|(slot, _)| a == F::from(*slot))
+                .map_or("unknown", |(_, name)| name);
+            format!("shows the {badge} badge")
+        }
+        Claim::MergePersonas => format!("is also {}", crate::persona::petname(b)),
+        Claim::RepAtLeast => format!(
+            "has reputation at least {}",
+            crate::types::field_to_f64_signed(&a) as i64
+        ),
+    }
+}
+
+/// `rho` as the field element a `RepAtLeast` post carries (negative values wrap).
+pub fn rep_threshold(rho: i64) -> F {
+    if rho >= 0 {
+        F::from(rho as u64)
+    } else {
+        -F::from(rho.unsigned_abs())
+    }
+}
+
 pub fn exec_standint<Bul: PublicUserBul<F, MsgUser>>(
     user: &mut User<F, MsgUser>,
     rng: &mut (impl CryptoRng + RngCore),
@@ -1108,6 +1267,29 @@ pub fn exec_pseudo_standint<Bul: PublicUserBul<F, MsgUser>>(
         pk,
         pub_args,
         priv_args,
+    )
+}
+
+/// A post with a claim against a signature-based (service) bulletin.
+pub fn exec_claim_standint<Bul: PublicUserBul<F, MsgUser>>(
+    user: &mut User<F, MsgUser>,
+    rng: &mut (impl CryptoRng + RngCore),
+    bul: &Bul,
+    pk: &PK,
+    cur_time: Time<F>,
+    claim: Claim,
+    pub_args: ClaimArgs<F>,
+) -> ArkResult<ExecutedMethod<F, Snark, Args, Cr, 1>> {
+    user.exec_method_create_cb::<H, ClaimArgs<F>, ClaimArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, 1>(
+        rng,
+        get_claim_interaction(claim),
+        [FakeSigPubkey::pk()],
+        cur_time,
+        bul,
+        true,
+        pk,
+        pub_args,
+        (),
     )
 }
 
@@ -1613,5 +1795,96 @@ mod ticket_predicate_tests {
         let args = FpVar::new_input(cs.clone(), || Ok(F::from(0u64))).unwrap();
         let ok = ticket_predicate::<10>(&old_var, &new_var, args, ()).unwrap();
         assert!(!(ok.value().unwrap() && cs.is_satisfied().unwrap()));
+    }
+}
+
+/// The three posts with a claim prove their claim, and nothing weaker.
+#[cfg(test)]
+mod claim_predicate_tests {
+    use super::*;
+    use ark_r1cs_std::R1CSVar;
+    use ark_relations::r1cs::ConstraintSystem;
+
+    type Pred = fn(&UserVar<F, MsgUser>, &UserVar<F, MsgUser>, ClaimArgsVar<F>, ()) -> ArkResult<Boolean<F>>;
+
+    fn member(setup: impl FnOnce(&mut MsgUser)) -> User<F, MsgUser> {
+        let mut data = MsgUser {
+            sk: F::from(1234u64),
+            ..Default::default()
+        };
+        setup(&mut data);
+        User::create(data, &mut rand::thread_rng())
+    }
+
+    fn holds(pred: Pred, old: &User<F, MsgUser>, a: F, b: F) -> bool {
+        let context = F::from(77u64);
+        let args = ClaimArgs {
+            post: PseudonymArgs {
+                context,
+                claimed: crate::persona::pseudonym(&old.data.sk, &context),
+                payload: F::from(5u64),
+            },
+            a,
+            b,
+        };
+        let new = claim_post_method(old, args.clone(), ());
+        let cs = ConstraintSystem::<F>::new_ref();
+        let old_var = UserVar::new_witness(cs.clone(), || Ok(old.clone())).unwrap();
+        let new_var = UserVar::new_witness(cs.clone(), || Ok(new)).unwrap();
+        let args_var = ClaimArgsVar::new_input(cs.clone(), || Ok(args)).unwrap();
+        let ok = pred(&old_var, &new_var, args_var, ()).unwrap();
+        ok.value().unwrap() && cs.is_satisfied().unwrap()
+    }
+
+    #[test]
+    fn show_badge_proves_the_badge_in_its_slot() {
+        let faculty = member(|d| d.badge1 = *FACULTY_F);
+        let industry = member(|d| d.badge3 = *INDUSTRY_F);
+        let none = member(|_| {});
+        assert!(holds(show_badge_predicate, &faculty, F::from(1u64), *FACULTY_F));
+        assert!(holds(show_badge_predicate, &industry, F::from(3u64), *INDUSTRY_F));
+        assert!(!holds(show_badge_predicate, &faculty, F::from(3u64), *FACULTY_F), "wrong slot");
+        assert!(!holds(show_badge_predicate, &none, F::from(1u64), *FACULTY_F), "not held");
+        assert!(!holds(show_badge_predicate, &none, F::from(1u64), F::from(0u64)), "empty slot");
+        assert!(!holds(show_badge_predicate, &faculty, F::from(4u64), *FACULTY_F), "no slot 4");
+    }
+
+    #[test]
+    fn merge_personas_proves_a_second_own_pseudonym() {
+        let m = member(|_| {});
+        let other_context = F::from(99u64);
+        let ours = crate::persona::pseudonym(&m.data.sk, &other_context);
+        let theirs = crate::persona::pseudonym(&F::from(42u64), &other_context);
+        assert!(holds(merge_personas_predicate, &m, other_context, ours));
+        assert!(!holds(merge_personas_predicate, &m, other_context, theirs));
+    }
+
+    #[test]
+    fn rep_at_least_compares_signed_reputation() {
+        let rep = |r: i64| member(move |d| d.reputation = rep_threshold(r));
+        let cases = [(5, 3, true), (3, 3, true), (2, 3, false), (-5, -7, true), (-5, -4, false), (4, -2, true), (-1, 0, false), (0, 0, true)];
+        for (r, rho, expect) in cases {
+            assert_eq!(
+                holds(rep_at_least_predicate, &rep(r), rep_threshold(rho), F::from(0u64)),
+                expect,
+                "reputation {r} against threshold {rho}"
+            );
+        }
+        assert!(!holds(rep_at_least_predicate, &rep(5), rep_threshold(3), F::from(1u64)), "b must be zero");
+    }
+
+    #[test]
+    fn a_claim_post_is_still_a_persona_post() {
+        // Banned members cannot make one, and the scan cap applies.
+        let banned = member(|d| {
+            d.badge1 = *FACULTY_F;
+            d.banned = F::from(1u64);
+        });
+        assert!(!holds(show_badge_predicate, &banned, F::from(1u64), *FACULTY_F));
+        let at_cap = member(|d| {
+            d.reputation = F::from(9u64);
+            d.num_interactions_since_last_scan = F::from((NUM_INTS_BEFORE_SCAN - 1) as u64);
+        });
+        assert!(!holds(rep_at_least_predicate, &at_cap, F::from(1u64), F::from(0u64)));
     }
 }

@@ -144,7 +144,14 @@ pub struct Outstanding {
     pub badge_slot: Option<u8>,
     /// Whether the ticket has already been invoked.
     pub settled: bool,
+    /// Whether a ban, a rating or a badge approval may name this ticket's record. False
+    /// for a ballot: it files a ticket like every interaction, but nobody is to be
+    /// punished or rewarded for how they voted.
+    pub targetable: bool,
 }
+
+/// Why a ban, a rating or an approval of a ballot is refused.
+pub const NOT_TARGETABLE: &str = "a vote cannot be banned, rated or approved";
 
 impl Outstanding {
     pub fn new(
@@ -162,6 +169,7 @@ impl Outstanding {
             banned: false,
             badge_slot: None,
             settled: false,
+            targetable: true,
         }
     }
 
@@ -189,6 +197,10 @@ pub struct LogEntry {
     pub body: String,
     /// Set when the replica later learns the author was banned (§5.4, §9).
     pub flagged: bool,
+    /// What a post with a claim proves about its author, for display: "shows the
+    /// Faculty badge", "is also <petname>", "has reputation at least 3". `None` for every
+    /// other record.
+    pub claim: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -251,6 +263,7 @@ impl Derived {
     /// An anonymous post links to nothing, so a settled one is out of reach.
     pub fn ban(&mut self, target: Eh) -> Result<(), &'static str> {
         let (settled, claimed) = match self.outstanding.get(&target) {
+            Some(out) if !out.targetable => return Err(NOT_TARGETABLE),
             Some(out) => (out.settled, out.claimed),
             None => return Err("no such post"),
         };
@@ -395,6 +408,7 @@ mod tests {
             author: Some("brave-otter".into()),
             body: "hi".into(),
             flagged: false,
+            claim: None,
         });
         d.log.push(LogEntry {
             eh: Eh([2; 32]),
@@ -402,6 +416,7 @@ mod tests {
             author: Some("calm-lynx".into()),
             body: "yo".into(),
             flagged: false,
+            claim: None,
         });
         d.flag_author("brave-otter");
         assert!(d.log[0].flagged);

@@ -31,9 +31,9 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate
 use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
 use personas_core::circuits::{
-    BadgesArgs, BadgesArgsVar, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsPair,
-    PseudonymArgsPairVar, PseudonymArgsRate, PseudonymArgsVar, PubScan, ScanInt, authorship_pred,
-    badge_pred, get_badge_request_interaction, get_callbacks, get_scan_interaction,
+    BadgesArgs, Claim, ClaimArgs, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsRate,
+    PseudonymArgsVar, PubScan, ScanInt, get_badge_request_interaction, get_callbacks,
+    get_claim_interaction, get_scan_interaction,
     get_standard_interaction, get_standard_pseudo_interaction,
     JoinArgs, JoinArgsVar, ResetArgs, ResetArgsVar, get_standard_pseudo_rate_interaction,
     join_pred, not_banned_pred, pseudonym_pred,
@@ -172,10 +172,17 @@ fn load_or_publish<T>(
     match try_load(path)? {
         Cache::Hit(v) => return Ok(v),
         Cache::Corrupt => {
-            // A corrupt cache would make the exclusive link below fail forever, so
-            // clear it. Under the lock only one caller does this per generation.
-            tracing::warn!("removing unreadable key cache {}", path.display());
-            match std::fs::remove_file(path) {
+            // A corrupt cache would make the exclusive link below fail forever, so move
+            // it aside. Under the lock only one caller does this per generation. It is
+            // KEPT (as `<file>.unreadable`), not deleted: an older build's key set is not
+            // corrupt, only a different format, and its group still needs it.
+            let aside = sibling(path, ".unreadable");
+            tracing::warn!(
+                "moving unreadable key cache {} to {}",
+                path.display(),
+                aside.display()
+            );
+            match std::fs::rename(path, &aside) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
@@ -323,35 +330,17 @@ pub fn generate_merkle_circuit_keys<S: SNARK<F>>(
             MerkleOStore,
         >(rng, pseudonym_pred, None, dummy_pseudo.clone());
 
-    let dummy_author = PseudonymArgsPair {
-        a: dummy_pseudo.clone(),
-        b: dummy_pseudo,
+    let claim_keys = |rng: &mut _, claim| {
+        get_claim_interaction(claim).generate_keys::<H, S, Cr, MerkleOStore>(
+            rng,
+            None,
+            ClaimArgs::default(),
+            false,
+        )
     };
-    let (authorship_pred_proving_key, authorship_pred_verifying_key) =
-        generate_keys_for_statement_in::<
-            F,
-            H,
-            MsgUser,
-            PseudonymArgsPair<F>,
-            PseudonymArgsPairVar<F>,
-            (),
-            (),
-            S,
-            MerkleOStore,
-        >(rng, authorship_pred, None, dummy_author);
-
-    let (badge_pred_proving_key, badge_pred_verifying_key) =
-        generate_keys_for_statement_in::<
-            F,
-            H,
-            MsgUser,
-            BadgesArgs<F>,
-            BadgesArgsVar<F>,
-            (),
-            (),
-            S,
-            MerkleOStore,
-        >(rng, badge_pred, None, dummy_badge_request);
+    let show_badge = claim_keys(rng, Claim::ShowBadge);
+    let merge_personas = claim_keys(rng, Claim::MergePersonas);
+    let rep_at_least = claim_keys(rng, Claim::RepAtLeast);
 
     // A join proves its object is fresh: a statement about the object alone (no
     // membership — it is not in any tree yet), its commitment the first public input.
@@ -379,8 +368,9 @@ pub fn generate_merkle_circuit_keys<S: SNARK<F>>(
         standard: (standard_proving_key, standard_verifying_key),
         scan: (scan_proving_key, scan_verifying_key),
         pseudonym_pred: (pseudonym_pred_proving_key, pseudonym_pred_verifying_key),
-        authorship_pred: (authorship_pred_proving_key, authorship_pred_verifying_key),
-        badge_pred: (badge_pred_proving_key, badge_pred_verifying_key),
+        show_badge,
+        merge_personas,
+        rep_at_least,
         standard_pseudo: (standard_pseudo_proving_key, standard_pseudo_verifying_key),
         standard_pseudor: (standard_pseudor_proving_key, standard_pseudor_verifying_key),
         badge_request: (badge_request_proving_key, badge_request_verifying_key),
@@ -396,8 +386,9 @@ pub struct MerkleCircuitKeys<S: SNARK<F>> {
     pub standard: (S::ProvingKey, S::VerifyingKey),
     pub scan: (S::ProvingKey, S::VerifyingKey),
     pub pseudonym_pred: (S::ProvingKey, S::VerifyingKey),
-    pub authorship_pred: (S::ProvingKey, S::VerifyingKey),
-    pub badge_pred: (S::ProvingKey, S::VerifyingKey),
+    pub show_badge: (S::ProvingKey, S::VerifyingKey),
+    pub merge_personas: (S::ProvingKey, S::VerifyingKey),
+    pub rep_at_least: (S::ProvingKey, S::VerifyingKey),
     pub standard_pseudo: (S::ProvingKey, S::VerifyingKey),
     pub standard_pseudor: (S::ProvingKey, S::VerifyingKey),
     pub badge_request: (S::ProvingKey, S::VerifyingKey),
@@ -419,10 +410,12 @@ pub fn generate_merkle_server_keys(
         scan_verifying_key: k.scan.1,
         pseudonym_pred_proving_key: k.pseudonym_pred.0,
         pseudonym_pred_verifying_key: k.pseudonym_pred.1,
-        authorship_pred_proving_key: k.authorship_pred.0,
-        authorship_pred_verifying_key: k.authorship_pred.1,
-        badge_pred_proving_key: k.badge_pred.0,
-        badge_pred_verifying_key: k.badge_pred.1,
+        show_badge_proving_key: k.show_badge.0,
+        show_badge_verifying_key: k.show_badge.1,
+        merge_personas_proving_key: k.merge_personas.0,
+        merge_personas_verifying_key: k.merge_personas.1,
+        rep_at_least_proving_key: k.rep_at_least.0,
+        rep_at_least_verifying_key: k.rep_at_least.1,
         standard_pseudo_proving_key: k.standard_pseudo.0,
         standard_pseudo_verifying_key: k.standard_pseudo.1,
         standard_pseudor_proving_key: k.standard_pseudor.0,

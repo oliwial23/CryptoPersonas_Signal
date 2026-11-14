@@ -479,6 +479,105 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     );
     eprintln!("post: done");
 
+    // --- every feature is a post: a vote, and posts with a claim (protocol version 5) ------
+    // Each is an interaction that counts toward the cap, so members rotate like posters.
+    // Three features below, `total` interactions each; interaction `n` overall is made by
+    // member `n / POSTS_PER_MEMBER`.
+    let posters: Vec<PersonaClient> = (0..(3 * total).div_ceil(POSTS_PER_MEMBER))
+        .map(|k| {
+            let m = member(&format!("feature-{k}"));
+            // A second persona to merge with (join minted the first).
+            m.gen_pseudo().expect("second persona");
+            m
+        })
+        .collect();
+    let feature = |i: usize| &posters[i / POSTS_PER_MEMBER];
+
+    let mut rt = Vec::new();
+    for i in 0..total {
+        // A fresh poll each time: one ballot per member per poll.
+        let poll: serde_json::Value = http
+            .post(api.join("api/poll").unwrap())
+            .json(&serde_json::json!({"message": format!("poll {i}"), "group_id": "bench"}))
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.json())
+            .expect("open a poll");
+        let timestamp = poll["timestamp"].as_u64().expect("the poll's id");
+        let context: serde_json::Value = http
+            .post(api.join("api/context").unwrap())
+            .json(&serde_json::json!({"timestamp": timestamp}))
+            .send()
+            .and_then(|r| r.json())
+            .expect("the poll's context");
+        let context = personas_core::persona::field_from_str(context["context"].as_str().expect("context"))
+            .expect("a field element");
+        let pc = feature(i);
+        let claimed = pc.pseudo_for_poll(&context).expect("poll pseudonym");
+        let payload = personas_core::persona::server_ballot_payload("signal", "upvote");
+        let proof = pc
+            .pseudo_proof_vote(claimed, context, payload)
+            .expect("vote proof");
+        let start = Instant::now();
+        let res = http
+            .post(api.join("api/vote").unwrap())
+            .json(&serde_json::json!({
+                "group_id": "bench",
+                "emoji": "upvote",
+                "timestamp": timestamp,
+                "claimed": claimed.to_string(),
+                "proof": proof,
+            }))
+            .send()
+            .expect("vote request");
+        rt.push(micros(start));
+        assert!(res.status().is_success(), "vote rejected: {}", res.text().unwrap_or_default());
+    }
+    ops.insert(
+        "vote".to_string(),
+        ServerOp {
+            client: summarize(&logged("pseudo_vote", "timings.jsonl", args.warmup)),
+            server: summarize(&logged("pseudo_vote", "verify_timings.jsonl", args.warmup)),
+            round_trip: summarize(&rt[args.warmup..]),
+            client_after: None,
+        },
+    );
+    eprintln!("vote: done");
+
+    for (k, (name, route, label)) in [
+        ("merge_personas", "api/authorship", "author"),
+        ("rep_at_least", "api/rep_at_least", "rep_at_least"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut rt = Vec::new();
+        for i in 0..total {
+            let pc = feature((k + 1) * total + i);
+            let payload = personas_core::persona::server_claim_payload("bench", "bench");
+            let proof = match name {
+                "merge_personas" => pc.post_merge_personas(1, 2, payload),
+                // The member's own reputation, which it always meets.
+                _ => {
+                    let rep: i64 = pc.reputation().expect("reputation").parse().unwrap_or(0);
+                    pc.post_rep_at_least(1, rep, payload)
+                }
+            }
+            .expect("claim post proof");
+            rt.push(post_json(&http, api.join(route).unwrap(), proof));
+        }
+        ops.insert(
+            name.to_string(),
+            ServerOp {
+                client: summarize(&logged(label, "timings.jsonl", args.warmup)),
+                server: summarize(&logged(label, "verify_timings.jsonl", args.warmup)),
+                round_trip: summarize(&rt[args.warmup..]),
+                client_after: None,
+            },
+        );
+        eprintln!("{name}: done");
+    }
+
     // --- Privacy Pass: request tickets offline, redeem them to post -------------------------
     // Ticket requests count toward the interaction cap too (TICKET_BATCH each): a fresh
     // member every REQUESTS_PER_MEMBER requests, and each redeems its own tickets.

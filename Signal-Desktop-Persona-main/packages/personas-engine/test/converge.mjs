@@ -38,7 +38,12 @@ console.log('Building two member engines (first run generates keys — slow) ...
 
 // Same dataDir + deterministic seeds so both members share keys and the run
 // reproduces. conversation must match for records to ingest.
-const opts = { dataDir: keyDir, conversation: 'converge-test' };
+const opts = {
+  dataDir: keyDir,
+  conversation: 'converge-test',
+  settlementBarriers: 10,
+  pollCloseBarriers: 3,
+};
 const alice = new Engine({ ...opts, seed: 1 });
 const bob = new Engine({ ...opts, seed: 2 });
 const members = [alice, bob];
@@ -55,15 +60,53 @@ for (const m of members) {
   deliverAll(m.emitJoin(nextAccount()));
 }
 
+// Spend from a settled root, advancing every replica together.
+function settle(member) {
+  for (let i = 0; i < 4 && !member.isSettled(); i += 1) {
+    for (const replica of members) {
+      replica.barrier();
+    }
+  }
+  if (!member.isSettled()) {
+    throw new Error('member object did not settle');
+  }
+}
+
+settle(alice);
+
+// The approval is absorbed by Bob's next scan before he can show the badge.
+const request = bob.emitBadgeRequest(2);
+deliverAll(request);
+deliverAll(alice.emitBadgeApprove(request.eh, 2));
+settle(bob);
+deliverAll(bob.emitScan());
+settle(bob);
+const badge = bob.emitPostShowBadge('showing my badge', 0xbeef, 'Student');
+deliverAll(badge);
+check('the received badge claim names the approved badge',
+  alice.logEntry(badge.eh)?.claim === 'shows the Student badge');
+settle(bob);
+
 // (2) alice posts under a persona.
 console.log('(2) alice posts under a persona (real Groth16 proof) ...');
 let t0 = process.hrtime.bigint();
-const post = alice.emitPostPseudo('here is my hot take', 0xabcd);
+const post = alice.emitPostMergePersonas('here is my hot take', 0xabcd, 0x1234);
 console.log(`    proof-gen ${ms(t0)}; persona=${post.persona}; eh=${post.eh.slice(0, 12)}…`);
 deliverAll(post);
 
 check('alice renders the post', alice.render().some(l => l.includes('hot take')));
 check('bob renders the post', bob.render().some(l => l.includes('hot take')));
+const aliceClaim = alice.logEntry(post.eh)?.claim;
+check('the received post carries its verified claim',
+  aliceClaim?.startsWith('is also ') && bob.logEntry(post.eh)?.claim === aliceClaim);
+check('sender and recipient show the same persona',
+  post.persona != null && bob.logEntry(post.eh)?.author === post.persona);
+settle(alice);
+const reputation = alice.emitPostRepAtLeast('my reputation', 0xabcd, -1);
+deliverAll(reputation);
+check('the received reputation claim preserves its signed threshold',
+  bob.logEntry(reputation.eh)?.claim === 'has reputation at least -1');
+settle(alice);
 check('fingerprints converge after post', alice.fingerprint() === bob.fingerprint());
 
 // (3) bob opens a ban poll on the post; both vote to ban.
@@ -71,7 +114,10 @@ console.log('(3) bob opens a ban poll; both vote to ban ...');
 const poll = bob.emitPoll('ban this persona?', ['ban', 'keep'], 'ban', post.eh);
 deliverAll(poll);
 t0 = process.hrtime.bigint();
+const callbacksBeforeVote = alice.outstandingCallbacks();
 const vote1 = alice.emitVote(poll.eh, BAN_OPTION);
+check('a ballot spends the settled object and files a callback',
+  !alice.isSettled() && alice.outstandingCallbacks() === callbacksBeforeVote + 1);
 const vote2 = bob.emitVote(poll.eh, BAN_OPTION);
 console.log(`    two vote proofs ${ms(t0)}`);
 deliverAll(vote1);
@@ -80,8 +126,10 @@ check('fingerprints converge after votes', alice.fingerprint() === bob.fingerpri
 
 // (4) Every replica crosses a settlement barrier: the ban settles, the post flags.
 console.log('(4) Both cross a settlement barrier (the ban bites) ...');
-for (const m of members) {
-  m.barrier();
+for (let i = 0; i < 4; i += 1) {
+  for (const m of members) {
+    m.barrier();
+  }
 }
 
 const aliceFlagged = alice.log().some(e => e.body.includes('hot take') && e.flagged);

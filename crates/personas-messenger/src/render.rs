@@ -46,7 +46,12 @@ pub fn render_entry(entry: &LogEntry) -> Option<String> {
         None => ANON_LABEL.to_string(),
     };
     let flag = if entry.flagged { FLAG_PREFIX } else { "" };
-    Some(format!("{flag}{author}: {}", entry.body))
+    let claim = entry
+        .claim
+        .as_ref()
+        .map(|c| format!(" [{c}]"))
+        .unwrap_or_default();
+    Some(format!("{flag}{author}{claim}: {}", entry.body))
 }
 
 /// Render the open and recently-closed polls as status lines, newest tally first.
@@ -119,6 +124,7 @@ mod tests {
             author: author.map(|s| s.to_string()),
             body: body.to_string(),
             flagged,
+            claim: None,
         }
     }
 
@@ -152,6 +158,7 @@ mod tests {
             author: None,
             body: String::new(),
             flagged: false,
+            claim: None,
         };
         assert_eq!(render_entry(&scan), None);
         assert!(render_log(std::slice::from_ref(&scan)).is_empty());

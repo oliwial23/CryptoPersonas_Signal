@@ -59,12 +59,16 @@ pub fn router(state: ServerLock) -> Router {
             get(params::pseudonym_pred),
         )
         .route(
-            "/api/user/arbitrary_pred_proving_key2",
-            get(params::authorship_pred),
+            "/api/interaction/claim/merge_personas/proving_key",
+            get(params::merge_personas),
         )
         .route(
-            "/api/user/arbitrary_pred_proving_key3",
-            get(params::badge_pred),
+            "/api/interaction/claim/rep_at_least/proving_key",
+            get(params::rep_at_least),
+        )
+        .route(
+            "/api/interaction/claim/show_badge/proving_key",
+            get(params::show_badge),
         )
         // -- the bulletin -------------------------------------------------------------
         .route("/api/user/pubkey", get(params::user_pubkey))
@@ -136,8 +140,9 @@ pub fn router(state: ServerLock) -> Router {
         .route("/api/reply", post_route(post::signal_reply))
         .route("/api/reply/pseudo", post_route(post::signal_reply_pseudo))
         .route("/api/react", post_route(post::signal_react))
-        .route("/api/authorship", post_route(post::signal_authorship))
-        .route("/api/badges", post_route(post::signal_badges))
+        .route("/api/authorship", post_route(post::signal_merge_personas))
+        .route("/api/badges", post_route(post::signal_show_badge))
+        .route("/api/rep_at_least", post_route(post::signal_rep_at_least))
         // -- posting, over Slack -------------------------------------------------------
         .route("/api/slack/post/anon", post_route(post::slack_anon))
         .route("/api/slack/post/pseudo", post_route(post::slack_pseudo))
@@ -152,11 +157,15 @@ pub fn router(state: ServerLock) -> Router {
         )
         .route(
             "/api/slack/claim/badges",
-            post_route(post::slack_claim_badge),
+            post_route(post::slack_show_badge),
         )
         .route(
             "/api/slack/claim/authorship",
-            post_route(post::slack_authorship),
+            post_route(post::slack_merge_personas),
+        )
+        .route(
+            "/api/slack/claim/rep",
+            post_route(post::slack_rep_at_least),
         )
         // -- polls ---------------------------------------------------------------------
         .route("/api/poll", post_route(polls::signal_poll))

@@ -267,13 +267,30 @@ Anyone can join. What stops a banned member from rejoining is that they start ov
 standing — which is also what stops anyone else. A real deployment gates this on an invite;
 that is workstream b's Privacy Pass ticket, and it is why tickets are a service-mode feature.
 
+#### Privacy Pass claim tickets require a different issuer primitive
+
+The current ticket construction maps an input to a publicly known scalar
+multiple of the group generator. Even with a correct DLEQ proof, this does not
+give the token unforgeability expected of a VOPRF. There is a separate privacy
+issue: issuance receives the clear callback entry and redemption presents
+that same entry, so an issuer that retains its transcript can correlate both
+steps. The redemption MAC authenticates data picked by the ticket holder at
+redemption. It does not establish that an issuer checked a claim about those
+data at issuance.
+
+Before adding claim redemption, replace the token primitive with one that
+has a standard security definition and design how the issuance proof binds
+the hidden claim to the token. Design the callback linkage and the claim's
+expiry together. Votes continue to use full proofs. The existing ticket
+measurements describe the prototype's execution cost.
+
 ### O8. Two Slack capabilities cannot be given a message id
 
 *Severity: low, documented at the call sites.* `files.completeUploadExternal` returns file ids,
 never the ts of the message Slack wraps the file in; `chat.postEphemeral` returns nothing at
-all. Both therefore return `Sent { id: MessageId("") }`. Nothing downstream rates a badge image
-or an ephemeral, so nothing breaks — but an attachment post that someone *does* want to rate
-would need a follow-up `conversations.history` lookup.
+all. Both therefore return `Sent { id: MessageId("") }`. Slack badge claims use a text
+message so their callbacks can be addressed by its timestamp. An attachment post
+that needs a callback target would need a follow-up message lookup.
 
 ### O9. Dropped: the Slack "🧩 Topic" banner
 

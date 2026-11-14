@@ -215,6 +215,9 @@ pub struct Ballot {
 pub struct PollEntry {
     /// The messenger id of the poll message; a vote quotes it.
     pub timestamp: u64,
+    /// Legacy poll rows did not store their destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
     pub votes: Vec<Ballot>,
     /// The message under review, or 0 for a poll that is not about banning anyone.
     pub ban: i64,
@@ -275,8 +278,11 @@ impl PollLog {
             return Ok(());
         };
 
-        poll.votes
-            .retain(|v| !(v.poll_pseudonym == ballot.poll_pseudonym && v.seed == ballot.seed));
+        let seed = personas_core::persona::field_from_str(&ballot.seed);
+        poll.votes.retain(|v| {
+            v.seed != ballot.seed
+                && (seed.is_none() || personas_core::persona::field_from_str(&v.seed) != seed)
+        });
         poll.votes.push(ballot);
         self.flush()
     }
@@ -400,6 +406,8 @@ pub struct SlackPoll {
     /// message that announced it, and a Slack poll that survives a restart needs it.
     #[allow(dead_code)]
     pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
     /// The field element voters derive their poll pseudonym from.
     pub context: String,
     /// Claimed pseudonyms that have already voted — one entry per member, and it says
@@ -602,6 +610,7 @@ mod tests {
         polls
             .open_poll(PollEntry {
                 timestamp: 100,
+                conversation: None,
                 votes: vec![],
                 ban: 0,
                 context: "ctx".into(),
@@ -614,7 +623,7 @@ mod tests {
             emoji: emoji.into(),
         };
 
-        polls.cast(100, ballot("👍")).unwrap();
+        polls.cast(100, Ballot { seed: "0012345".into(), ..ballot("👍") }).unwrap();
         polls.cast(100, ballot("👎")).unwrap();
 
         let poll = polls.get(100).unwrap();
@@ -626,6 +635,7 @@ mod tests {
     fn a_ban_poll_counts_bans_not_upvotes() {
         let poll = PollEntry {
             timestamp: 1,
+            conversation: None,
             ban: 1700000000000,
             context: "ctx".into(),
             votes: vec![

@@ -53,6 +53,9 @@ fn placeholder_keys() -> personas_bulletin::replica::ReplicaKeys {
         badge_request: vk.clone(),
         join: vk.clone(),
         not_banned: vk.clone(),
+        show_badge: vk.clone(),
+        merge_personas: vk.clone(),
+        rep_at_least: vk.clone(),
         pseudonym_pred: vk,
     }
 }
@@ -250,6 +253,9 @@ mod e2e {
                 badge_request: scan_vk.clone(), // unused by this suite
                 join: join_vk,
                 not_banned: not_banned_vk.clone(),
+                show_badge: scan_vk.clone(),     // unused by this suite
+                merge_personas: scan_vk.clone(), // unused by this suite
+                rep_at_least: scan_vk.clone(),   // unused by this suite
                 scan: scan_vk,
                 pseudonym_pred: pred_vk,
             },
@@ -258,8 +264,9 @@ mod e2e {
                 pseudo: pseudo_pk,
                 pseudo_rate: scan_pk.clone(),     // unused by this suite
                 badge_request: scan_pk.clone(),   // unused by this suite
-                authorship_pred: pred_pk.clone(), // unused by this suite
-                badge_pred: pred_pk.clone(),      // unused by this suite
+                show_badge: pred_pk.clone(),     // unused by this suite
+                merge_personas: pred_pk.clone(), // unused by this suite
+                rep_at_least: pred_pk.clone(),   // unused by this suite
                 join: join_pk,
                 not_banned: not_banned_pk,
                 scan: scan_pk,
@@ -1226,38 +1233,20 @@ mod e2e {
         assert!(!m.scan_needed());
     }
 
-    /// A badge proof is only as good as the root it is made against. A forger gives its
-    /// own object the public FACULTY value (no approval, no callback), builds a one-leaf
-    /// tree around it and proves possession: the proof verifies cryptographically, but its
-    /// root is not one the group's replica ever produced, which is what the verifier must
-    /// check (`Replica::has_produced_root`).
+    /// A badge shown in a post is only as good as the root the post is proved against. A
+    /// forger gives its own object the public FACULTY value (no approval, no callback),
+    /// builds a one-leaf tree around it and makes a ShowBadge post: its proof is valid, but
+    /// it names a root the group never produced, so the group's replica never applies it.
     #[test]
     #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
-    fn e2e_forged_badge_proof_names_a_root_the_group_never_had() {
-        use personas_core::circuits::{BadgesArgs, BadgesArgsVar, FACULTY_F, badge_pred};
+    fn e2e_forged_badge_post_names_a_root_the_group_never_had() {
+        use personas_core::circuits::{Claim, ClaimArgs, FACULTY_F, get_claim_interaction};
         let mut rng = StdRng::seed_from_u64(43);
-        let keys = keygen(&mut rng);
-        let (badge_pk, badge_vk): (PK, VK) = generate_keys_for_statement_in::<
-            F,
-            H,
-            MsgUser,
-            BadgesArgs<F>,
-            BadgesArgsVar<F>,
-            (),
-            (),
-            Snark,
-            ObjT,
-        >(
-            &mut rng,
-            badge_pred,
-            None,
-            BadgesArgs {
-                i: F::from(1u64),
-                claimed: F::from(0u64),
-            },
-        );
-        let mut member_keys = keys.member.clone();
-        member_keys.badge_pred = badge_pk;
+        let mut keys = keygen(&mut rng);
+        let (badge_pk, badge_vk): (PK, VK) = get_claim_interaction(Claim::ShowBadge)
+            .generate_keys::<H, Snark, Cr, ObjT>(&mut rng, None, ClaimArgs::default(), false);
+        keys.member.show_badge = badge_pk;
+        keys.replica.show_badge = badge_vk;
 
         // A real group the forger is not part of.
         let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
@@ -1266,35 +1255,31 @@ mod e2e {
             ConversationId("forgery".into()),
             keys.replica.clone(),
             config(),
-            Some(Member::create(member_keys.clone(), &mut rng)),
+            Some(Member::create(keys.member.clone(), &mut rng)),
         );
         let join = group.emit_join(&mut rng, acct()).unwrap();
         deliver(&mut group, &join);
         group.barrier();
 
-        let mut forger = Member::create(member_keys, &mut rng);
+        let mut forger = Member::create(keys.member.clone(), &mut rng);
         forger.user.data.badge1 = *FACULTY_F;
         let mut own_tree = ObjT::new();
         own_tree.push(forger.commitment(), F::from(0u64), Vec::new());
-        let (root, proof) = forger
-            .badge(&mut rng, &own_tree, F::from(1u64), *FACULTY_F)
-            .expect("a proof against the forger's own tree");
-        let bytes =
-            personas_core::encode_badge_proof(&proof, &[F::from(1u64), *FACULTY_F, root]).unwrap();
-
-        assert!(
-            personas_core::verify_badge_proof(&badge_vk, &bytes).is_some(),
-            "the forged proof is cryptographically valid — which is the whole problem"
-        );
-        assert!(
-            !group.replica().has_produced_root(root),
-            "but its root is not one the group produced, so it must be refused"
-        );
-        assert!(
-            group
-                .replica()
-                .has_produced_root(group.replica().obj_root())
-        );
+        let post = forger
+            .post_show_badge(&mut rng, &own_tree, "I am faculty", F::from(9u64), 1)
+            .expect("a post against the forger's own tree");
+        let (bytes, eh) = record::encode(&post).unwrap();
+        let forged = Emitted {
+            bytes,
+            eh,
+            persona: None,
+        };
+        let status = deliver(&mut group, &forged).unwrap().unwrap();
+        assert_ne!(status, Status::Applied, "a root the group never produced is not applied");
+        group.barrier();
+        group.barrier();
+        assert_ne!(group.replica().status(&eh), Some(Status::Applied));
+        assert!(group.replica().log().iter().all(|e| e.eh != eh), "nothing is shown");
     }
 
     /// Proven joins, one per account, and the admin-approved re-join a reset needs.
@@ -1799,11 +1784,12 @@ mod e2e {
         assert_eq!(admin.replica().poll(&poll.eh).unwrap().ban_tally(), (1, 0));
     }
 
-    /// A vote does not wait for the member's last action to settle, and being proved from
-    /// the object before it changes nothing: same pseudonym, so still one ballot.
+    /// A vote is an interaction like a post (protocol version 5): it waits for the
+    /// member's last action to settle, spends the object and files a callback. A second
+    /// ballot is still the same poll pseudonym, so still one member, one vote.
     #[test]
     #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
-    fn e2e_a_vote_does_not_wait_for_a_post_to_settle() {
+    fn e2e_a_vote_is_an_interaction_and_waits_like_a_post() {
         let mut rng = StdRng::seed_from_u64(39);
         let keys = keygen(&mut rng);
         let (mut admin, mut alice, _) = joined_pair(&mut rng, &keys, "vote-now");
@@ -1814,10 +1800,22 @@ mod e2e {
 
         let post = alice.emit_post_anon(&mut rng, "text").unwrap();
         status_of(&mut admin, &post);
-        assert!(!alice.is_settled() && alice.can_prove_identity());
+        assert!(!alice.is_settled());
+        assert!(
+            alice.emit_vote(&mut rng, poll.eh, 0).is_err(),
+            "a vote waits for the post before it to settle"
+        );
+
+        settle(&mut [&mut admin, &mut alice]);
+        let callbacks_before = alice.member().unwrap().user.num_outstanding_callbacks();
         let first = alice.emit_vote(&mut rng, poll.eh, 0).unwrap();
         assert_eq!(status_of(&mut admin, &first), Status::Applied);
-        assert!(!alice.is_settled(), "voting left the newest object in place");
+        assert!(!alice.is_settled(), "the ballot spent the object");
+        assert_eq!(
+            alice.member().unwrap().user.num_outstanding_callbacks(),
+            callbacks_before + 1,
+            "the ballot filed a callback"
+        );
 
         settle(&mut [&mut admin, &mut alice]);
         let second = alice.emit_vote(&mut rng, poll.eh, 1).unwrap();

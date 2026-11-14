@@ -24,13 +24,13 @@
 use ark_ff::PrimeField;
 use axum::extract::{Json, State};
 use axum::response::Response;
-use personas_core::circuits::{BadgesArgs, PseudonymArgs, PseudonymArgsRate};
+use personas_core::circuits::{BadgesArgs, Claim, ClaimArgs, PseudonymArgs, PseudonymArgsRate, check_claim, describe_claim};
 use personas_core::{Args, Cr, F, Snark, VK, persona};
 use personas_wire::{Kind, decode};
 use serde::Deserialize;
 use zk_callbacks::generic::user::ExecutedMethod;
 
-use transport_api::{Attachment, ConversationId, MessageId, Outgoing};
+use transport_api::{ConversationId, MessageId, Outgoing};
 
 use crate::bench;
 use crate::bulletin::{INTERACTION, epoch, verify_and_store};
@@ -65,12 +65,6 @@ pub struct SignalReact {
 }
 
 #[derive(Deserialize)]
-pub struct SignalProofOnly {
-    pub proof: Vec<u8>,
-    pub group_id: String,
-}
-
-#[derive(Deserialize)]
 pub struct SlackPost {
     pub channel: String,
     pub message: String,
@@ -90,14 +84,6 @@ pub struct SlackProofOnly {
     pub proof: Vec<u8>,
 }
 
-#[derive(Deserialize)]
-pub struct SlackClaimBadge {
-    pub channel: String,
-    pub badge_bytes: Vec<u8>,
-    pub badge_name: String,
-    pub proof: Vec<u8>,
-}
-
 /// What a post claims about its author.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Flavour {
@@ -108,6 +94,9 @@ pub enum Flavour {
     Pseudo,
     /// A pseudonym plus an index, so a member can be held to *k* posts per context.
     PseudoRate,
+    /// A pseudonym that also shows a badge, merges a second persona, or proves reputation
+    /// at least a threshold: an interaction with a callback, like any post.
+    Claim(Claim),
 }
 
 impl Flavour {
@@ -116,6 +105,7 @@ impl Flavour {
             Self::Anon => Kind::Post,
             Self::Pseudo => Kind::PostPseudo,
             Self::PseudoRate => Kind::PostPseudoRate,
+            Self::Claim(_) => Kind::PostClaim,
         }
     }
 
@@ -124,6 +114,9 @@ impl Flavour {
             Self::Anon => state.keys.standard_verifying_key.clone(),
             Self::Pseudo => state.keys.standard_pseudo_verifying_key.clone(),
             Self::PseudoRate => state.keys.standard_pseudor_verifying_key.clone(),
+            Self::Claim(Claim::ShowBadge) => state.keys.show_badge_verifying_key.clone(),
+            Self::Claim(Claim::MergePersonas) => state.keys.merge_personas_verifying_key.clone(),
+            Self::Claim(Claim::RepAtLeast) => state.keys.rep_at_least_verifying_key.clone(),
         }
     }
 }
@@ -141,6 +134,48 @@ struct Verified {
     /// plain pseudonym's context is minted client-side and belongs to no thread, so it is not
     /// carried here: it would send the message looking for a thread that does not exist.
     context: Option<String>,
+    /// What a post with a claim proves about its author, shown above its message.
+    claim: Option<String>,
+}
+
+/// Verify a ballot: a Persona-post interaction under `poll_context`, whose pseudonym is
+/// `claimed`. Appends it to the bulletin like any interaction (protocol version 5: every
+/// feature leaves a callback), but files its callback under no message, so nothing can
+/// target a ballot.
+pub(super) fn verify_vote(
+    st: &mut ServerState,
+    proof: &[u8],
+    poll_context: F,
+    claimed: F,
+    payload: F,
+) -> AppResult<()> {
+    let vk = st.keys.standard_pseudo_verifying_key.clone();
+    let mut reader = decode(Kind::PostPseudo, proof)?;
+    let exec: ExecutedMethod<F, Snark, Args, Cr, 1> = reader.pull()?;
+    let inputs = pub_inputs(&mut reader, 2)?;
+    if inputs[0] != poll_context {
+        return Err(AppError::Rejected("this vote is proved for a different poll".into()));
+    }
+    if inputs[1] != claimed {
+        return Err(AppError::Rejected("this vote proves a different pseudonym".into()));
+    }
+    let current = epoch(&st.db);
+    let (result, start, millis) = bench::time(|| {
+        verify_and_store(
+            &mut st.db,
+            &vk,
+            exec,
+            PseudonymArgs {
+                context: poll_context,
+                claimed,
+                payload,
+            },
+            current,
+            INTERACTION,
+        )
+    });
+    bench::verified("pseudo_vote", start, millis);
+    result.map(|_callbacks| ())
 }
 
 /// Verify a post of any flavour, append it to the bulletin.
@@ -155,6 +190,7 @@ fn verify_post(
     flavour: Flavour,
     proof: &[u8],
     label: &str,
+    claim_payload: F,
 ) -> AppResult<Verified> {
     let vk = flavour.verifying_key(st);
     let mut reader = decode(flavour.kind(), proof)?;
@@ -167,6 +203,7 @@ fn verify_post(
                 callbacks,
                 persona: None,
                 context: None,
+                claim: None,
             }),
 
         Flavour::Pseudo => {
@@ -192,6 +229,7 @@ fn verify_post(
                 // context the *client* invented for that pseudonym; it names no thread, and
                 // looking one up would refuse every post that is not a threaded reply.
                 context: None,
+                claim: None,
             })
         }
 
@@ -216,6 +254,37 @@ fn verify_post(
                 callbacks,
                 persona: Some(persona::petname(claimed)),
                 context: Some(field_to_string(context)),
+                claim: None,
+            })
+        }
+
+        Flavour::Claim(claim) => {
+            let inputs = pub_inputs(&mut reader, 4)?;
+            let (context, claimed, a, b) = (inputs[0], inputs[1], inputs[2], inputs[3]);
+            check_claim(claim, context, a, b).map_err(|why| AppError::Rejected(why.into()))?;
+
+            verify_and_store(
+                &mut st.db,
+                &vk,
+                exec,
+                ClaimArgs {
+                    post: PseudonymArgs {
+                        context,
+                        claimed,
+                        payload: claim_payload,
+                    },
+                    a,
+                    b,
+                },
+                current,
+                INTERACTION,
+            )
+            .map(|callbacks| Verified {
+                callbacks,
+                persona: Some(persona::petname(claimed)),
+                // A plain persona's context, like `Pseudo`: it names no thread.
+                context: None,
+                claim: Some(describe_claim(claim, a, b)),
             })
         }
     });
@@ -384,52 +453,33 @@ pub async fn signal_react(
     .await
 }
 
-/// Prove that two pseudonyms are the same member, without saying which member.
-pub async fn signal_authorship(
+/// MergePersonas: a post under one persona proving a second persona is the same member,
+/// without saying which member.
+pub async fn signal_merge_personas(
     State(state): State<ServerLock>,
-    Json(input): Json<SignalProofOnly>,
+    Json(input): Json<SignalPost>,
 ) -> AppResult<Response> {
-    let (name1, name2) = {
-        let st = state.read().await;
-        let vk = st.keys.authorship_pred_verifying_key.clone();
-        let inputs = verify_predicate(&vk, &input.proof, "author", "Cannot claim authorship")?;
-        (persona::petname(inputs[1]), persona::petname(inputs[3]))
-    };
-
-    let mut body = String::from("CLAIMED AUTHORSHIP INITIATED\n\n");
-    body.push_str(
-        "This message proves that the following two pseudonyms belong to the same anonymous \
-         user:\n\n",
-    );
-    body.push_str(&format!("• {name1}\n• {name2}\n\n"));
-    body.push_str("This demonstrates authorship continuity without revealing identity.\n\n");
-
-    send_plain(&state, Namespace::Signal, input.group_id, body).await?;
-    bench::close_latency("author");
-    Ok(ok())
+    let flavour = Flavour::Claim(Claim::MergePersonas);
+    post(state, Namespace::Signal, flavour, "author", input.group_id, input.message, input.proof, None).await
 }
 
-/// Claim a badge under a pseudonym.
-pub async fn signal_badges(
+/// ShowBadge: a post under a persona showing a badge its member holds.
+pub async fn signal_show_badge(
     State(state): State<ServerLock>,
-    Json(input): Json<SignalProofOnly>,
+    Json(input): Json<SignalPost>,
 ) -> AppResult<Response> {
-    let badge = {
-        let st = state.read().await;
-        let vk = st.keys.badge_pred_verifying_key.clone();
-        let inputs = verify_predicate(&vk, &input.proof, "badge", "Cannot claim badge")?;
-        inputs[1].to_string()
-    };
+    let flavour = Flavour::Claim(Claim::ShowBadge);
+    post(state, Namespace::Signal, flavour, "badge", input.group_id, input.message, input.proof, None).await
+}
 
-    let mut body = String::from("CLAIMED BADGE INITIATED\n\n");
-    body.push_str(
-        "This message demonstrates that the following badge belongs to anonymous user:\n\n",
-    );
-    body.push_str(&badge);
-
-    send_plain(&state, Namespace::Signal, input.group_id, body).await?;
-    bench::close_latency("badge");
-    Ok(ok())
+/// RepAtLeast: a post under a persona proving its member's reputation is at least a
+/// threshold.
+pub async fn signal_rep_at_least(
+    State(state): State<ServerLock>,
+    Json(input): Json<SignalPost>,
+) -> AppResult<Response> {
+    let flavour = Flavour::Claim(Claim::RepAtLeast);
+    post(state, Namespace::Signal, flavour, "rep_at_least", input.group_id, input.message, input.proof, None).await
 }
 
 // ---------------------------------------------------------------------------------------
@@ -559,55 +609,48 @@ pub async fn slack_request_badge(
     Ok(ok())
 }
 
-/// Show off a badge you hold, as an image, under a pseudonym.
-pub async fn slack_claim_badge(
+/// ShowBadge on Slack, relayed as a normal message so it has a callback target.
+pub async fn slack_show_badge(
     State(state): State<ServerLock>,
-    Json(input): Json<SlackClaimBadge>,
+    Json(input): Json<SlackPost>,
 ) -> AppResult<Response> {
-    let index = {
-        let st = state.read().await;
-        let vk = st.keys.badge_pred_verifying_key.clone();
-        let inputs = verify_predicate(&vk, &input.proof, "badge", "Cannot claim badge")?;
-        field_to_string(inputs[0])
-    };
-
-    let mut caption = String::from(":label: CLAIMED BADGE INITIATED\n\n");
-    caption.push_str("The following anonymous user holds the following badge:\n");
-    caption.push_str(badge_name(&index));
-
-    let transport = state.read().await.slack.transport.clone();
-    let mut msg = Outgoing::new(ConversationId(input.channel), caption);
-    msg.attachments.push(Attachment {
-        filename: input.badge_name,
-        content_type: "png".into(),
-        bytes: input.badge_bytes,
-    });
-
-    transport.send(msg).await?;
-    Ok(ok())
+    post(
+        state,
+        Namespace::Slack,
+        Flavour::Claim(Claim::ShowBadge),
+        "badge",
+        input.channel,
+        input.message,
+        input.proof,
+        None,
+    )
+    .await
 }
 
-pub async fn slack_authorship(
+/// MergePersonas on Slack.
+pub async fn slack_merge_personas(
     State(state): State<ServerLock>,
-    Json(input): Json<SlackProofOnly>,
+    Json(input): Json<SlackPost>,
 ) -> AppResult<Response> {
-    let (name1, name2) = {
-        let st = state.read().await;
-        let vk = st.keys.authorship_pred_verifying_key.clone();
-        let inputs = verify_predicate(&vk, &input.proof, "author", "Cannot claim authorship")?;
-        (persona::petname(inputs[1]), persona::petname(inputs[3]))
-    };
+    let flavour = Flavour::Claim(Claim::MergePersonas);
+    post(state, Namespace::Slack, flavour, "author", input.channel, input.message, input.proof, None).await
+}
 
-    let mut body = String::from("CLAIMED AUTHORSHIP INITIATED\n\n");
-    body.push_str(
-        "This message proves that the following two pseudonyms belong to the same anonymous \
-         user:\n\n",
-    );
-    body.push_str(&format!("1. {name1}\n2. {name2}\n\n"));
-    body.push_str("This demonstrates authorship continuity without revealing identity.\n\n");
+/// RepAtLeast on Slack.
+pub async fn slack_rep_at_least(
+    State(state): State<ServerLock>,
+    Json(input): Json<SlackPost>,
+) -> AppResult<Response> {
+    let flavour = Flavour::Claim(Claim::RepAtLeast);
+    post(state, Namespace::Slack, flavour, "rep_at_least", input.channel, input.message, input.proof, None).await
+}
 
-    send_plain(&state, Namespace::Slack, input.channel, body).await?;
-    Ok(ok())
+/// A post's message with its claim, if it has one, shown above it.
+fn with_claim(verified: &Verified, message: String) -> String {
+    match &verified.claim {
+        Some(claim) => format!("✔ This persona {claim}.\n\n{message}"),
+        None => message,
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -627,12 +670,17 @@ async fn post(
 ) -> AppResult<Response> {
     let (verified, thread) = {
         let mut st = state.write().await;
-        let verified = verify_post(&mut st, flavour, &proof, label)?;
+        let payload = if matches!(flavour, Flavour::Claim(_)) {
+            persona::server_claim_payload(&conversation, &message)
+        } else {
+            F::from(0)
+        };
+        let verified = verify_post(&mut st, flavour, &proof, label, payload)?;
         let thread = thread_for(&st, ns, &verified)?;
         (verified, thread)
     };
 
-    let mut msg = Outgoing::new(ConversationId(conversation), message);
+    let mut msg = Outgoing::new(ConversationId(conversation), with_claim(&verified, message));
     // An explicit reply target (this is a reply) wins over the thread a rate-limited post
     // belongs to; they are never both set.
     msg.reply_to = reply_to.or(thread);
@@ -679,43 +727,7 @@ async fn react(
     Ok(ok())
 }
 
-/// Relay a message that carries no callback — an authorship or badge claim. The proof has
-/// already been checked; there is nothing to file.
-async fn send_plain(
-    state: &ServerLock,
-    ns: Namespace,
-    conversation: String,
-    body: String,
-) -> AppResult<MessageId> {
-    let transport = state.read().await.channel(ns).transport.clone();
-    let sent = transport
-        .send(Outgoing::new(ConversationId(conversation), body))
-        .await?;
-    Ok(sent.id)
-}
 
-/// Verify a standalone Groth16 predicate proof and hand back its public inputs.
-///
-/// Used by every claim that changes nothing: an authorship claim, a badge claim, a vote. The
-/// member proves a statement about their object without touching the bulletin, so there is no
-/// interaction to append and no callback to file.
-pub fn verify_predicate(vk: &VK, proof: &[u8], label: &str, refusal: &str) -> AppResult<Vec<F>> {
-    use ark_snark::SNARK;
-
-    let mut reader = decode(Kind::Predicate, proof)?;
-    let proof: <Snark as SNARK<F>>::Proof = reader.pull()?;
-    let inputs: Vec<F> = reader.pull()?;
-
-    let (verified, start, millis) = bench::time(|| Snark::verify(vk, &inputs, &proof));
-    bench::verified(label, start, millis);
-
-    match verified {
-        Ok(true) => Ok(inputs),
-        Ok(false) | Err(_) => Err(AppError::Rejected(format!(
-            "{refusal}: proof failed. Check if you are banned."
-        ))),
-    }
-}
 
 /// Public inputs, checked for length before anything indexes into them.
 ///

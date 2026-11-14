@@ -133,14 +133,19 @@ impl PersonaClient {
         self.fetch_pk("api/user/arbitrary_pred_proving_key")
     }
 
-    /// Proving two pseudonyms share an author (`authorship_pred`).
-    pub fn authorship_pred_pk(&self) -> PK {
-        self.fetch_pk("api/user/arbitrary_pred_proving_key2")
+    /// A post that shows a badge (ShowBadge).
+    pub fn show_badge_pk(&self) -> PK {
+        self.fetch_pk("api/interaction/claim/show_badge/proving_key")
     }
 
-    /// Proving a badge is held under a pseudonym (`badge_pred`).
-    pub fn badge_pred_pk(&self) -> PK {
-        self.fetch_pk("api/user/arbitrary_pred_proving_key3")
+    /// A post that merges a second persona (MergePersonas).
+    pub fn merge_personas_pk(&self) -> PK {
+        self.fetch_pk("api/interaction/claim/merge_personas/proving_key")
+    }
+
+    /// A post that proves reputation at least a threshold (RepAtLeast).
+    pub fn rep_at_least_pk(&self) -> PK {
+        self.fetch_pk("api/interaction/claim/rep_at_least/proving_key")
     }
 
     /// Privacy Pass: blinding a requested ticket (FINDINGS O7).

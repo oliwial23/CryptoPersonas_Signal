@@ -45,7 +45,7 @@ use transport_api::{ConversationId, Incoming, Sent, Transport, TransportError};
 use personas_bulletin::merkle::callback::{DEFAULT_CB_MEMB_HEIGHT, DEFAULT_CB_NMEMB_HEIGHT};
 use personas_bulletin::merkle::MerkleObjStore;
 use personas_bulletin::merkle::obj::DEFAULT_OBJ_HEIGHT;
-use personas_bulletin::replica::record::{self, Ark, Eh, Flavour, PollKind, Record, SpentObject};
+use personas_bulletin::replica::record::{self, Ark, Eh, PollKind, Record, SpentObject};
 use personas_bulletin::replica::{
     Config, Replica, ReplicaKeys, Status, VIEW_CLAIM_LAG, ViewReport, SETTLE_LAG,
 };
@@ -724,15 +724,51 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         self.emit(member::open_poll(question, options, kind, target))
     }
 
-    /// Cast a ballot in `poll`.
+    /// Cast a ballot in `poll`. An interaction like a post (protocol version 5): it spends
+    /// the object and files a callback, so it waits for a settled object as a post does.
     pub fn emit_vote(
         &mut self,
         rng: &mut (impl CryptoRng + RngCore),
         poll: Eh,
         option: u32,
     ) -> Result<Emitted, SendError> {
-        let record = self.prove_identity(|member, settled| member.vote(rng, settled, poll, option))?;
-        self.emit(record)
+        self.emit_spending(|_, settled, member| member.vote(rng, settled, poll, option))
+    }
+
+    /// ShowBadge: a post under the persona of `context` showing the badge in `slot`.
+    pub fn emit_post_show_badge(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        body: impl Into<String>,
+        context: F,
+        slot: u8,
+    ) -> Result<Emitted, SendError> {
+        self.emit_spending(|_, settled, member| member.post_show_badge(rng, settled, body, context, slot))
+    }
+
+    /// MergePersonas: a post under the persona of `context` proving the persona of
+    /// `other_context` is the same author.
+    pub fn emit_post_merge_personas(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        body: impl Into<String>,
+        context: F,
+        other_context: F,
+    ) -> Result<Emitted, SendError> {
+        self.emit_spending(|_, settled, member| {
+            member.post_merge_personas(rng, settled, body, context, other_context)
+        })
+    }
+
+    /// RepAtLeast: a post under the persona of `context` proving reputation `>= rho`.
+    pub fn emit_post_rep_at_least(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        body: impl Into<String>,
+        context: F,
+        rho: i64,
+    ) -> Result<Emitted, SendError> {
+        self.emit_spending(|_, settled, member| member.post_rep_at_least(rng, settled, body, context, rho))
     }
 
     /// Rate `target` by `delta` (§10).
@@ -744,50 +780,6 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     ) -> Result<Emitted, SendError> {
         let record = self.prove_identity(|member, settled| member.rate(rng, settled, target, delta))?;
         self.emit(record)
-    }
-
-    /// Prove that two of OUR pseudonyms share an author, returning the encoded proof
-    /// and its public inputs.
-    ///
-    /// Not an `emit_*`: this produces no record and folds nothing into the replica. An
-    /// authorship proof is a read-only statement about our object, so it needs no
-    /// accept rule, no `Record` variant and no convergence story — it travels as
-    /// display payload and each recipient verifies it independently.
-    ///
-    /// Both pseudonyms are identified by their CONTEXT; the claimed values are derived
-    /// from our own secret key inside the proof, which is the whole content of the
-    /// claim.
-    pub fn prove_authorship(
-        &mut self,
-        rng: &mut (impl CryptoRng + RngCore),
-        context_a: F,
-        context_b: F,
-    ) -> Result<Vec<u8>, SendError> {
-        let (root, claimed_a, claimed_b, proof) = {
-            let (_, settled, member) = self.parts_mut()?;
-            member.authorship(rng, settled, context_a, context_b)?
-        };
-        // PUBLIC INPUT LAYOUT: pub_args first, THEN the membership root.
-        //
-        // `[ctx_a, claimed_a, ctx_b, claimed_b, obj_root]`. The first four are the
-        // order `PseudonymArgsPairVar`'s AllocVar allocates (circuits.rs: a.context,
-        // a.claimed, b.context, b.claimed); the root comes last because
-        // `prove_statement_and_in` against a MERKLE store allocates the membership root
-        // as a public input after the predicate's own arguments. The replica documents
-        // and relies on exactly this convention for the single-pseudonym case:
-        // "[context, claimed, obj_root] — pub_args first, then the membership root"
-        // (replica/mod.rs, `memo_predicate`).
-        //
-        // Omitting the root was the original bug here. It produced a proof that
-        // generated fine and then failed verification every time, because the verifier
-        // was handed four inputs for a five-input statement. The as-a-service
-        // `make_authorship_proof` really does use four — but it proves against a
-        // SIGNATURE-based store, which exposes membership differently, so copying its
-        // layout into the Merkle path was wrong.
-        let inputs = [context_a, claimed_a, context_b, claimed_b, root];
-        let out = personas_core::encode_authorship_proof(&proof, &inputs)?;
-        self.record_proof_only(out.len());
-        Ok(out)
     }
 
     /// Emit a badge REQUEST (files the ticket an approver invokes).
@@ -807,28 +799,6 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         // No proof: nothing to time but the fold.
         self.op_started = None;
         self.emit(Record::BadgeApprove { target, slot })
-    }
-
-    /// Prove we hold `badge` in slot `i`, returning the encoded proof and its public
-    /// inputs `[i, claimed, obj_root]`.
-    ///
-    /// Same shape as `prove_authorship`: read-only, no record, no accept rule. The badge
-    /// itself must already be in our object — it gets there only when an approver
-    /// invokes our callback with a BADGE flag and we then scan.
-    pub fn prove_badge(
-        &mut self,
-        rng: &mut (impl CryptoRng + RngCore),
-        i: F,
-        badge: F,
-    ) -> Result<Vec<u8>, SendError> {
-        let (root, proof) = {
-            let (_, settled, member) = self.parts_mut()?;
-            member.badge(rng, settled, i, badge)?
-        };
-        // pub_args first, then the root — the Merkle convention.
-        let out = personas_core::encode_badge_proof(&proof, &[i, badge, root])?;
-        self.record_proof_only(out.len());
-        Ok(out)
     }
 
     /// Produce a scan absorbing every callback invoked on this member since its last
@@ -1057,8 +1027,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         self.last_op
     }
 
-    // A proof that is not a record (authorship, badge possession, not banned): proving
-    // only, nothing folded into the replica.
+    // The not-banned proof for an admin-approved rejoin is verified outside the replica.
     fn record_proof_only(&mut self, bytes: usize) {
         self.last_op = OpTimings {
             prove_us: self.op_started.take().map_or(0, micros_since),
@@ -1126,7 +1095,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         })
     }
 
-    /// Whether this member could vote or rate right now, which needs a settled object but
+    /// Whether this member could rate right now, which needs a settled object but
     /// not its newest one ([`Messenger::prove_identity`]).
     pub fn can_prove_identity(&self) -> bool {
         self.is_settled()
@@ -1137,10 +1106,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             })
     }
 
-    /// Prove something that spends nothing, a vote or a rating. Such a proof shows who a
-    /// member is, not what its object holds, and every object of a member shares one key
-    /// and so one pseudonym. So while the newest object settles, the one before it serves:
-    /// the member need not wait and still gets one ballot or rating.
+    /// Prove a rating from a settled object. Every object of a member shares one key,
+    /// so the previous object yields the same per-target pseudonym while the newest
+    /// object settles.
     fn prove_identity(
         &mut self,
         prove: impl FnOnce(&Member, &MerkleObjStore<F, OH>) -> Result<Record, MemberError>,
@@ -1213,11 +1181,9 @@ fn now_ms() -> u64 {
 /// or `None` for an anonymous or non-post record.
 fn persona_for(record: &Record) -> Option<String> {
     match record {
-        Record::Post {
-            flavour: Flavour::Pseudo | Flavour::PseudoRate,
-            extra,
-            ..
-        } => extra.0.get(1).map(|claimed| persona::petname(*claimed)),
+        Record::Post { flavour, extra, .. } if flavour.has_persona() => {
+            Some(persona::petname(extra.0[1]))
+        }
         _ => None,
     }
 }

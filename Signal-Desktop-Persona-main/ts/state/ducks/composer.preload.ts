@@ -64,7 +64,6 @@ import {
   nameForContext,
 } from '../../services/personasTopics.preload.ts';
 import { getSelectedBadgeIfHeld } from '../../services/personasBadgeState.preload.ts';
-import { sendAuthorshipClaim as doSendAuthorshipClaim } from '../../services/personasAuthorship.preload.ts';
 import {
   createPseudonym,
   recordPetname,
@@ -79,6 +78,7 @@ import {
   sendPersonaPoll,
   drainPersonaScans,
   ensureReadyForPersonaAction,
+  inPersonaActionOrder,
   runFullPersonaSweep,
   isPersonaBanned,
 } from '../../services/personasActions.preload.ts';
@@ -150,13 +150,15 @@ import {
   approveBadge as doApproveBadge,
   dismissBadgeRequest as doDismissBadgeRequest,
 } from '../../services/personasBadgeFlow.preload.ts';
-import { sendBadgeProof as doSendBadgeProof } from '../../services/personasBadgeProof.preload.ts';
 import {
   approvePersonasReset as doApprovePersonaReset,
   dismissResetRequest as doDismissResetRequest,
   requestPersonasReset as doRequestPersonaReset,
 } from '../../services/personasReset.preload.ts';
-import { encodePostText } from '../../services/personasCarriage.std.ts';
+import {
+  encodePostText,
+  type PersonaPostClaim,
+} from '../../services/personasCarriage.std.ts';
 
 const { debounce, isEqual } = lodash;
 
@@ -424,26 +426,6 @@ function createPersonaPseudonym(
   };
 }
 
-// Send a ZK-PROVED authorship claim linking two of our own pseudonyms.
-//
-// Takes the two CONTEXTS (for an unlimited pseudonym, its nonce) rather than petnames:
-// the names are an OUTPUT of verification, not an input to proving. Passing names in
-// would reintroduce exactly the gap this replaced — a claim about whatever the sender
-// chose to type. See personasAuthorship.preload.ts.
-function sendPersonaAuthorshipClaim(
-  conversationId: string,
-  contextA: number,
-  contextB: number
-): ThunkAction<void, RootStateType, unknown, NoopActionType> {
-  return async dispatch => {
-    const conversation = window.ConversationController.get(conversationId);
-    if (conversation) {
-      await doSendAuthorshipClaim(conversation, contextA, contextB);
-    }
-    dispatch(noopAction('sendPersonaAuthorshipClaim'));
-  };
-}
-
 // Ask for a badge (1=Faculty, 2=Student, 3=Industry). Files a ticket for an admin.
 function requestPersonaBadge(
   conversationId: string,
@@ -526,40 +508,6 @@ function joinPersonaBulletin(
       }
     }
     dispatch(noopAction('joinPersonaBulletin'));
-  };
-}
-
-// PROVE badge possession in zero knowledge. Distinct from the composer's badge
-// selector, which attaches an unverified label to a post: this publishes a Groth16
-// proof over `badge_pred` that is checked by every recipient before it renders.
-function provePersonaBadge(
-  conversationId: string,
-  badge: string
-): ThunkAction<
-  void,
-  RootStateType,
-  unknown,
-  NoopActionType | ShowToastActionType
-> {
-  return async dispatch => {
-    const conversation = window.ConversationController.get(conversationId);
-    if (conversation) {
-      const result = await doSendBadgeProof(conversation, badge);
-      dispatch(
-        showToast(
-          result.ok
-            ? {
-                toastType: ToastType.PersonaBadgeProved,
-                parameters: { badge: result.badge },
-              }
-            : {
-                toastType: ToastType.PersonaActionFailed,
-                parameters: { reason: result.reason },
-              }
-        )
-      );
-    }
-    dispatch(noopAction('provePersonaBadge'));
   };
 }
 
@@ -725,7 +673,6 @@ function scanPersonaCallbacksNow(
 }
 
 export const actions = {
-  sendPersonaAuthorshipClaim,
   scanPersonaCallbacksNow,
   requestPersonaBadge,
   approvePersonaBadge,
@@ -734,7 +681,6 @@ export const actions = {
   turnOnPersonas,
   approvePersonaReset,
   dismissPersonaReset,
-  provePersonaBadge,
   joinPersonaBulletin,
   createPersonaPseudonym,
   personaPseudonymsChanged,
@@ -1137,6 +1083,7 @@ function sendMultiMediaMessage(
     // Personas demo: when set, this message is posted as a persona — routed
     // through the ZK engine and sent as a record (see composePersonaPost).
     personaChoice?: PersonaChoice;
+    personaClaim?: PersonaPostClaim;
     /** The context (thread) selected in the composer, for display on the message. */
     personaContextName?: string;
   }
@@ -1168,7 +1115,12 @@ function sendMultiMediaMessage(
 
     const state = getState();
 
-    await withPreSendChecks(conversationId, options, dispatch, async () => {
+    const { personaClaim } = options;
+    if (personaClaim && (options.personaChoice?.kind !== 'pseudo' || !message.trim())) {
+      return;
+    }
+    const preSendOptions = personaClaim ? { ...options, draftAttachments: [] } : options;
+    await withPreSendChecks(conversationId, preSendOptions, dispatch, async () => {
       let attachments: Array<AttachmentType> = [];
       if (voiceNoteAttachment) {
         attachments = [voiceNoteAttachment];
@@ -1183,7 +1135,7 @@ function sendMultiMediaMessage(
         conversationId
       );
 
-      const quote = conversationComposerState.quotedMessage?.quote;
+      const quote = personaClaim ? undefined : conversationComposerState.quotedMessage?.quote;
 
       const shouldSendHighQualityAttachments = window.reduxStore
         ? conversationComposerState.shouldSendHighQualityAttachments
@@ -1259,7 +1211,7 @@ function sendMultiMediaMessage(
         // may have to wait for their last action to settle.
         const { personaChoice } = options;
         preparePersonaPost = () =>
-          inPostOrder(conversationId, async () => {
+          inPersonaActionOrder(conversationId, async () => {
             // NEVER SCAN BECAUSE A POST IS ABOUT TO GO OUT: a scan right before a post links
             // the two. Scans run on the public schedule (personasScanSchedule). The one wait
             // here is for a sweep already under way, because the engine refuses a post until
@@ -1274,7 +1226,7 @@ function sendMultiMediaMessage(
                   toastType: ToastType.PersonaActionFailed,
                   parameters: {
                     reason:
-                      'a callback sweep is unfinished — open Persona status and press Scan now',
+                      'your last persona action or scan could not settle — try again in a moment',
                   },
                 })
               );
@@ -1288,22 +1240,21 @@ function sendMultiMediaMessage(
                   toastType: ToastType.PersonaActionFailed,
                   parameters: {
                     reason:
-                      'you have reached the post limit — open Persona status and press Scan now',
+                      'you have reached the interaction limit — open Persona status and press Scan now',
                   },
                 })
               );
               return undefined;
             }
-            // The badge to ride alongside this post — only if the member's own zk object
-            // actually CONTAINS it. Read at send time rather than baked into the choice so
-            // toggling it takes effect on the next message without re-picking a persona.
-            //
-            // `getSelectedBadgeIfHeld`, never `getSelectedBadge`: the selection is a
-            // preference file that survives a reset and was writable by earlier builds, so
-            // reading it directly let a merely-REQUESTED badge ride out on every post.
-            // Narrowing the composer menu did not fix that, because the menu is not on
-            // this path. The gate has to be here, where the claim reaches the wire.
-            const personaBadge = getSelectedBadgeIfHeld(personasGroupId);
+            const selectedBadge =
+              !personaClaim && personaChoice.kind === 'pseudo'
+                ? getSelectedBadgeIfHeld(personasGroupId)
+                : undefined;
+            const claim: PersonaPostClaim | undefined =
+              personaClaim ??
+              (selectedBadge
+                ? { kind: 'show_badge', badge: selectedBadge }
+                : undefined);
             // Only a RATE-LIMITED persona has a context; an unlimited pseudonym and an
             // anonymous post deliberately have none, and the absence of the chip is what
             // distinguishes them in the timeline.
@@ -1320,10 +1271,10 @@ function sendMultiMediaMessage(
               personasGroupId,
               encodePostText({
                 text: message,
-                badge: personaBadge,
                 contextName: personaContextName,
               }),
-              personaChoice
+              personaChoice,
+              claim
             );
             if (!post) {
               log.error(
@@ -1337,10 +1288,8 @@ function sendMultiMediaMessage(
             }
             // The engine only tells us a pseudonym's petname when it emits under it, so
             // this is where an unlimited persona's name becomes known.
-            if (personaChoice.kind === 'pseudo' && post.persona) {
-              if (personasGroupId) {
-                recordPetname(personasGroupId, personaChoice.nonce, post.persona);
-              }
+            if (personasGroupId && personaChoice.kind === 'pseudo' && post.persona) {
+              recordPetname(personasGroupId, personaChoice.nonce, post.persona);
             }
             const personaFields = {
               persona: post.persona,
@@ -1350,14 +1299,14 @@ function sendMultiMediaMessage(
               // "Anonymous" instead of falling through to the phantom contact.
               personaAnonymous: post.persona == null,
               personaRecordBase64: post.personaRecordBase64,
-              personaBadge,
+              personaClaim: post.claim,
               personaContextName,
             };
             log.info(
               `personas: sending post choice=${JSON.stringify(personaChoice)} ` +
               `persona=${personaFields.persona ?? '(anonymous)'} ` +
               `context=${personaFields.personaContextName ?? '(none)'} ` +
-              `badge=${personaFields.personaBadge ?? '(none)'}`
+              `claim=${claim?.kind ?? '(none)'}`
             );
             return personaFields;
           });
@@ -1369,7 +1318,7 @@ function sendMultiMediaMessage(
             body: message,
             attachments,
             quote,
-            preview: getLinkPreviewForSend(message),
+            preview: personaClaim ? undefined : getLinkPreviewForSend(message),
             bodyRanges,
             isViewOnce,
             personaAnonymous: options.personaChoice?.kind === 'anon' || undefined,
@@ -1378,9 +1327,13 @@ function sendMultiMediaMessage(
             sendHQImages,
             timestamp,
             preparePersonaPost,
+            dontClearDraft: personaClaim != null,
             // We rely on enqueueMessageForSend to call these within redux's batch
             extraReduxActions: () => {
               conversation.setMarkedUnread(false);
+              if (personaClaim) {
+                return;
+              }
               resetLinkPreview(conversationId);
               drop(
                 clearConversationDraftAttachments(
@@ -1409,19 +1362,6 @@ function sendMultiMediaMessage(
       }
     });
   };
-}
-
-// A member's posts go out in the order they were written, whatever each one waits for.
-const personaPostOrder = new Map<string, Promise<unknown>>();
-
-function inPostOrder<T>(
-  conversationId: string,
-  prepare: () => Promise<T>
-): Promise<T> {
-  const previous = personaPostOrder.get(conversationId) ?? Promise.resolve();
-  const next = previous.then(prepare, prepare);
-  personaPostOrder.set(conversationId, next);
-  return next;
 }
 
 function sendStickerMessage(

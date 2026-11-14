@@ -50,19 +50,7 @@ export const PERSONAS_SCAN_MARKER = 'PZS2:';
 // Topic announcements are NOT ZK records — see decodeTopicAnnouncement.
 export const PERSONAS_TOPIC_MARKER = 'PZT2:';
 
-// An AUTHORSHIP PROOF: "these two pseudonyms are the same author".
-//
-// It carries a real Groth16 proof over `authorship_pred`, verified on receipt by
-// `Engine::verify_authorship`, and a proof that fails is dropped rather than rendered.
-// It is NOT a bulletin record, though, so it is decoded by its own path and never handed
-// to `ingest` — which is why this marker is absent from ALL_MARKERS.
-//
-// PHANTOM-ROUTED. The proof establishes that two pseudonyms share an author while
-// revealing nothing about who that is; sending it under the author's real account would
-// answer that question in the envelope, for free, and make the proof pointless. It was
-// attributable only for as long as it was an unverified typed claim, which it no longer
-// is. (The names come from the proof's own public inputs, never from the body — see
-// personasAuthorship.preload.ts.)
+// Legacy standalone authorship carriage. New claims travel as post records.
 export const PERSONAS_AUTHORSHIP_MARKER = 'PZU2:';
 
 // A BADGE REQUEST. Its own marker, distinct from the attributable PZR2, for one reason:
@@ -88,19 +76,7 @@ export const PERSONAS_AUTHORSHIP_MARKER = 'PZU2:';
 // the same value for every member, which is why ordinary anonymous POSTS carry it too.
 export const PERSONAS_BADGE_MARKER = 'PZB2:';
 
-// A BADGE POSSESSION PROOF: "I hold a Faculty badge", proved in zero knowledge.
-//
-// Distinct from PZB2 (the request/approval records) and from the decorative `b` field
-// inside a post envelope, and the three must not be confused:
-//
-//   PZB2:  a bulletin RECORD. Goes to `ingest`. Files or settles a callback.
-//   PZG2:  a PROOF over `badge_pred`. Never ingested — verified and rendered.
-//   post `b`: a STRING the sender chose. Checked against nothing. Decorative.
-//
-// Like authorship, this is a proof rather than a record, so it is absent from
-// ALL_MARKERS and decoded by its own path. Phantom-routed for the same reason as
-// authorship: the proof demonstrates that SOMEONE in the group holds the credential
-// without saying who, and an attributable envelope would hand over the name for free.
+// Legacy standalone badge carriage. New badge proofs travel as post records.
 export const PERSONAS_BADGE_PROOF_MARKER = 'PZG2:';
 
 // Records that must ride the shared phantom identity, i.e. whose AUTHOR must be
@@ -151,6 +127,11 @@ export type PersonaChoice =
   // No linkable persona at all.
   | { kind: 'anon' };
 
+export type PersonaPostClaim =
+  | { kind: 'show_badge'; badge: string }
+  | { kind: 'merge_personas'; otherNonce: number }
+  | { kind: 'rep_at_least'; threshold: number };
+
 // Rate-limited personas per context: three. MUST match
 // `personas_core::circuits::RATE_LIMITED_PERSONAS_PER_CONTEXT` — every replica rejects a
 // rate-limited post whose index is at or above it, so offering more slots would produce
@@ -184,10 +165,8 @@ export function encodePostBody(bytes: Buffer | Uint8Array): string {
   return PERSONAS_POST_MARKER + Buffer.from(bytes).toString('base64');
 }
 
-// What a post says, as its proof covers it: the text, plus the badge and context name
-// shown with it. They go in the record's text so a relaying member cannot change them. The
-// badge is still only the author's claim, and a context name is still the author's label
-// for the context number in the proof; what this adds is that nobody else can alter them.
+// The optional labels were carried in the proved body. The legacy badge label
+// is decoded for compatibility; verified claims come from the accepted record.
 export type PersonaPostText = {
   text: string;
   badge?: string;
@@ -454,19 +433,7 @@ export type PersonaAuthorshipClaim = {
   second: string;
 };
 
-/**
- * Wrap a ZK authorship PROOF for the wire.
- *
- * Deliberately carries ONLY the proof. The previous version shipped the two petnames
- * as plain strings, which is what made the claim unverifiable: a recipient had nothing
- * to check and could only repeat what the sender asserted.
- *
- * Names are NOT carried, on purpose. They are recoverable from the proof's own public
- * inputs (`Engine.verifyAuthorship` returns them), and carrying them would create a
- * second, untrusted source for the same fact — which is exactly how a true checkmark
- * ends up next to a false statement. If a name is not in the message, it cannot be
- * believed by mistake.
- */
+/** Encode legacy standalone authorship carriage for compatibility tests. */
 export function encodeAuthorshipProof(proof: Uint8Array): string {
   return (
     PERSONAS_AUTHORSHIP_MARKER + Buffer.from(proof).toString('base64')

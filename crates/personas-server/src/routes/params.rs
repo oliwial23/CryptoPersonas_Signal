@@ -50,12 +50,16 @@ proving_key!(
     pseudonym_pred => pseudonym_pred_proving_key
 );
 proving_key!(
-    /// Proving two pseudonyms share an author.
-    authorship_pred => authorship_pred_proving_key
+    /// A post that shows a badge (ShowBadge).
+    show_badge => show_badge_proving_key
 );
 proving_key!(
-    /// Proving a badge is held under a pseudonym.
-    badge_pred => badge_pred_proving_key
+    /// A post that merges a second persona (MergePersonas).
+    merge_personas => merge_personas_proving_key
+);
+proving_key!(
+    /// A post that proves reputation at least a threshold (RepAtLeast).
+    rep_at_least => rep_at_least_proving_key
 );
 
 /// The Nova parameters for a folded scan. Tens of megabytes.

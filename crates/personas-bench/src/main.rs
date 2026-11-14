@@ -39,7 +39,7 @@ use std::time::Instant;
 use personas_bulletin::merkle::params::ensure_merkle_keys;
 use personas_bulletin::replica::record::PollKind;
 use personas_bulletin::replica::{Config, ReplicaKeys, SETTLE_LAG};
-use personas_core::{F, PreparedVk};
+use personas_core::F;
 use personas_messenger::{Emitted, Member, MemberKeys, Messenger, carriage};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -183,13 +183,13 @@ const OPS: &[&str] = &[
     "anon_post",
     "pseudo_post",
     "rate_limited_post",
-    "authorship",
+    "merge_personas",
     "vote",
     "rating",
     "badge_request",
-    "badge_proof",
+    "show_badge",
+    "rep_at_least",
     "scan",
-    "not_banned",
     "moderation",
 ];
 
@@ -290,9 +290,6 @@ struct Group {
     conv: ConversationId,
     transport: Arc<dyn Transport>,
     next_account: u8,
-    authorship_vk: PreparedVk,
-    badge_vk: PreparedVk,
-    not_banned_vk: PreparedVk,
 }
 
 fn incoming(conv: &ConversationId, bytes: &[u8]) -> Incoming {
@@ -346,9 +343,6 @@ impl Group {
             conv,
             transport,
             next_account: 1,
-            authorship_vk: PreparedVk::new(&keys.authorship_pred_verifying_key),
-            badge_vk: PreparedVk::new(&keys.badge_pred_verifying_key),
-            not_banned_vk: PreparedVk::new(&keys.not_banned_pred_verifying_key),
         };
         for who in [Who::Alice, Who::Bob, Who::Carol] {
             let account = group.account();
@@ -706,31 +700,30 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
         results.insert("rating".into(), s);
     }
 
-    if wanted("authorship") {
-        let mut s = Samples::default();
-        for i in 0..total {
-            let bytes = g
-                .alice
-                .prove_authorship(&mut g.rng, F::from(1_000u64), F::from(1_001u64))
-                .expect("authorship");
-            let t = g.alice.last_op_timings();
-            let started = Instant::now();
-            let ok = personas_core::verify_authorship_proof(&g.authorship_vk, &bytes).is_some();
-            let v = micros(started);
-            assert!(ok, "an authorship proof must verify");
-            if keep(i) {
-                s.prove.push(t.prove_us);
-                s.bytes.push(t.bytes);
-                s.verify.push(v);
-            }
-        }
-        results.insert("authorship".into(), s);
-        eprintln!("authorship: done");
+    // Posts with a claim: each is a Persona post (an interaction with a callback) that
+    // every member handles, measured like any post.
+    if wanted("merge_personas") {
+        let s = post_batch(
+            &mut g,
+            "merge_personas",
+            &mut |g, _| {
+                g.alice
+                    .emit_post_merge_personas(
+                        &mut g.rng,
+                        "benchmark post",
+                        F::from(1_000u64),
+                        F::from(1_001u64),
+                    )
+                    .expect("merge personas post")
+            },
+            &mut scans,
+        );
+        results.insert("merge_personas".into(), s);
     }
 
-    if wanted("badge_proof") {
+    if wanted("show_badge") {
         // Earn a badge first: request, admin approval, settlement, absorb.
-        let (slot, value) = personas_core::badge_value("Faculty").expect("badge");
+        let (slot, _) = personas_core::badge_value("Faculty").expect("badge");
         let req = g
             .alice
             .emit_badge_request(&mut g.rng, slot as u8)
@@ -743,50 +736,34 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
         g.deliver_all_but(Who::Bob, &approve);
         g.settle_all();
         g.settle_and_drain(&mut scans);
-        let mut s = Samples::default();
-        for i in 0..total {
-            let bytes = g
-                .alice
-                .prove_badge(&mut g.rng, F::from(u64::from(slot)), value)
-                .expect("badge proof (is the badge held?)");
-            let t = g.alice.last_op_timings();
-            let started = Instant::now();
-            let ok = personas_core::verify_badge_proof(&g.badge_vk, &bytes).is_some();
-            let v = micros(started);
-            assert!(ok, "a badge proof must verify");
-            if keep(i) {
-                s.prove.push(t.prove_us);
-                s.bytes.push(t.bytes);
-                s.verify.push(v);
-            }
-        }
-        results.insert("badge_proof".into(), s);
-        eprintln!("badge_proof: done");
+        let s = post_batch(
+            &mut g,
+            "show_badge",
+            &mut |g, _| {
+                g.alice
+                    .emit_post_show_badge(&mut g.rng, "benchmark post", F::from(1_000u64), slot as u8)
+                    .expect("show badge post (is the badge held?)")
+            },
+            &mut scans,
+        );
+        results.insert("show_badge".into(), s);
     }
 
-    if wanted("not_banned") {
-        // Needs a just-finished sweep.
-        g.settle_and_drain(&mut scans);
-        let account = g.account();
-        let mut s = Samples::default();
-        for i in 0..total {
-            let Ok(bytes) = g.alice.prove_not_banned(&mut g.rng, account) else {
-                eprintln!("not_banned: could not prove (no completed sweep?); skipping");
-                break;
-            };
-            let t = g.alice.last_op_timings();
-            let started = Instant::now();
-            let ok = personas_core::verify_not_banned_proof(&g.not_banned_vk, &bytes).is_some();
-            let v = micros(started);
-            assert!(ok, "a not-banned proof must verify");
-            if keep(i) {
-                s.prove.push(t.prove_us);
-                s.bytes.push(t.bytes);
-                s.verify.push(v);
-            }
-        }
-        results.insert("not_banned".into(), s);
-        eprintln!("not_banned: done");
+    if wanted("rep_at_least") {
+        // The threshold is the member's own reputation, which it always meets; the circuit
+        // costs the same for any threshold.
+        let s = post_batch(
+            &mut g,
+            "rep_at_least",
+            &mut |g, _| {
+                let rho = g.alice.member().expect("a member").reputation();
+                g.alice
+                    .emit_post_rep_at_least(&mut g.rng, "benchmark post", F::from(1_000u64), rho)
+                    .expect("rep at least post")
+            },
+            &mut scans,
+        );
+        results.insert("rep_at_least".into(), s);
     }
 
     if wanted("scan") {
@@ -916,7 +893,8 @@ fn print_table(report: &Report) {
     };
     let size = |op: &str| {
         let circuit = match op {
-            "vote" | "rating" => "vote_or_rating",
+            // A ballot is a Persona-post interaction under the poll's context.
+            "vote" => "pseudo_post",
             other => other,
         };
         report

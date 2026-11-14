@@ -280,6 +280,7 @@ export type PropsData = {
   // it — see personasBadges.std.ts — so it is rendered provisionally and never as a
   // credential.
   personaBadge?: string;
+  personaClaim?: string;
   // Personas demo: the context a rate-limited persona post was made under. Shown beside
   // the persona name so a reader can tell which conversation thread it belongs to, and
   // so the two persona kinds are visually distinguishable at a glance: a context chip
@@ -3258,7 +3259,7 @@ export class Message extends PureComponent<Props, State> {
   }
 
   public renderContents(): JSX.Element | null {
-    const { deletedForEveryone, giftBadge, isTapToView } = this.props;
+    const { deletedForEveryone, direction, giftBadge, isTapToView, personaClaim } = this.props;
 
     if (deletedForEveryone) {
       return (
@@ -3293,6 +3294,11 @@ export class Message extends PureComponent<Props, State> {
         {this.renderPoll()}
         {this.renderEmbeddedContact()}
         {this.renderText()}
+        {personaClaim && (
+          <div className={`module-message__text module-message__text--${direction}`}>
+            Verified claim: {personaClaim}
+          </div>
+        )}
         {this.renderUndownloadableTextAttachment()}
         {this.#renderAction()}
         {this.#renderMetadata()}

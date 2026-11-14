@@ -115,7 +115,7 @@ async function refreshPersonaFlags(): Promise<number> {
       const post = decodePostText(applied.body);
       message.set({
         body: post.text,
-        personaBadge: post.badge,
+        personaClaim: applied.claim,
         personaContextName: verifiedContextName(groupId, eh, post.contextName),
         persona: applied.persona,
         personaAnonymous: applied.persona == null,

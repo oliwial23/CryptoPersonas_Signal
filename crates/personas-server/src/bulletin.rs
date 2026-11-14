@@ -33,12 +33,7 @@ pub const SCAN: u64 = 442;
 /// [`RecordLog::record`](crate::state::RecordLog::record) for why that has to happen in
 /// that order.
 ///
-/// `epoch` is passed in rather than read from the callback bulletin because the routes
-/// disagree about it: an anonymous or rate-limited post stores its tickets at `Time::from(0)`
-/// while a pseudonymous post or a badge request stores them at the *live* epoch. That
-/// difference is inherited from the original code, is not obviously intentional, and is
-/// preserved here rather than quietly unified — a scan proves over the epoch its callbacks
-/// were stored at, so changing it changes what a client must prove.
+/// The supplied `epoch` is the epoch at which callbacks are checked and stored.
 pub fn verify_and_store<PubArgs, const N: usize>(
     db: &mut Store,
     vk: &VK,
@@ -68,6 +63,11 @@ where
         vk,
     );
 
+    if appended.is_err() {
+        tracing::info!("interaction rejected: append={appended:?}");
+        return Err(interaction_rejected());
+    }
+
     let stored = db.approve_interaction_and_store::<MsgUser, Snark, PubArgs, OStore, H, N>(
         exec,
         FakeSigPrivkey::sk(),
@@ -83,22 +83,25 @@ where
         data,
     );
 
-    match (appended, stored) {
-        (Ok(()), Ok(())) => {
-            tracing::info!("interaction verified and appended to the bulletin");
-            Ok(callbacks)
-        }
-        (appended, stored) => {
-            // The member gets no detail: which of the two failed, and why, is an oracle on
-            // their own standing. The log gets all of it.
-            tracing::info!("interaction rejected: append={appended:?} store={stored:?}");
-            Err(AppError::Rejected(
-                "Cannot post message: proof failed. Check if you are banned or have \
-                 inadequate reputation score."
-                    .into(),
-            ))
-        }
+    if stored.is_err() {
+        // Approval checks the newly appended entry, so reject it in both places if
+        // callback validation fails. The server write lock covers both steps.
+        db.obj_bul.coms.pop();
+        db.obj_bul.old_nuls.pop();
+        db.obj_bul.cb_com_lists.pop();
+        db.obj_bul.sigs.pop();
+        tracing::info!("interaction rejected: store={stored:?}");
+        return Err(interaction_rejected());
     }
+
+    tracing::info!("interaction verified and appended to the bulletin");
+    Ok(callbacks)
+}
+
+fn interaction_rejected() -> AppError {
+    AppError::Rejected(
+        "Cannot post message: proof failed. Check if you are banned or have inadequate reputation score.".into(),
+    )
 }
 
 /// How a callback commitment is named in the ledger, and keyed by every lookup.
@@ -124,4 +127,164 @@ pub fn epoch(db: &Store) -> Time<F> {
 pub fn bulk<T: CanonicalSerialize>(value: &T) -> Result<axum::body::Bytes, AppError> {
     let bytes = raw::encode(value).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     Ok(bytes.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use personas_core::{
+        circuits::{
+            Claim, ClaimArgs, PseudonymArgs, exec_claim_standint, exec_pseudo_standint,
+            get_claim_interaction, get_standard_pseudo_interaction, rep_threshold,
+        },
+        persona::{pseudonym, server_ballot_payload, server_claim_payload},
+    };
+    use zk_callbacks::generic::{bulletin::JoinableBulletin, user::User};
+
+    #[test]
+    fn an_invalid_ballot_payload_or_callback_does_not_spend_the_object() {
+        let mut rng = rand::thread_rng();
+        let mut db = Store::new(&mut rng);
+        let (pk, vk) = get_standard_pseudo_interaction().generate_keys::<H, Snark, Cr, OStore>(
+            &mut rng,
+            Some(db.obj_bul.get_pubkey()),
+            PseudonymArgs::default(),
+            false,
+        );
+        let mut user = User::create(
+            MsgUser {
+                sk: F::from(42),
+                ..Default::default()
+            },
+            &mut rng,
+        );
+        <OStore as JoinableBulletin<F, MsgUser>>::join_bul(&mut db.obj_bul, user.commit::<H>(), ())
+            .unwrap();
+        let context = F::from(7);
+        let args = PseudonymArgs {
+            context,
+            claimed: pseudonym(&user.data.sk, &context),
+            payload: server_ballot_payload("signal", "upvote"),
+        };
+        let current = epoch(&db);
+        let vote = exec_pseudo_standint(
+            &mut user,
+            &mut rng,
+            &db.obj_bul,
+            &pk,
+            current,
+            args.clone(),
+            (),
+        )
+        .unwrap();
+        let clone_vote = || ExecutedMethod {
+            new_object: vote.new_object,
+            old_nullifier: vote.old_nullifier,
+            cb_tik_list: vote.cb_tik_list.clone(),
+            cb_com_list: vote.cb_com_list,
+            cur_time: vote.cur_time,
+            proof: vote.proof.clone(),
+        };
+
+        let wrong_choice = PseudonymArgs {
+            payload: server_ballot_payload("signal", "downvote"),
+            ..args.clone()
+        };
+        assert!(
+            verify_and_store(
+                &mut db,
+                &vk,
+                clone_vote(),
+                wrong_choice,
+                current,
+                INTERACTION
+            )
+            .is_err()
+        );
+        let mut wrong_callback = clone_vote();
+        wrong_callback.cb_tik_list[0].0.com_rand += F::from(1);
+        assert!(
+            verify_and_store(
+                &mut db,
+                &vk,
+                wrong_callback,
+                args.clone(),
+                current,
+                INTERACTION
+            )
+            .is_err()
+        );
+        assert_eq!(db.obj_bul.coms.len(), 1);
+        assert!(db.cb_tickets.is_empty());
+
+        assert_eq!(
+            verify_and_store(&mut db, &vk, vote, args, current, INTERACTION)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(db.obj_bul.coms.len(), 2);
+        assert_eq!(db.cb_tickets.len(), 1);
+    }
+
+    #[test]
+    fn a_claim_proof_binds_the_message_and_destination() {
+        let mut rng = rand::thread_rng();
+        let mut db = Store::new(&mut rng);
+        let claim = Claim::RepAtLeast;
+        let (pk, vk) = get_claim_interaction(claim).generate_keys::<H, Snark, Cr, OStore>(
+            &mut rng,
+            Some(db.obj_bul.get_pubkey()),
+            ClaimArgs::default(),
+            false,
+        );
+        let mut user = User::create(
+            MsgUser {
+                sk: F::from(42),
+                ..Default::default()
+            },
+            &mut rng,
+        );
+        <OStore as JoinableBulletin<F, MsgUser>>::join_bul(&mut db.obj_bul, user.commit::<H>(), ())
+            .unwrap();
+        let context = F::from(7);
+        let args = ClaimArgs {
+            post: PseudonymArgs {
+                context,
+                claimed: pseudonym(&user.data.sk, &context),
+                payload: server_claim_payload("group-a", "my message"),
+            },
+            a: rep_threshold(-1),
+            b: F::from(0),
+        };
+        let current = epoch(&db);
+        let proof = exec_claim_standint(
+            &mut user,
+            &mut rng,
+            &db.obj_bul,
+            &pk,
+            current,
+            claim,
+            args.clone(),
+        )
+        .unwrap();
+        let check = |args| {
+            <OStore as UserBul<F, MsgUser>>::verify_interaction::<_, Snark, 1>(
+                &db.obj_bul,
+                proof.new_object,
+                proof.old_nullifier,
+                args,
+                proof.cb_com_list,
+                proof.proof.clone(),
+                None,
+                &vk,
+            )
+        };
+        for (group, message) in [("group-b", "my message"), ("group-a", "different message")] {
+            let mut changed = args.clone();
+            changed.post.payload = server_claim_payload(group, message);
+            assert!(!check(changed));
+        }
+        assert!(check(args));
+    }
 }

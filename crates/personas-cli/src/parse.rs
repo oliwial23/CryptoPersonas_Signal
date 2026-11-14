@@ -290,12 +290,27 @@ pub enum Command {
         pseudo_idx: usize,
     },
 
-    /// Prove one member authored two pseudonymous messages.
+    /// MergePersonas: post as the pseudonym at `-i`, proving the pseudonym at `-j` is the
+    /// same member.
     Authorship {
         #[arg(long = "pseudo-idx1", short = 'i')]
         pseudo_idx1: usize,
         #[arg(long = "pseudo-idx2", short = 'j')]
         pseudo_idx2: usize,
+        #[arg(long, short = 'm', default_value = "")]
+        message: String,
+        #[arg(long = "channel", short = 'g', alias = "group-id")]
+        channel: String,
+    },
+
+    /// RepAtLeast: post as the pseudonym at `-p`, proving reputation is at least `-r`.
+    RepAtLeast {
+        #[arg(long, short = 'r', allow_hyphen_values = true)]
+        rho: i64,
+        #[arg(long = "pseudo-idx", short = 'p')]
+        pseudo_idx: usize,
+        #[arg(long, short = 'm', default_value = "")]
+        message: String,
         #[arg(long = "channel", short = 'g', alias = "group-id")]
         channel: String,
     },
@@ -309,14 +324,15 @@ pub enum Command {
         i: u32,
     },
 
-    /// Claim a granted badge under a pseudonym. On Signal pass the claimed string with `-b`;
-    /// on Slack it is looked up from the badge log.
+    /// ShowBadge: post as the pseudonym at `-p`, showing granted badge `-i`
+    /// (1 = Faculty, 2 = Student, 3 = Industry).
     Badge {
         #[arg(long, short = 'i')]
         i: u32,
-        /// Claimed pseudonym string (Signal).
-        #[arg(long, short = 'b')]
-        claimed: Option<String>,
+        #[arg(long = "pseudo-idx", short = 'p')]
+        pseudo_idx: usize,
+        #[arg(long, short = 'm', default_value = "")]
+        message: String,
         #[arg(long = "channel", short = 'g', alias = "group-id")]
         channel: String,
     },

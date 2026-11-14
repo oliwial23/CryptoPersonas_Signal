@@ -97,12 +97,7 @@ export type PersonaStatus = {
    * of the panel claiming a capability the running engine does not have.
    */
   authorshipZk: boolean;
-  /**
-   * Badges genuinely held in this member's zk object, as opposed to the unverified
-   * label the composer attaches to a post. The gap between these two is the whole
-   * point of the badge work: today the composer can claim any label, and this list is
-   * what a real credential would look like.
-   */
+  /** Badges held in this member’s object and available to prove in a post. */
   heldBadges: ReadonlyArray<string>;
   /** Badge requests awaiting approval. Only actionable by a Signal group admin. */
   pendingBadgeRequests: ReadonlyArray<{ eh: string; slot: number; name: string }>;
@@ -190,9 +185,7 @@ export function getPersonaStatus(
 
       status.pendingBadgeRequests = pendingBadgeRequests(groupId);
 
-      status.authorshipZk =
-        typeof engine.emitAuthorship === 'function' &&
-        typeof engine.verifyAuthorship === 'function';
+      status.authorshipZk = typeof engine.emitPostMergePersonas === 'function';
 
       if (typeof engine.isBanned === 'function') {
         status.banned = engine.isBanned();

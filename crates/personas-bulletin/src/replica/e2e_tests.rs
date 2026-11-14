@@ -21,7 +21,8 @@ use ark_ff::UniformRand;
 use personas_core::circuits::{
     BAN_FLAG, MsgUser, NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate,
     PseudonymArgsRateVar, PseudonymArgsVar, PubScan, PubScanVar, ScanInt, get_callbacks,
-    get_scan_interaction, get_standard_interaction, get_standard_pseudo_rate_interaction,
+    get_scan_interaction, get_standard_interaction, get_standard_pseudo_interaction,
+    get_standard_pseudo_rate_interaction,
     pseudonym_pred,
 };
 use personas_core::{Args, ArgsVar, Cr, F, H, PK, Snark, VK, persona};
@@ -57,6 +58,16 @@ fn scan_keys(rng: &mut StdRng, cstore: &CbT) -> (PK, VK) {
     si.generate_keys::<H, Snark, Cr, ObjT>(rng, None, dummy, true)
 }
 
+fn pseudo_keys(rng: &mut StdRng) -> (PK, VK) {
+    get_standard_pseudo_interaction().generate_keys::<H, Snark, Cr, ObjT>(
+        rng,
+        None,
+        PseudonymArgs::default(),
+        false,
+    )
+}
+
+#[allow(dead_code)]
 fn pseudonym_pred_keys(rng: &mut StdRng) -> (PK, VK) {
     let dummy = PseudonymArgs::default();
     generate_keys_for_statement_in::<
@@ -84,6 +95,9 @@ fn standard_only_keys(vk: &VK) -> ReplicaKeys {
         badge_request: vk.clone(),
         join: vk.clone(),
         not_banned: vk.clone(),
+        show_badge: vk.clone(),
+        merge_personas: vk.clone(),
+        rep_at_least: vk.clone(),
     }
 }
 
@@ -231,17 +245,21 @@ fn e2e_double_spend_resolves_to_one_winner_everywhere() {
     );
 }
 
-/// All five verifying keys, for a test that exercises posts, votes and scans.
-fn full_keys(std_vk: &VK, scan_vk: &VK, pred_vk: &VK) -> ReplicaKeys {
+/// The verifying keys a test of posts, votes and scans needs: votes are Persona-post
+/// interactions, so `pseudo_vk` is the pseudonymous-post key.
+fn full_keys(std_vk: &VK, scan_vk: &VK, pseudo_vk: &VK) -> ReplicaKeys {
     ReplicaKeys {
         standard: std_vk.clone(),
-        pseudo: std_vk.clone(),
+        pseudo: pseudo_vk.clone(),
         pseudo_rate: std_vk.clone(),
         scan: scan_vk.clone(),
-        pseudonym_pred: pred_vk.clone(),
+        pseudonym_pred: std_vk.clone(),
         badge_request: std_vk.clone(),
         join: std_vk.clone(),
         not_banned: std_vk.clone(),
+        show_badge: std_vk.clone(),
+        merge_personas: std_vk.clone(),
+        rep_at_least: std_vk.clone(),
     }
 }
 
@@ -269,47 +287,48 @@ fn join_of(user: &User<F, MsgUser>) -> (F, Vec<u8>, Eh) {
     (user.commit::<H>(), b, eh)
 }
 
-/// A vote to ban, proved under `pseudonym_pred` at the poll's context.
+/// A vote to ban: a Persona-post interaction at the poll's context. It advances the
+/// voter's object, so this also returns the `(new object, spent nullifier, callback
+/// commitment)` a shadow tree must add to follow the replica's roots.
 fn ban_vote(
     rng: &mut StdRng,
-    voter: &User<F, MsgUser>,
+    voter: &mut User<F, MsgUser>,
     shadow_joined: &ObjT,
     root_joined: F,
     poll: Eh,
-    pred_pk: &PK,
-) -> (Vec<u8>, Eh) {
+    pseudo_pk: &PK,
+) -> (Vec<u8>, Eh, (F, F, F)) {
     let context = poll.context();
     let claimed = persona::pseudonym(&voter.data.sk, &context);
-    let (root, path) = <ObjT as PublicUserBul<F, MsgUser>>::get_membership_data(
-        shadow_joined,
-        voter.commit::<H>(),
-    )
-    .unwrap();
-    assert_eq!(root, root_joined);
+    assert_eq!(shadow_joined.root(), root_joined);
     let pseudo = PseudonymArgs {
         context,
         claimed,
         payload: super::record::ballot_payload(poll, BAN_OPTION),
     };
-    let proof = voter
-        .prove_statement_and_in::<H, PseudonymArgs<F>, PseudonymArgsVar<F>, (), (), Snark, ObjT>(
+    let exec = voter
+        .exec_method_create_cb::<H, PseudonymArgs<F>, PseudonymArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
             rng,
-            pseudonym_pred,
-            pred_pk,
-            (path, root),
+            get_standard_pseudo_interaction(),
+            [FakeSigPubkey::pk()],
+            Time::from(0),
+            shadow_joined,
             false,
+            pseudo_pk,
             pseudo,
             (),
         )
         .expect("vote proof");
+    let leaf = (exec.new_object, exec.old_nullifier, exec.cb_com_list[0]);
     let rec = Record::Vote {
         poll,
         option: BAN_OPTION,
-        proof: Ark(proof),
+        exec: Ark(exec),
         claimed: Ark(claimed),
         obj_root: Ark(root_joined),
     };
-    encode(&rec).unwrap()
+    let (bytes, eh) = encode(&rec).unwrap();
+    (bytes, eh, leaf)
 }
 
 /// A scan by `user` against callback store `cbs` and object root `obj_root`. When
@@ -372,7 +391,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
     let mut rng = StdRng::seed_from_u64(2);
     let (std_pk, std_vk) = standard_keys(&mut rng);
     let (scan_pk, scan_vk) = scan_keys(&mut rng, &CbT::new());
-    let (pred_pk, pred_vk) = pseudonym_pred_keys(&mut rng);
+    let (pred_pk, pred_vk) = pseudo_keys(&mut rng);
     let keys = full_keys(&std_vk, &scan_vk, &pred_vk);
     let config = Config {
         root_window: 256,
@@ -382,8 +401,8 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
 
     // Three members: the target T and two voters.
     let mut t = member(&mut rng);
-    let v1 = member(&mut rng);
-    let v2 = member(&mut rng);
+    let mut v1 = member(&mut rng);
+    let mut v2 = member(&mut rng);
 
     // Joins, in the canonical (ascending-eh) order the replica will apply them.
     let mut joins = vec![join_of(&t), join_of(&v1), join_of(&v2)];
@@ -422,11 +441,6 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
     };
     let (post_b, post_eh) = encode(&post).unwrap();
 
-    // The object tree after P — what T's scan will prove membership against.
-    let mut shadow_after_p = shadow_joined.clone();
-    shadow_after_p.push(p_new_object, p_old_nul, p_cb_com.to_vec());
-    let root_after_p = shadow_after_p.root();
-
     // A ban poll targeting P, and two ban votes.
     let poll = Record::PollOpen {
         question: "ban the poster?".into(),
@@ -435,22 +449,31 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
         target: Some(post_eh),
     };
     let (poll_b, poll_eh) = encode(&poll).unwrap();
-    let (v1_b, _) = ban_vote(
+    let (v1_b, _, v1_leaf) = ban_vote(
         &mut rng,
-        &v1,
+        &mut v1,
         &shadow_joined,
         root_joined,
         poll_eh,
         &pred_pk,
     );
-    let (v2_b, _) = ban_vote(
+    let (v2_b, _, v2_leaf) = ban_vote(
         &mut rng,
-        &v2,
+        &mut v2,
         &shadow_joined,
         root_joined,
         poll_eh,
         &pred_pk,
     );
+
+    // The object tree after P and the two ballots (each advances its voter's object) —
+    // what T's scan will prove membership against.
+    let mut shadow_after_p = shadow_joined.clone();
+    shadow_after_p.push(p_new_object, p_old_nul, p_cb_com.to_vec());
+    for (object, nul, cb) in [v1_leaf, v2_leaf] {
+        shadow_after_p.push(object, nul, vec![cb]);
+    }
+    let root_after_p = shadow_after_p.root();
 
     let base: Vec<Vec<u8>> = joins
         .iter()
@@ -654,7 +677,7 @@ fn audit_setup() -> AuditSetup {
     let mut rng = StdRng::seed_from_u64(77);
     let (std_pk, std_vk) = standard_keys(&mut rng);
     let (_scan_pk, scan_vk) = scan_keys(&mut rng, &CbT::new());
-    let (pred_pk, pred_vk) = pseudonym_pred_keys(&mut rng);
+    let (pred_pk, pred_vk) = pseudo_keys(&mut rng);
     let keys = full_keys(&std_vk, &scan_vk, &pred_vk);
     let mut author = member(&mut rng);
     let voter = member(&mut rng);
@@ -754,9 +777,9 @@ fn a_ballot_cannot_be_flipped_under_its_proof() {
         target: Some(s.post_eh),
     };
     let (poll_bytes, poll_eh) = encode(&poll).unwrap();
-    let (vote, _) = ban_vote(
+    let (vote, _, _) = ban_vote(
         &mut s.rng,
-        &s.voter,
+        &mut s.voter,
         &s.shadow,
         s.root,
         poll_eh,
@@ -899,4 +922,185 @@ fn a_rate_limited_post_cannot_change_its_topic_or_persona() {
         assert_ne!(r.status(&forged), Some(Status::Applied));
         assert_eq!(r.post_context(&forged), None);
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Every feature leaves a callback (protocol version 5): posts with a claim, and ballots
+// that advance the voter's object but cannot be targeted.
+// ---------------------------------------------------------------------------------------
+
+/// A post with a claim by `author`, proved against `obj` (which must hold its object).
+fn claim_post(
+    rng: &mut StdRng,
+    author: &mut User<F, MsgUser>,
+    obj: &ObjT,
+    pk: &PK,
+    flavour: Flavour,
+    a: F,
+    b: F,
+) -> Record {
+    use personas_core::circuits::{ClaimArgs, ClaimArgsVar, get_claim_interaction};
+    let context = F::from(41u64);
+    let claimed = persona::pseudonym(&author.data.sk, &context);
+    let body = "a post with a claim";
+    let payload = super::record::post_payload(body);
+    let exec = author
+        .exec_method_create_cb::<H, ClaimArgs<F>, ClaimArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
+            rng,
+            get_claim_interaction(flavour.claim().expect("a claim flavour")),
+            [FakeSigPubkey::pk()],
+            Time::from(0),
+            obj,
+            false,
+            pk,
+            ClaimArgs {
+                post: PseudonymArgs {
+                    context,
+                    claimed,
+                    payload,
+                },
+                a,
+                b,
+            },
+            (),
+        )
+        .expect("claim post proof");
+    Record::Post {
+        flavour,
+        exec: Ark(exec),
+        extra: Ark(vec![context, claimed, a, b]),
+        body: body.into(),
+        payload: Ark(payload),
+        obj_root: Ark(obj.root()),
+    }
+}
+
+#[test]
+#[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+fn posts_with_a_claim_prove_it_and_nothing_else() {
+    use personas_core::circuits::{Claim, ClaimArgs, FACULTY_F, INDUSTRY_F, STUDENT_F, get_claim_interaction, rep_threshold};
+    let mut rng = StdRng::seed_from_u64(55);
+    let (_std_pk, std_vk) = standard_keys(&mut rng);
+    let claim_keys = |rng: &mut StdRng, c| {
+        get_claim_interaction(c).generate_keys::<H, Snark, Cr, ObjT>(rng, None, ClaimArgs::default(), false)
+    };
+    let (badge_pk, badge_vk) = claim_keys(&mut rng, Claim::ShowBadge);
+    let (merge_pk, merge_vk) = claim_keys(&mut rng, Claim::MergePersonas);
+    let (rep_pk, rep_vk) = claim_keys(&mut rng, Claim::RepAtLeast);
+    let mut keys = standard_only_keys(&std_vk);
+    keys.show_badge = badge_vk;
+    keys.merge_personas = merge_vk;
+    keys.rep_at_least = rep_vk;
+
+    // Three members (joins are trusted here, so they may start with a badge and
+    // reputation, standing in for ones absorbed by earlier scans).
+    let mut faculty = User::create(MsgUser { sk: F::from(11u64), badge1: *FACULTY_F, ..Default::default() }, &mut rng);
+    let merger = member(&mut rng);
+    let mut reputable = User::create(MsgUser { sk: F::from(13u64), reputation: rep_threshold(5), ..Default::default() }, &mut rng);
+    let joins = [join_of(&faculty), join_of(&merger), join_of(&reputable)];
+    let mut obj = ObjT::new();
+    for (com, _, _) in &joins {
+        obj.push(*com, F::from(0), vec![]);
+    }
+    let config = Config { root_window: 256, settlement_barriers: 3, poll_close_barriers: 1 };
+    let fresh = || {
+        let mut r = Replica::<OH, MH, NH>::new(keys.clone(), config).trust_unproven_joins_for_tests();
+        for j in &joins {
+            r.ingest_at(j.1.clone(), 0).unwrap();
+        }
+        r.advance_to(1);
+        r
+    };
+
+    let second = F::from(43u64);
+    let records = [
+        claim_post(&mut rng, &mut faculty, &obj, &badge_pk, Flavour::ShowBadge, F::from(1u64), *FACULTY_F),
+        claim_post(&mut rng, &mut merger.clone(), &obj, &merge_pk, Flavour::MergePersonas, second, persona::pseudonym(&merger.data.sk, &second)),
+        claim_post(&mut rng, &mut reputable.clone(), &obj, &rep_pk, Flavour::RepAtLeast, rep_threshold(3), F::from(0u64)),
+    ];
+    let mut r = fresh();
+    for rec in &records {
+        let (bytes, eh) = encode(rec).unwrap();
+        r.ingest_at(bytes, 1).unwrap();
+        assert_eq!(r.status(&eh), Some(Status::Applied), "{:?} applies", rec.kind());
+    }
+
+    // Changing the claim under its proof, or making a meaningless one, is refused.
+    let rep_post = encode(&records[2]).unwrap().0;
+    let badge_post = encode(&records[0]).unwrap().0;
+    let tampered = [
+        (rewrite(&rep_post, &|r| if let Record::Post { extra, .. } = r { extra.0[2] = rep_threshold(9) }), "proof failed"),
+        (rewrite(&badge_post, &|r| if let Record::Post { extra, .. } = r { extra.0[3] = *STUDENT_F }), "not a badge of that slot"),
+        (rewrite(&badge_post, &|r| if let Record::Post { extra, .. } = r { extra.0[2] = F::from(3u64); extra.0[3] = *INDUSTRY_F }), "proof failed"),
+        (rewrite(&rep_post, &|r| if let Record::Post { extra, .. } = r { extra.0[2] = rep_threshold(1 << 21) }), "reputation threshold out of range"),
+    ];
+    for ((bytes, eh), why) in tampered {
+        let mut r = fresh();
+        let outcome = r.ingest_at(bytes, 1);
+        let refused = match outcome {
+            Err(_) => true,
+            Ok(Status::Rejected(_)) => true,
+            Ok(_) => matches!(r.status(&eh), Some(Status::Rejected(_))),
+        };
+        assert!(refused, "a tampered claim is refused ({why}): {outcome:?}");
+    }
+
+    // A member who does NOT hold the claim cannot even prove it.
+    let mut no_badge = merger.clone();
+    let prove = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        claim_post(&mut rng, &mut no_badge, &obj, &badge_pk, Flavour::ShowBadge, F::from(1u64), *FACULTY_F)
+    }));
+    if let Ok(rec) = prove {
+        let (bytes, eh) = encode(&rec).unwrap();
+        let mut r = fresh();
+        let _ = r.ingest_at(bytes, 1);
+        assert_ne!(r.status(&eh), Some(Status::Applied), "a badge one does not hold is not shown");
+    }
+    let _ = &mut reputable;
+}
+
+#[test]
+#[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+fn a_ballot_files_a_ticket_but_cannot_be_targeted() {
+    let mut s = audit_setup();
+    let poll = Record::PollOpen {
+        question: "lunch?".into(),
+        options: vec!["yes".into(), "no".into()],
+        kind: PollKind::Standard,
+        target: None,
+    };
+    let (poll_bytes, poll_eh) = encode(&poll).unwrap();
+    let (vote, vote_eh, _) = ban_vote(&mut s.rng, &mut s.voter, &s.shadow, s.root, poll_eh, &s.pred_pk);
+    let mut r = audit_replica(&s);
+    r.ingest_at(poll_bytes, 1).unwrap();
+    r.ingest_at(vote, 1).unwrap();
+    assert_eq!(r.status(&vote_eh), Some(Status::Applied));
+    let before = r.obj_root();
+    // The ballot is an interaction: its successor object is in the tree.
+    assert_ne!(before, s.root, "the ballot advanced the object tree");
+
+    // Later records, in the next barrier (within one barrier, records apply in envelope
+    // order, so one could precede the ballot it names; a ban landing on a ballot is
+    // refused at settlement either way, by `Derived::ban`).
+    r.advance_to(2);
+    let refused = |r: &mut Replica<OH, MH, NH>, rec: Record| {
+        let (bytes, eh) = encode(&rec).unwrap();
+        let _ = r.ingest_at(bytes, 2);
+        r.status(&eh)
+    };
+    assert_eq!(
+        refused(&mut r, Record::Ban { target: vote_eh }),
+        Some(Status::Rejected(super::tally::NOT_TARGETABLE)),
+        "an admin cannot ban a voter through their ballot"
+    );
+    assert_eq!(
+        refused(&mut r, Record::BadgeApprove { target: vote_eh, slot: 1 }),
+        Some(Status::Rejected(super::tally::NOT_TARGETABLE)),
+        "nor approve a badge on it"
+    );
+    assert_eq!(
+        refused(&mut r, Record::PollOpen { question: "ban the voter?".into(), options: vec!["ban".into(), "keep".into()], kind: PollKind::Ban, target: Some(vote_eh) }),
+        Some(Status::Rejected(super::tally::NOT_TARGETABLE)),
+        "nor open a ban poll on it"
+    );
 }

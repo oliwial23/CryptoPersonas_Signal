@@ -261,12 +261,10 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
     turnOnPersonas,
     approvePersonaReset,
     dismissPersonaReset,
-    provePersonaBadge,
     joinPersonaBulletin,
     approvePersonaBadge,
     createPersonaPseudonym,
     scanPersonaCallbacksNow,
-    sendPersonaAuthorshipClaim,
     setComposerFocus,
   } = useComposerActions();
   // Personas demo: topics (and their contexts) known to this instance. Held
@@ -486,7 +484,6 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
       turnOnPersonas={turnOnPersonas}
       approvePersonaReset={approvePersonaReset}
       dismissPersonaReset={(account: string) => dismissPersonaReset(id, account)}
-      provePersonaBadge={provePersonaBadge}
       joinPersonaBulletin={joinPersonaBulletin}
       approvePersonaBadge={approvePersonaBadge}
       refreshPersonaStatus={refreshPersonaStatus}
@@ -501,7 +498,6 @@ export const SmartCompositionArea = memo(function SmartCompositionArea({
           addByCode={addContactByCode}
         />
       }
-      sendPersonaAuthorshipClaim={sendPersonaAuthorshipClaim}
       selectedBadge={selectedBadge}
       setPersonaBadge={setPersonaBadge}
       scrollToMessage={scrollToMessage}

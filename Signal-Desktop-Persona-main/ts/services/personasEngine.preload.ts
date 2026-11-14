@@ -39,9 +39,8 @@ import {
   decodeRelayBody,
   encodeRelayBody,
   type PersonaChoice,
+  type PersonaPostClaim,
   type PersonaPollDescriptor,
-  encodeAuthorshipProof,
-  encodeBadgeProof,
 } from './personasCarriage.std.ts';
 import {
   getPhantomBundleFingerprint,
@@ -385,14 +384,19 @@ export const PENDING_POST_BODY = 'Verifying this post\u2026';
 export function appliedPost(
   groupId: string | undefined,
   eh: string
-): { body: string; persona?: string; flagged: boolean } | undefined {
+): { body: string; persona?: string; claim?: string; flagged: boolean } | undefined {
   // Peek at what is already built, never build (this runs from a timer).
   const engine = groupId ? runtimes.get(groupId)?.engine : undefined;
   const entry = engine?.logEntry(eh);
   if (!entry || entry.kind !== 'Post') {
     return undefined;
   }
-  return { body: entry.body, persona: entry.author, flagged: entry.flagged };
+  return {
+    body: entry.body,
+    persona: entry.author,
+    claim: entry.claim,
+    flagged: entry.flagged,
+  };
 }
 
 // The result of examining an incoming message body for a personas record.
@@ -407,6 +411,7 @@ export type RecordIngestResult =
       kind: 'post';
       eh: string;
       persona?: string;
+      claim?: string;
       body: string;
       flagged: boolean;
       // Held by the engine, not yet applied: `body` is a placeholder until it is.
@@ -603,6 +608,7 @@ export function ingestRecordForTimeline(
       kind: 'post',
       eh: status.eh,
       persona: entry.author,
+      claim: entry.claim,
       body: entry.body,
       flagged: entry.flagged,
     };
@@ -697,6 +703,7 @@ export function emitAndSelfIngest(
 export type PersonaPostSend = {
   body: string;
   persona?: string;
+  claim?: string;
   eh: string;
   personaRecordBase64: string;
 };
@@ -714,7 +721,8 @@ export function personaScanRequired(groupId: string | undefined): boolean {
 export function composePersonaPost(
   groupId: string | undefined,
   text: string,
-  choice: PersonaChoice
+  choice: PersonaChoice,
+  claim?: PersonaPostClaim
 ): PersonaPostSend | undefined {
   const currentEngine = getPersonasEngine(groupId);
   if (!groupId || !currentEngine) {
@@ -723,7 +731,24 @@ export function composePersonaPost(
   let emitted: Emitted;
   const startMs = benchNowMs();
   try {
-    if (choice.kind === 'anon') {
+    if (claim) {
+      if (choice.kind !== 'pseudo') {
+        throw new Error('a claim post requires an unlimited pseudonym');
+      }
+      switch (claim.kind) {
+        case 'show_badge':
+          emitted = currentEngine.emitPostShowBadge(text, choice.nonce, claim.badge);
+          break;
+        case 'merge_personas':
+          emitted = currentEngine.emitPostMergePersonas(text, choice.nonce, claim.otherNonce);
+          break;
+        case 'rep_at_least':
+          emitted = currentEngine.emitPostRepAtLeast(text, choice.nonce, claim.threshold);
+          break;
+        default:
+          throw new Error('unknown claim post');
+      }
+    } else if (choice.kind === 'anon') {
       emitted = currentEngine.emitPostAnon(text);
     } else if (choice.kind === 'rate') {
       // Topic-scoped and rate-limited: persona = H(sk || context || index), with
@@ -750,15 +775,18 @@ export function composePersonaPost(
   benchEmitted(
     groupId,
     currentEngine,
-    { anon: 'anon_post', pseudo: 'pseudo_post', rate: 'rate_limited_post' }[
-      choice.kind
-    ],
+    claim?.kind ??
+      { anon: 'anon_post', pseudo: 'pseudo_post', rate: 'rate_limited_post' }[
+        choice.kind
+      ],
     startMs,
     emitted.eh
   );
+  const entry = currentEngine.logEntry(emitted.eh);
   return {
     body: text,
-    persona: emitted.persona ?? undefined,
+    persona: entry?.author ?? emitted.persona ?? undefined,
+    claim: entry?.claim,
     eh: emitted.eh,
     personaRecordBase64: Buffer.from(emitted.bytes).toString('base64'),
   };
@@ -1025,200 +1053,6 @@ export function listPendingBadgeRequests(
   } catch (error) {
     log.error(`listPendingBadgeRequests failed: ${toLogFormat(error)}`);
     return [];
-  }
-}
-
-/**
- * Prove we hold `badge`, by name. Undefined if we do not hold it — the proof is simply
- * unsatisfiable, which is the point: a badge label can be typed, a badge proof cannot.
- */
-export function composeBadgeProof(
-  groupId: string | undefined,
-  badge: string
-): Uint8Array | undefined {
-  const engine = getPersonasEngine(groupId);
-  if (!engine || typeof engine.emitBadgeProof !== 'function') {
-    log.error('composeBadgeProof: addon has no emitBadgeProof binding');
-    return undefined;
-  }
-  try {
-    return engine.emitBadgeProof(badge);
-  } catch (error) {
-    log.error(`composeBadgeProof failed: ${toLogFormat(error)}`);
-    return undefined;
-  }
-}
-
-/**
- * Verify a badge proof and return the badge NAME it proves.
- *
- * Render this, never a label from the message — otherwise a valid Student proof could
- * be displayed as Faculty and the checkmark would be true while the label lied.
- */
-export function verifyBadgeProof(
-  groupId: string | undefined,
-  proof: Uint8Array
-): string | undefined {
-  const engine = getPersonasEngine(groupId);
-  if (!engine || typeof engine.verifyBadgeProof !== 'function') {
-    return undefined;
-  }
-  try {
-    return engine.verifyBadgeProof(Buffer.from(proof)) ?? undefined;
-  } catch (error) {
-    log.error(`verifyBadgeProof failed: ${toLogFormat(error)}`);
-    return undefined;
-  }
-}
-
-/**
- * Produce a ZK proof that two of our own pseudonyms share an author.
- *
- * Contexts, not petnames: for an unlimited pseudonym the context IS the nonce the UI
- * already stores, and the claimed pseudonyms are derived from our secret key inside the
- * circuit — so this cannot assert anything about a persona we do not hold.
- *
- * Unlike the other compose helpers this does NOT self-ingest, because an authorship
- * proof is not a record: nothing is folded into the replica, no accept rule applies,
- * and there is no echo to absorb.
- */
-export function composePersonaAuthorship(
-  groupId: string | undefined,
-  contextA: number,
-  contextB: number
-): { body: string; proof: Uint8Array } | undefined {
-  const engine = getPersonasEngine(groupId);
-  if (!engine || typeof engine.emitAuthorship !== 'function') {
-    log.error('composePersonaAuthorship: addon has no emitAuthorship binding');
-    return undefined;
-  }
-  try {
-    const startMs = benchNowMs();
-    const proof = engine.emitAuthorship(contextA, contextB);
-    if (groupId) {
-      benchEmitted(
-        groupId,
-        engine,
-        'authorship',
-        startMs,
-        benchProofKey(proof)
-      );
-    }
-    // Both: `body` for the wire, `proof` so the caller can verify its own output
-    // before sending and render from the verifier rather than from its own inputs.
-    return { body: encodeAuthorshipProof(proof), proof };
-  } catch (error) {
-    log.error(`composePersonaAuthorship failed: ${toLogFormat(error)}`);
-    return undefined;
-  }
-}
-
-/**
- * Prove possession of `badge` in zero knowledge.
- *
- * Unsatisfiable if this member's object does not actually hold it, which is the whole
- * value of this over the decorative label: a label is a string anyone can type, a proof
- * only exists if an admin approved the badge and the member scanned it in.
- *
- * Not a record, so it does not self-ingest — nothing is folded into the replica and no
- * accept rule applies. Same shape as `composePersonaAuthorship`.
- */
-export function composePersonaBadgeProof(
-  groupId: string | undefined,
-  badge: string
-): { body: string; proof: Uint8Array } | undefined {
-  const engine = getPersonasEngine(groupId);
-  if (!engine || typeof engine.emitBadgeProof !== 'function') {
-    log.error('composePersonaBadgeProof: addon has no emitBadgeProof binding');
-    return undefined;
-  }
-  try {
-    const startMs = benchNowMs();
-    const proof = engine.emitBadgeProof(badge);
-    if (groupId) {
-      benchEmitted(
-        groupId,
-        engine,
-        'badge_proof',
-        startMs,
-        benchProofKey(proof)
-      );
-    }
-    return { body: encodeBadgeProof(proof), proof };
-  } catch (error) {
-    // Includes the expected case: we do not hold the badge, so the witness does not
-    // exist. Logged rather than thrown — the caller turns it into a visible reason.
-    log.error(`composePersonaBadgeProof failed: ${toLogFormat(error)}`);
-    return undefined;
-  }
-}
-
-/**
- * Verify a badge proof and return the badge NAME it proves.
- *
- * The name comes from the proof's public inputs via the addon's own lookup, never from
- * the message. A proof that verifies but maps to no known badge value returns undefined
- * rather than a plausible-looking guess.
- */
-export function verifyPersonaBadgeProof(
-  groupId: string | undefined,
-  proof: Uint8Array
-): string | undefined {
-  const engine = getPersonasEngine(groupId);
-  if (!engine || typeof engine.verifyBadgeProof !== 'function') {
-    return undefined;
-  }
-  try {
-    const startMs = benchNowMs();
-    const badge = engine.verifyBadgeProof(Buffer.from(proof)) ?? undefined;
-    const doneMs = benchNowMs();
-    benchLog({
-      event: 'verify',
-      op: 'badge_proof',
-      key: benchProofKey(proof),
-      ms: doneMs - startMs,
-      doneMs,
-      ok: badge != null,
-    });
-    return badge;
-  } catch (error) {
-    log.error(`verifyPersonaBadgeProof failed: ${toLogFormat(error)}`);
-    return undefined;
-  }
-}
-
-/**
- * Verify an authorship proof and return the names it PROVES about.
- *
- * The names come from the proof's own public inputs, never from the message. That is
- * the whole point: a sender holding a valid proof about two pseudonyms they own could
- * otherwise display it beside someone else's persona names, and the checkmark would be
- * true while the statement was false.
- */
-export function verifyPersonaAuthorship(
-  groupId: string | undefined,
-  proof: Uint8Array
-): { first: string; second: string } | undefined {
-  const engine = getPersonasEngine(groupId);
-  if (!engine || typeof engine.verifyAuthorship !== 'function') {
-    return undefined;
-  }
-  try {
-    const startMs = benchNowMs();
-    const names = engine.verifyAuthorship(Buffer.from(proof)) ?? undefined;
-    const doneMs = benchNowMs();
-    benchLog({
-      event: 'verify',
-      op: 'authorship',
-      key: benchProofKey(proof),
-      ms: doneMs - startMs,
-      doneMs,
-      ok: names != null,
-    });
-    return names;
-  } catch (error) {
-    log.error(`verifyPersonaAuthorship failed: ${toLogFormat(error)}`);
-    return undefined;
   }
 }
 

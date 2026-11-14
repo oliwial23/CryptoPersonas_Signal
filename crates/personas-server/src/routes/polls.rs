@@ -13,7 +13,7 @@
 
 use ark_ff::PrimeField;
 use axum::extract::{Json, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use personas_core::{F, persona};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -23,7 +23,7 @@ use transport_api::{ConversationId, MessageId, Outgoing, Poll, PollKind};
 
 use crate::bench;
 use crate::error::{AppError, AppResult, ok};
-use crate::state::{Ballot, PollEntry, ServerLock, SlackPoll, emoji_for, emoji_name};
+use crate::state::{Ballot, PollEntry, ServerLock, SlackPoll, emoji_for};
 
 // ---------------------------------------------------------------------------------------
 // Signal polls: a file, so a tally survives a restart.
@@ -110,7 +110,7 @@ async fn open(
 
     let transport = state.read().await.signal.transport.clone();
 
-    let mut msg = Outgoing::new(ConversationId(conversation), body);
+    let mut msg = Outgoing::new(ConversationId(conversation.clone()), body);
     msg.poll = Some(poll);
     msg.reply_to = target.clone();
 
@@ -125,6 +125,7 @@ async fn open(
 
     state.write().await.polls.open_poll(PollEntry {
         timestamp,
+        conversation: Some(conversation),
         votes: vec![],
         ban: target
             .as_ref()
@@ -134,7 +135,12 @@ async fn open(
         context,
     })?;
 
-    Ok(ok())
+    // The poll's id is what a voter quotes (and looks the poll's context up by).
+    Ok((
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"status": "success", "timestamp": timestamp})),
+    )
+        .into_response())
 }
 
 /// Cast a proof-carrying vote.
@@ -144,38 +150,44 @@ pub async fn signal_vote(
 ) -> AppResult<Response> {
     let claimed = parse_field(&input.claimed)?;
     let name = persona::petname(claimed);
+    let choice = persona::signal_ballot_choice(&input.emoji)
+        .ok_or_else(|| AppError::BadRequest("unsupported Signal ballot choice".into()))?;
+    let emoji = emoji_for(choice);
+    let payload = persona::server_ballot_payload("signal", choice);
 
-    {
-        let st = state.read().await;
-        let vk = st.keys.pseudonym_pred_verifying_key.clone();
-        super::post::verify_predicate(&vk, &input.proof, "pseudo_vote", "Cannot submit vote")?;
-    }
+    let transport = {
+        let mut st = state.write().await;
+        let poll = st.polls.get(input.timestamp)
+            .ok_or_else(|| AppError::NotFound("no poll has that timestamp".into()))?;
+        check_destination(poll.conversation.as_deref(), &input.group_id)?;
+        let allowed = if poll.is_ban() {
+            matches!(choice, "ban" | "not ban")
+        } else {
+            matches!(choice, "upvote" | "downvote")
+        };
+        if !allowed {
+            return Err(AppError::BadRequest("invalid choice for this poll".into()));
+        }
+        let context = parse_field(&poll.context)?;
+        super::post::verify_vote(&mut st, &input.proof, context, claimed, payload)?;
+        st.polls.cast(
+            input.timestamp,
+            Ballot {
+                poll_pseudonym: name.clone(),
+                seed: claimed.into_bigint().to_string(),
+                emoji: emoji.into(),
+            },
+        )?;
+        st.signal.transport.clone()
+    };
 
-    let emoji = emoji_for(&input.emoji);
-
-    let transport = state.read().await.signal.transport.clone();
     let mut msg = Outgoing::new(
         ConversationId(input.group_id),
         format!("VOTE FROM: {name}\n\n{emoji}"),
     );
     msg.reply_to = Some(MessageId::from(input.timestamp));
     transport.send(msg).await?;
-
     bench::close_latency("pseudo_vote");
-
-    match emoji_name(emoji) {
-        "upvote" | "downvote" | "ban" | "not ban" => {
-            state.write().await.polls.cast(
-                input.timestamp,
-                Ballot {
-                    poll_pseudonym: name,
-                    seed: input.claimed,
-                    emoji: emoji.to_string(),
-                },
-            )?;
-        }
-        other => tracing::info!("{other} is not a ballot; not counted"),
-    }
 
     Ok(ok())
 }
@@ -185,19 +197,25 @@ pub async fn signal_count_votes(
     State(state): State<ServerLock>,
     Json(input): Json<SignalCountVotes>,
 ) -> AppResult<Response> {
-    let (yes, no, is_ban) = {
-        let st = state.read().await;
+    let (yes, no, is_ban, transport) = {
+        let mut st = state.write().await;
         let poll = st
             .polls
             .get(input.timestamp)
             .ok_or_else(|| AppError::NotFound(format!("no poll at {}", input.timestamp)))?;
+        check_destination(poll.conversation.as_deref(), &input.group_id)?;
         let (yes, no) = poll.tally();
-        (yes, no, poll.is_ban())
+        let is_ban = poll.is_ban();
+        // Freeze the tally before releasing the lock to announce it. Empty polls
+        // stay open so this route can still be used to check for a first vote.
+        if yes + no > 0 {
+            st.polls.close(input.timestamp)?;
+        }
+        (yes, no, is_ban, st.signal.transport.clone())
     };
 
     let body = tally_message(yes, no, is_ban);
 
-    let transport = state.read().await.signal.transport.clone();
     let mut msg = Outgoing::new(ConversationId(input.group_id), body);
     msg.reply_to = Some(MessageId::from(input.timestamp));
     transport.send(msg).await?;
@@ -211,12 +229,6 @@ pub async fn signal_count_votes(
             "poll {} voted {yes}-{no} to ban; an admin must invoke the callback",
             input.timestamp
         );
-    }
-
-    // Only close a poll that somebody voted in. A poll with no votes stays open — which is
-    // what the old code did, and it means "count the votes" is also "have we got any yet?".
-    if yes + no > 0 {
-        state.write().await.polls.close(input.timestamp)?;
     }
 
     Ok(ok())
@@ -367,13 +379,14 @@ async fn open_slack(
     options: Vec<String>,
     target: Option<MessageId>,
 ) -> AppResult<Response> {
-    let vote_id = format!("vote_{}", now_secs());
     let context = fresh_context();
+    // The random poll context also makes the displayed ID unique for concurrent polls.
+    let vote_id = format!("vote_{context}");
     let is_ban = target.is_some();
 
     let transport = state.read().await.slack.transport.clone();
 
-    let mut msg = Outgoing::new(ConversationId(channel), body);
+    let mut msg = Outgoing::new(ConversationId(channel.clone()), body);
     msg.poll = Some(Poll {
         id: vote_id.clone(),
         question,
@@ -394,6 +407,7 @@ async fn open_slack(
         vote_id,
         SlackPoll {
             timestamp: sent.id.0,
+            conversation: Some(channel),
             context,
             voted: HashSet::new(),
             counts: options.into_iter().map(|o| (o, 0u32)).collect(),
@@ -433,13 +447,9 @@ pub async fn slack_vote(
     Json(input): Json<SlackVoteRequest>,
 ) -> AppResult<Response> {
     let claimed = parse_field(&input.claimed)?;
+    let canonical_claimed = claimed.into_bigint().to_string();
     let name = persona::petname(claimed);
-
-    {
-        let st = state.read().await;
-        let vk = st.keys.pseudonym_pred_verifying_key.clone();
-        super::post::verify_predicate(&vk, &input.proof, "pseudo_vote", "Cannot submit vote")?;
-    }
+    let payload = persona::server_ballot_payload("slack", &input.vote);
 
     let announcement = {
         let mut st = state.write().await;
@@ -448,6 +458,7 @@ pub async fn slack_vote(
             .votes
             .get_mut(&input.vote_id)
             .ok_or_else(|| AppError::NotFound(format!("Poll {} not found", input.vote_id)))?;
+        check_destination(poll.conversation.as_deref(), &input.channel)?;
 
         if !poll.counts.contains_key(&input.vote) {
             let options = poll.counts.keys().cloned().collect::<Vec<_>>().join(", ");
@@ -455,17 +466,19 @@ pub async fn slack_vote(
                 "Your vote is not one of the valid options: {options}"
             )));
         }
-
-        // One member, one vote — enforced on the *pseudonym*, which is the only handle the
-        // server has. It cannot tell who this is, only that it is someone who has not voted.
-        if !poll.voted.insert(input.claimed.clone()) {
+        // Older ballots may have been stored with a noncanonical decimal encoding.
+        if poll.voted.iter().any(|seed| persona::field_from_str(seed) == Some(claimed)) {
             return Err(AppError::BadRequest(format!(
                 "{name} has already voted in poll {}",
                 input.vote_id
             )));
         }
+        let context = parse_field(&poll.context)?;
+        super::post::verify_vote(&mut st, &input.proof, context, claimed, payload)?;
 
-        *poll.counts.entry(input.vote.clone()).or_insert(0) += 1;
+        let poll = st.votes.votes.get_mut(&input.vote_id).expect("poll checked under this lock");
+        poll.voted.insert(canonical_claimed);
+        *poll.counts.get_mut(&input.vote).expect("option checked under this lock") += 1;
         let announcement = format!(
             "🗳️ {name} has voted for *{}*!\nCurrent counts: {:?}",
             input.vote, poll.counts
@@ -549,6 +562,13 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn check_destination(conversation: Option<&str>, requested: &str) -> AppResult<()> {
+    if conversation.is_some_and(|stored| stored != requested) {
+        return Err(AppError::BadRequest("this poll belongs to another conversation".into()));
+    }
+    Ok(())
 }
 
 fn parse_field(decimal: &str) -> AppResult<F> {

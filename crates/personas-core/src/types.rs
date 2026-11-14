@@ -74,72 +74,6 @@ pub fn field_to_f64_signed(value: &F) -> f64 {
 // handling here keeps the addon's graph byte-identical to the known-good one.
 // ===========================================================================
 
-/// The five public inputs of an authorship proof, in the order the circuit takes them:
-/// `[context_a, claimed_a, context_b, claimed_b, obj_root]`.
-///
-/// pub_args first, then the membership root — the convention `prove_statement_and_in`
-/// uses against a Merkle store, and the same one the replica relies on for the
-/// single-pseudonym case (`[context, claimed, obj_root]`).
-pub type AuthorshipInputs = [F; 5];
-
-/// Serialize an authorship proof and its public inputs for the wire.
-///
-/// Uncompressed, so decoding cannot fail on a compression-flag mismatch between a
-/// sender and a recipient built at different times; these records are a few hundred
-/// bytes either way and travel inside a Signal message that is already larger.
-pub fn encode_authorship_proof(
-    proof: &<Snark as ark_snark::SNARK<F>>::Proof,
-    inputs: &AuthorshipInputs,
-) -> Result<Vec<u8>, ark_serialize::SerializationError> {
-    use ark_serialize::CanonicalSerialize;
-
-    let mut bytes = Vec::new();
-    proof.serialize_uncompressed(&mut bytes)?;
-    inputs.to_vec().serialize_uncompressed(&mut bytes)?;
-    Ok(bytes)
-}
-
-/// VERIFY an authorship proof, returning its public inputs only if it is sound.
-///
-/// `None` covers every failure — malformed bytes, a proof that does not verify, a
-/// wrong-length input vector — because a caller has nothing useful to do with the
-/// distinction and the alternative is a UI that renders "verified" on a parse error.
-///
-/// WHY THE INPUTS COME BACK. A verified authorship proof is a statement about
-/// `claimed_a` and `claimed_b`, which are field elements, NOT about any names carried
-/// alongside the record. Rendering names the sender supplied next to a checkmark would
-/// let a sender attach a valid proof about two pseudonyms they really own to the display
-/// names of someone else's personas — a true checkmark on a false statement. The caller
-/// must derive what it displays from these returned values (via `persona::petname`) and
-/// ignore any names on the wire. Returning the inputs rather than a bare bool is what
-/// makes the sound usage the easy one.
-pub fn verify_authorship_proof(
-    vk: &impl crate::ProofVerifier,
-    bytes: &[u8],
-) -> Option<AuthorshipInputs> {
-    use ark_serialize::CanonicalDeserialize;
-    use ark_snark::SNARK;
-
-    let mut reader = bytes;
-    let proof =
-        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(&mut reader)
-            .ok()?;
-    let inputs = Vec::<F>::deserialize_uncompressed(&mut reader).ok()?;
-
-    // Length-check BEFORE verifying. Groth16 verification against a short input vector
-    // is a failure rather than a panic, but checking here means a wrong-shaped record is
-    // reported as what it is instead of as a failed proof.
-    if inputs.len() != 5 {
-        return None;
-    }
-
-    if vk.verify_proof(&inputs, &proof) {
-        Some([inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]])
-    } else {
-        None
-    }
-}
-
 /// The badge names held in a user's object, read from the three badge slots.
 ///
 /// Returns the human-readable label for each non-empty slot, in slot order, so the
@@ -172,54 +106,6 @@ pub fn badge_labels(badge1: &F, badge2: &F, badge3: &F) -> Vec<String> {
         }
     }
     out
-}
-
-/// The three public inputs of a badge proof: `[i, claimed, obj_root]`.
-///
-/// pub_args first, then the membership root — the same convention as authorship and as
-/// the replica's `pseudonym_pred` verification.
-pub type BadgeInputs = [F; 3];
-
-/// Serialize a badge proof and its public inputs for the wire.
-pub fn encode_badge_proof(
-    proof: &<Snark as ark_snark::SNARK<F>>::Proof,
-    inputs: &BadgeInputs,
-) -> Result<Vec<u8>, ark_serialize::SerializationError> {
-    use ark_serialize::CanonicalSerialize;
-
-    let mut bytes = Vec::new();
-    proof.serialize_uncompressed(&mut bytes)?;
-    inputs.to_vec().serialize_uncompressed(&mut bytes)?;
-    Ok(bytes)
-}
-
-/// VERIFY a badge proof, returning `(slot, badge)` only if it is sound.
-///
-/// As with authorship, the caller must render what comes BACK from here rather than any
-/// badge label carried in the message: otherwise a valid proof for Student could be
-/// displayed as Faculty, and the checkmark would be true while the label lied.
-///
-/// The third value is the object ROOT the proof was made against. A valid proof only
-/// says "some object in the tree with this root holds the badge" — and anyone can build a
-/// tree of their own around an object with any badge in it. The caller MUST check that
-/// the root is one its own replica produced (`Replica::has_produced_root`).
-pub fn verify_badge_proof(vk: &impl crate::ProofVerifier, bytes: &[u8]) -> Option<(F, F, F)> {
-    use ark_serialize::CanonicalDeserialize;
-    use ark_snark::SNARK;
-
-    let mut reader = bytes;
-    let proof =
-        <<Snark as SNARK<F>>::Proof as CanonicalDeserialize>::deserialize_uncompressed(&mut reader)
-            .ok()?;
-    let inputs = Vec::<F>::deserialize_uncompressed(&mut reader).ok()?;
-    if inputs.len() != 3 {
-        return None;
-    }
-    if vk.verify_proof(&inputs, &proof) {
-        Some((inputs[0], inputs[1], inputs[2]))
-    } else {
-        None
-    }
 }
 
 /// Serialize a not-banned (reset request) proof and its public inputs `[account, nul, root]`.
