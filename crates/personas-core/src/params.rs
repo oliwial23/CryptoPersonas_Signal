@@ -163,7 +163,8 @@ pub fn cache_key(db: &Store) -> Result<String, ParamsError> {
     let mut hasher = Blake2s256::new();
     hasher.update(
         format!(
-            "personas-params;v{PARAMS_FORMAT_VERSION};msguser;nfold={NUM_SCANS_PER_FOLD};{DEP_REVS};{BULLETIN_MODE};"
+            "personas-params;v{PARAMS_FORMAT_VERSION};msguser;nfold={NUM_SCANS_PER_FOLD};{DEP_REVS};{BULLETIN_MODE}{};",
+            crate::circuits::scan_cap_tag()
         )
         .as_bytes(),
     );

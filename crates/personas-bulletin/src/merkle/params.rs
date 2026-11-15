@@ -77,7 +77,11 @@ const MERKLE_KEYS_FILE: &str = "merkle_groth16_keys.bin";
 /// centralized artifact cache: proving keys are read once per boot and decompression
 /// would cost a modular sqrt per curve point for no benefit.
 pub fn ensure_merkle_keys(data_dir: &Path) -> std::io::Result<ServerKeys> {
-    let dir = data_dir.join("params").join(MERKLE_BULLETIN_MODE);
+    // A benchmark build with a non-default scan cap has different keys, so its own folder.
+    let dir = data_dir.join("params").join(format!(
+        "{MERKLE_BULLETIN_MODE}{}",
+        personas_core::circuits::scan_cap_tag()
+    ));
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(MERKLE_KEYS_FILE);
 

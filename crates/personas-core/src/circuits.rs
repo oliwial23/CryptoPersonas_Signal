@@ -41,7 +41,41 @@ use crate::{Args, ArgsVar, CStore, Cr, H, OStore, PK, Snark};
 
 /// How many interactions a member can make between finished sweeps. This bounds how long a
 /// banned member who refuses to scan can keep posting.
-pub const NUM_INTS_BEFORE_SCAN: usize = 20;
+///
+/// Set at build time with `PERSONAS_SCAN_CAP` (default 20), for benchmarks only: a
+/// benchmark build with a larger cap lets one member hold many outstanding callbacks (the
+/// folding sweep). The cap is a circuit constant, so it changes no circuit's size, but it
+/// does change the keys; the key caches name it whenever it is not the default.
+pub const NUM_INTS_BEFORE_SCAN: usize = match option_env!("PERSONAS_SCAN_CAP") {
+    Some(s) => parse_build_usize(s),
+    None => DEFAULT_SCAN_CAP,
+};
+/// The deployed scan cap.
+pub const DEFAULT_SCAN_CAP: usize = 20;
+const _: () = assert!(NUM_INTS_BEFORE_SCAN >= 10, "PERSONAS_SCAN_CAP must be at least 10");
+
+/// A decimal number from a build-time setting (`option_env!`).
+pub const fn parse_build_usize(s: &str) -> usize {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    assert!(!b.is_empty(), "an empty build setting");
+    while i < b.len() {
+        assert!(b[i] >= b'0' && b[i] <= b'9', "a build setting must be a number");
+        n = n * 10 + (b[i] - b'0') as usize;
+        i += 1;
+    }
+    n
+}
+
+/// A suffix naming a non-default scan cap, for key-cache names (empty for the default).
+pub fn scan_cap_tag() -> String {
+    if NUM_INTS_BEFORE_SCAN == DEFAULT_SCAN_CAP {
+        String::new()
+    } else {
+        format!("-cap{NUM_INTS_BEFORE_SCAN}")
+    }
+}
 /// How many rate-limited personas a member has in each context: persona `i` of context
 /// `c` is `H(sk, c, i)` for `i` in `0..MAX_PSEUDO`, so every context has its own three,
 /// unlinkable to any other context's.

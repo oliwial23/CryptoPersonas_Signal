@@ -49,25 +49,13 @@ use crate::{Args, ArgsVar, Cr, F, H, OStore, PK, Snark, VK};
 /// callbacks, so it counts this many interactions toward the scan cap and must stay
 /// below `NUM_INTS_BEFORE_SCAN`.
 pub const TICKET_BATCH_SIZE: usize = match option_env!("PERSONAS_TICKET_BATCH") {
-    Some(s) => parse_usize(s),
+    Some(s) => crate::circuits::parse_build_usize(s),
     None => 1,
 };
 const _: () = assert!(
     TICKET_BATCH_SIZE >= 1 && TICKET_BATCH_SIZE < crate::circuits::NUM_INTS_BEFORE_SCAN,
     "PERSONAS_TICKET_BATCH must be at least 1 and below NUM_INTS_BEFORE_SCAN"
 );
-
-const fn parse_usize(s: &str) -> usize {
-    let b = s.as_bytes();
-    let mut i = 0;
-    let mut n = 0;
-    while i < b.len() {
-        assert!(b[i] >= b'0' && b[i] <= b'9', "PERSONAS_TICKET_BATCH must be a number");
-        n = n * 10 + (b[i] - b'0') as usize;
-        i += 1;
-    }
-    n
-}
 
 /// A member wrapping their own [`User`] with the bookkeeping `batch-zkc` needs to
 /// track which locally-held tickets are still blinded vs. already validated.
@@ -108,6 +96,7 @@ fn privpass_cache_dir(cache_root: &Path, obj_pubkey_bytes: &[u8]) -> std::path::
     let mut hasher = Blake2s256::new();
     hasher.update(b"personas-privpass;v2;ticket-interaction;batchsize=");
     hasher.update(TICKET_BATCH_SIZE.to_le_bytes());
+    hasher.update(crate::circuits::scan_cap_tag().as_bytes());
     hasher.update(obj_pubkey_bytes);
     cache_root.join(hex::encode(&hasher.finalize()[..16]))
 }
