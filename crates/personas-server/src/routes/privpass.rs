@@ -7,15 +7,27 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use personas_core::privpass::{
     clone_exec_meth, decode_post_redemption, decode_ticket_request, encode_validated_tickets,
-    issue_tickets, redemption_key, ticket_pseudonym, verify_redemption,
+    issue_tickets, redemption_key, rotate_issuer_keys, ticket_pseudonym, verify_redemption,
 };
 use personas_core::{F, persona};
 use transport_api::{ConversationId, MessageId, Outgoing};
 
 use crate::bench;
-use crate::bulletin::{bulk, verify_and_append_blind};
+use crate::bulletin::{bulk, callback_hex, verify_and_append_blind};
 use crate::error::{AppError, AppResult, ok};
-use crate::state::{Namespace, ServerLock};
+use crate::state::{Namespace, ServerLock, ServerState};
+
+/// Rotate the ticket issuer key, expiring every unredeemed ticket (`construction`, "Key
+/// rotation"). Called at each epoch boundary and on each ban: a ticket's statement was
+/// proven at issuance, so without this a member could post with tickets issued before a
+/// ban. Clients fetch the new public key with their next request.
+pub(crate) fn rotate_ticket_key(st: &mut ServerState) -> AppResult<()> {
+    let keys = rotate_issuer_keys(&mut rand::thread_rng(), &st.privpass.data_dir)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("could not rotate the ticket key: {e}")))?;
+    st.privpass.issuer = keys;
+    tracing::info!("ticket issuer key rotated; unredeemed tickets expired");
+    Ok(())
+}
 
 /// The batch-ticket proving key a client needs to build a [`TicketRequest`]
 /// (`personas_core::privpass::request_ticket`).
@@ -105,7 +117,10 @@ async fn redeem_post(
     let mut st = state.write().await;
     let start = std::time::SystemTime::now();
     if !verify_redemption(&st.privpass.issuer, &request.redemption) {
-        return Err(AppError::Rejected("the ticket did not verify".into()));
+        return Err(AppError::Rejected(
+            "the ticket did not verify (tickets expire when the epoch turns or a member is banned)"
+                .into(),
+        ));
     }
     let key = hex::encode(redemption_key(&request.redemption));
     if !st.privpass.spent.mark_spent(key)? {
@@ -128,8 +143,19 @@ async fn redeem_post(
         msg.reply_to = Some(MessageId::from(ts));
     }
 
+    // Filed against the message like a proved post's callback, so a ticketed post can be
+    // banned or rated: the ticket's callback is in the poster's object, and their next scan
+    // absorbs whatever is invoked on it.
+    let cb_hex = callback_hex(&request.redemption.callback)?;
+
     let transport = state.read().await.channel(ns).transport.clone();
-    transport.send(msg).await?;
+    let sent = transport.send(msg).await?;
+    state
+        .write()
+        .await
+        .channel_mut(ns)
+        .records
+        .record(&sent.id, cb_hex)?;
 
     tracing::info!(use_persona, "a privacy-pass ticket was redeemed for a post");
     Ok(ok())

@@ -286,6 +286,10 @@ claim redemption still open.**
 forgery (`H(x) * Y` from the public key) is rejected. The badge and reputation redemption
 routes are removed: they accepted any valid ticket with no eligibility check, so any
 holder could grant themselves a badge or reputation. A ticket now buys only a post.
+The issuer key rotates at each epoch update (`/api/epoch`) and on each ban, so tickets
+issued before a ban stop redeeming; clients fetch the public key fresh for every request,
+and a client drops a ticket the server refuses. A redeemed post files its ticket's callback
+against the message, so a ticketed post can be banned or rated like a proved one.
 
 The current ticket construction maps an input to a publicly known scalar
 multiple of the group generator. Even with a correct DLEQ proof, this does not

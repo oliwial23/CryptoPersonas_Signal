@@ -118,15 +118,31 @@ pub fn load_or_create_issuer_keys(
         return Ok(IssuerKeys { privkey, pubkey });
     }
 
+    rotate_issuer_keys(rng, data_dir)
+}
+
+/// Replace the issuer keypair in `data_dir` with a fresh one. Every ticket issued under
+/// the old key stops redeeming: the server rotates at each epoch boundary and on each
+/// ban, so moderation that changes a member's object after issuance (a ban, a revoked
+/// badge, lower reputation) cannot be dodged with tickets issued before it.
+pub fn rotate_issuer_keys(
+    rng: &mut (impl CryptoRng + RngCore),
+    data_dir: &Path,
+) -> Result<IssuerKeys, ParamsError> {
+    fs::create_dir_all(data_dir)?;
+    let path = data_dir.join(ISSUER_KEY_FILE);
     let keys = IssuerKeys::generate(rng);
     let mut bytes = Vec::new();
     keys.privkey.serialize_with_mode(&mut bytes, Compress::No)?;
-    fs::write(&path, &bytes)?;
+    // Beside the target, then renamed over it: a crash must not leave a truncated key.
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
     }
+    fs::rename(&tmp, &path)?;
     Ok(keys)
 }
 

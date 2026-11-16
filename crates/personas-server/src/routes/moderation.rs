@@ -83,6 +83,8 @@ pub async fn ban(State(state): State<ServerLock>, body: Bytes) -> AppResult<Resp
 
     let mut st = state.write().await;
     call(&mut st, cb, F::from(BAN_FLAG))?;
+    // A ban must also stop tickets the member already holds.
+    crate::routes::privpass::rotate_ticket_key(&mut st)?;
 
     tracing::info!("a member has been banned");
     Ok(ok())
@@ -157,6 +159,7 @@ pub async fn update_epoch(State(state): State<ServerLock>) -> AppResult<Response
 
     let (_, start, millis) = bench::time(|| st.db.callback_bul.update_epoch(&mut rng));
     bench::epoch_updated(start, millis);
+    crate::routes::privpass::rotate_ticket_key(&mut st)?;
 
     tracing::info!("epoch updated");
     Ok(ok())

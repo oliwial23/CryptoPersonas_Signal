@@ -43,6 +43,8 @@ pub struct PrivPassState {
     /// The ticket interaction and blind-issuance keys, for `TICKET_BATCH_SIZE` tickets.
     pub keys: TicketKeys,
     pub spent: SpentTicketLog,
+    /// Where the issuer key lives, so a rotation can replace it.
+    pub data_dir: std::path::PathBuf,
 }
 
 /// One messenger, and the server's memory of what it relayed there.
@@ -141,6 +143,7 @@ impl ServerState {
                 issuer: privpass_issuer,
                 keys: privpass_keys,
                 spent: SpentTicketLog::open(data_dir.join("privpass_spent.jsonl"))?,
+                data_dir: data_dir.to_path_buf(),
             },
         })
     }

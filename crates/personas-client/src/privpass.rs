@@ -172,6 +172,12 @@ impl PersonaClient {
             .body(body)
             .send()
             .context("failed to submit the post redemption")?;
+        if resp.status().is_client_error() {
+            // The server refused this ticket (expired by a key rotation, or already spent):
+            // it will never redeem, so drop it rather than leave it blocking newer tickets.
+            privpass::save_stash(&self.cfg.privpass_stash(), &batch_user)
+                .map_err(|e| anyhow!("failed to save the ticket stash: {e}"))?;
+        }
         if !resp.status().is_success() {
             return Err(anyhow!(
                 "server rejected the post redemption ({}): {}",

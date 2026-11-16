@@ -194,6 +194,15 @@ impl PersonaClient {
 
     /// Privacy Pass: the issuer's VOPRF public key, needed to unblind a validated batch.
     pub fn privpass_issuer_pubkey(&self) -> ark_grumpkin::Projective {
-        self.fetch_param("api/privpass/pubkey")
+        // Fetched fresh every time, unlike the proving keys: the server rotates it at each
+        // epoch boundary and on each ban.
+        let route = "api/privpass/pubkey";
+        let url = self
+            .cfg
+            .url(route)
+            .unwrap_or_else(|e| panic!("bad parameter route: {e}"));
+        let bytes = self.download(&url, route);
+        ark_grumpkin::Projective::deserialize_with_mode(bytes.as_slice(), Compress::No, Validate::No)
+            .unwrap_or_else(|e| panic!("server returned an undecodable parameter for {route}: {e}"))
     }
 }
