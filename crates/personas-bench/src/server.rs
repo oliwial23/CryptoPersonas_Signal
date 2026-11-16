@@ -72,6 +72,9 @@ struct ServerOp {
     /// Client work after the response (unblinding a ticket), from `json_files`.
     #[serde(skip_serializing_if = "Option::is_none")]
     client_after: Option<Summary>,
+    /// Mean size of the proof the client uploads, in bytes (scan and fold).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof_bytes: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -487,6 +490,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
                 server: summarize(&logged("anon_msg", "verify_timings.jsonl", args.warmup)),
                 round_trip: summarize(&rt[args.warmup..]),
                 client_after: None,
+                proof_bytes: None,
             },
         );
         eprintln!("post: done");
@@ -560,6 +564,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
                 server: summarize(&logged("pseudo_vote", "verify_timings.jsonl", args.warmup)),
                 round_trip: summarize(&rt[args.warmup..]),
                 client_after: None,
+                proof_bytes: None,
             },
         );
         eprintln!("vote: done");
@@ -593,6 +598,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
                     server: summarize(&logged(label, "verify_timings.jsonl", args.warmup)),
                     round_trip: summarize(&rt[args.warmup..]),
                     client_after: None,
+                    proof_bytes: None,
                 },
             );
             eprintln!("{name}: done");
@@ -621,6 +627,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
                 server: summarize(&logged("pp_issue", "verify_timings.jsonl", args.warmup)),
                 round_trip: None,
                 client_after: summarize(&logged("pp_unblind", "timings.jsonl", args.warmup)),
+                proof_bytes: None,
             },
         );
         let mut rt = Vec::new();
@@ -639,6 +646,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
                 // The whole redeem call: load the ticket stash, redeem, request, save the stash.
                 round_trip: summarize(&rt[args.warmup..]),
                 client_after: None,
+                proof_bytes: None,
             },
         );
         eprintln!("privacy pass: done");
@@ -654,8 +662,10 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         post_json(&http, jsonrpc.clone(), proof);
     }
     let mut rt = Vec::new();
+    let mut scan_bytes = Vec::new();
     while scanner.outstanding_callbacks().unwrap() > 0 || scanner.is_scanning().unwrap() {
         let proof = scanner.scan().expect("scan failed");
+        scan_bytes.push(proof.len() as f64);
         rt.push(post_bytes(&http, scan_url.clone(), proof));
         if !scanner.is_scanning().unwrap() {
             break;
@@ -668,6 +678,8 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             server: summarize(&logged("scan", "verify_timings.jsonl", 0)),
             round_trip: summarize(&rt),
             client_after: None,
+            proof_bytes: (!scan_bytes.is_empty())
+                .then(|| scan_bytes.iter().sum::<f64>() / scan_bytes.len() as f64),
         },
     );
     eprintln!("scan: {} callbacks one by one", rt.len());
@@ -683,6 +695,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     let start = Instant::now();
     let proof = folder.fold().expect("fold failed");
     let client_total = micros(start);
+    let fold_bytes = proof.len() as f64;
     let rt = post_bytes(&http, fold_url, proof);
     let steps = logged("fold", "step_timings.jsonl", 0);
     let randomize = logged("fold", "proof_timings.jsonl", 0);
@@ -694,6 +707,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             server: summarize(&logged("fold", "verify_timings.jsonl", 0)),
             round_trip: summarize(&[rt]),
             client_after: None,
+            proof_bytes: Some(fold_bytes),
         },
     );
     ops.insert(
@@ -703,6 +717,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             server: None,
             round_trip: None,
             client_after: summarize(&randomize),
+            proof_bytes: None,
         },
     );
     eprintln!("fold: {callbacks} callbacks folded");
@@ -724,16 +739,17 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             .map_or("—".into(), |s| format!("{:.2}", s.mean_ms))
     };
     println!(
-        "\n{:<14}{:>12}{:>12}{:>14}{:>14}",
-        "operation", "client ms", "server ms", "round trip", "client after"
+        "\n{:<14}{:>12}{:>12}{:>14}{:>14}{:>14}",
+        "operation", "client ms", "server ms", "round trip", "client after", "proof bytes"
     );
     for (name, op) in &report.operations {
         println!(
-            "{name:<14}{:>12}{:>12}{:>14}{:>14}",
+            "{name:<14}{:>12}{:>12}{:>14}{:>14}{:>14}",
             f(&op.client),
             f(&op.server),
             f(&op.round_trip),
-            f(&op.client_after)
+            f(&op.client_after),
+            op.proof_bytes.map_or("—".to_string(), |b| format!("{b:.0}"))
         );
     }
     write_report(&out, &report);
