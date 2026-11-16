@@ -137,8 +137,9 @@ impl PersonaClient {
     }
 
     /// Post a message: prove the standard predicate (under the rate limit, not banned)
-    /// and mint the callback that lets the group act on this message later.
-    pub fn gen_cb_for_msg(&self) -> Result<Vec<u8>> {
+    /// and mint the callback that lets the group act on this message later. `payload`
+    /// binds the proof to the message (see `persona::server_post_payload`).
+    pub fn gen_cb_for_msg(&self, payload: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
         ensure_not_scanning(&user)?;
@@ -151,7 +152,7 @@ impl PersonaClient {
             &self.bul,
             &pk,
             Time::from(0),
-            F::from(0),
+            payload,
             (),
         )
         .map_err(synthesis)?;
@@ -301,7 +302,7 @@ impl PersonaClient {
 
     /// Post under a pseudonym: prove `claimed = H(sk, context)` alongside the standard
     /// predicate, so the message is attributable to a persona but not to a member.
-    pub fn pseudo_proof_with_msg(&self, claimed: F, context: F) -> Result<Vec<u8>> {
+    pub fn pseudo_proof_with_msg(&self, claimed: F, context: F, payload: F) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
         ensure_not_scanning(&user)?;
@@ -311,7 +312,7 @@ impl PersonaClient {
         let pseudo = PseudonymArgs {
             context,
             claimed,
-            ..Default::default()
+            payload,
         };
 
         let start = SystemTime::now();
@@ -327,7 +328,13 @@ impl PersonaClient {
 
     /// Post under the `i`-th rate-limited pseudonym for `context`, which caps how many
     /// personas one member can wear in a single thread.
-    pub fn rate_pseudo_proof_with_msg(&self, claimed: F, context: F, i: F) -> Result<Vec<u8>> {
+    pub fn rate_pseudo_proof_with_msg(
+        &self,
+        claimed: F,
+        context: F,
+        i: F,
+        payload: F,
+    ) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
         ensure_not_scanning(&user)?;
@@ -337,7 +344,7 @@ impl PersonaClient {
             context,
             claimed,
             i,
-            ..Default::default()
+            payload,
         };
 
         let start = SystemTime::now();

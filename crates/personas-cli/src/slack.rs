@@ -105,8 +105,9 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         }
 
         Command::Post { message, channel } => {
+            let payload = persona::server_post_payload(&channel, None, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.gen_cb_for_msg()).await??;
+            let proof = spawn_blocking(move || pc.gen_cb_for_msg(payload)).await??;
 
             let res = http
                 .post(url("api/slack/post/anon")?)
@@ -127,9 +128,10 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         } => {
             let (claimed, context) = pseudonym_at(personas, pseudo_idx)?;
 
+            let payload = persona::server_post_payload(&channel, None, &message);
             let pc = personas.clone();
-            let proof =
-                spawn_blocking(move || pc.pseudo_proof_with_msg(claimed, context)).await??;
+            let proof = spawn_blocking(move || pc.pseudo_proof_with_msg(claimed, context, payload))
+                .await??;
 
             let res = http
                 .post(url("api/slack/post/pseudo")?)
@@ -156,9 +158,11 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             let i = F::from(pseudo_idx as u32);
             let claimed = personas.pseudo_rate(&context, &i)?;
 
+            let payload = persona::server_post_payload(&channel, None, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.rate_pseudo_proof_with_msg(claimed, context, i))
-                .await??;
+            let proof =
+                spawn_blocking(move || pc.rate_pseudo_proof_with_msg(claimed, context, i, payload))
+                    .await??;
 
             let res = http
                 .post(url("api/slack/post/pseudo/rate")?)

@@ -96,8 +96,9 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         }
 
         Command::Post { message, channel } => {
+            let payload = persona::server_post_payload(&channel, None, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.gen_cb_for_msg()).await??;
+            let proof = spawn_blocking(move || pc.gen_cb_for_msg(payload)).await??;
 
             stamp("anon_msg");
             let res = http
@@ -119,9 +120,10 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         } => {
             let (claimed, context) = pseudonym_at(personas, pseudo_idx)?;
 
+            let payload = persona::server_post_payload(&channel, None, &message);
             let pc = personas.clone();
-            let proof =
-                spawn_blocking(move || pc.pseudo_proof_with_msg(claimed, context)).await??;
+            let proof = spawn_blocking(move || pc.pseudo_proof_with_msg(claimed, context, payload))
+                .await??;
 
             stamp("pseudo_msg");
             let res = http
@@ -149,9 +151,11 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             let i = F::from(pseudo_idx as u32);
             let claimed = personas.pseudo_rate(&context, &i)?;
 
+            let payload = persona::server_post_payload(&channel, None, &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.rate_pseudo_proof_with_msg(claimed, context, i))
-                .await??;
+            let proof =
+                spawn_blocking(move || pc.rate_pseudo_proof_with_msg(claimed, context, i, payload))
+                    .await??;
 
             stamp("rate_pseudo");
             let res = http
@@ -446,8 +450,10 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             message,
             timestamp,
         } => {
+            let target = ts(&timestamp)?.to_string();
+            let payload = persona::server_post_payload(&channel, Some(&target), &message);
             let pc = personas.clone();
-            let proof = spawn_blocking(move || pc.gen_cb_for_msg()).await??;
+            let proof = spawn_blocking(move || pc.gen_cb_for_msg(payload)).await??;
 
             let res = http
                 .post(url("api/reply")?)
@@ -470,9 +476,11 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         } => {
             let (claimed, context) = pseudonym_at(personas, pseudo_idx)?;
 
+            let target = ts(&timestamp)?.to_string();
+            let payload = persona::server_post_payload(&channel, Some(&target), &message);
             let pc = personas.clone();
-            let proof =
-                spawn_blocking(move || pc.pseudo_proof_with_msg(claimed, context)).await??;
+            let proof = spawn_blocking(move || pc.pseudo_proof_with_msg(claimed, context, payload))
+                .await??;
 
             let res = http
                 .post(url("api/reply/pseudo")?)

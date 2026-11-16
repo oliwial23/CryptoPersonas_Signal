@@ -190,7 +190,7 @@ fn verify_post(
     flavour: Flavour,
     proof: &[u8],
     label: &str,
-    claim_payload: F,
+    payload: F,
 ) -> AppResult<Verified> {
     let vk = flavour.verifying_key(st);
     let mut reader = decode(flavour.kind(), proof)?;
@@ -198,7 +198,7 @@ fn verify_post(
     let current = epoch(&st.db);
 
     let (result, start, millis) = bench::time(|| match flavour {
-        Flavour::Anon => verify_and_store(&mut st.db, &vk, exec, F::from(0), current, INTERACTION)
+        Flavour::Anon => verify_and_store(&mut st.db, &vk, exec, payload, current, INTERACTION)
             .map(|callbacks| Verified {
                 callbacks,
                 persona: None,
@@ -217,7 +217,7 @@ fn verify_post(
                 PseudonymArgs {
                     context,
                     claimed,
-                    ..Default::default()
+                    payload,
                 },
                 current,
                 INTERACTION,
@@ -245,7 +245,7 @@ fn verify_post(
                     context,
                     claimed,
                     i,
-                    ..Default::default()
+                    payload,
                 },
                 current,
                 INTERACTION,
@@ -271,7 +271,7 @@ fn verify_post(
                     post: PseudonymArgs {
                         context,
                         claimed,
-                        payload: claim_payload,
+                        payload,
                     },
                     a,
                     b,
@@ -673,7 +673,8 @@ async fn post(
         let payload = if matches!(flavour, Flavour::Claim(_)) {
             persona::server_claim_payload(&conversation, &message)
         } else {
-            F::from(0)
+            let reply = reply_to.as_ref().map(|m| m.as_str());
+            persona::server_post_payload(&conversation, reply, &message)
         };
         let verified = verify_post(&mut st, flavour, &proof, label, payload)?;
         let thread = thread_for(&st, ns, &verified)?;

@@ -52,6 +52,28 @@ pub fn signal_ballot_choice(input: &str) -> Option<&'static str> {
     }
 }
 
+/// Bind a server-backed post proof to where it goes and what it says: the destination,
+/// the message it replies to (if any) and the text. Without this, whoever relays the
+/// request could attach the proof to a different message or conversation.
+pub fn server_post_payload(destination: &str, reply_to: Option<&str>, message: &str) -> F {
+    use blake2::{Blake2s256, Digest};
+
+    let mut hash = Blake2s256::new();
+    hash.update(b"personas server post");
+    hash.update((destination.len() as u64).to_le_bytes());
+    hash.update(destination.as_bytes());
+    match reply_to {
+        Some(target) => {
+            hash.update([1u8]);
+            hash.update((target.len() as u64).to_le_bytes());
+            hash.update(target.as_bytes());
+        }
+        None => hash.update([0u8]),
+    }
+    hash.update(message.as_bytes());
+    F::from_le_bytes_mod_order(&hash.finalize())
+}
+
 /// Bind the destination and message text to a server-backed claim proof.
 pub fn server_claim_payload(destination: &str, message: &str) -> F {
     use blake2::{Blake2s256, Digest};

@@ -125,6 +125,11 @@ fn post_json(http: &reqwest::blocking::Client, url: Url, proof: Vec<u8>) -> u64 
     try_post_json(http, url, proof).unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// The payload of every benchmark post: `try_post_json` sends message "bench" to "bench".
+fn bench_post_payload() -> personas_core::F {
+    personas_core::persona::server_post_payload("bench", None, "bench")
+}
+
 fn try_post_json(
     http: &reqwest::blocking::Client,
     url: Url,
@@ -307,7 +312,7 @@ fn run_load(
     for &concurrency in &levels {
         let proofs: Vec<Vec<u8>> = members
             .iter()
-            .map(|m| m.gen_cb_for_msg().expect("post failed"))
+            .map(|m| m.gen_cb_for_msg(bench_post_payload()).expect("post failed"))
             .collect();
         runs.push(burst("post", concurrency, proofs, |proof| {
             vec![try_post_json(http, jsonrpc.clone(), proof)]
@@ -418,7 +423,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         let others: Vec<PersonaClient> = (0..n).map(|i| member(&format!("history-{i}"))).collect();
         for i in 0..args.history {
             let proof = others[i % n]
-                .gen_cb_for_msg()
+                .gen_cb_for_msg(bench_post_payload())
                 .expect("history post failed");
             post_json(&http, jsonrpc.clone(), proof);
         }
@@ -471,7 +476,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
                 poster = member(&format!("poster-{}", i / POSTS_PER_MEMBER));
             }
             let proof = poster
-                .gen_cb_for_msg()
+                .gen_cb_for_msg(bench_post_payload())
                 .expect("post failed");
             rt.push(post_json(&http, jsonrpc.clone(), proof));
         }
@@ -644,7 +649,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     let scanner = member("scanner");
     for _ in 0..callbacks {
         let proof = scanner
-            .gen_cb_for_msg()
+            .gen_cb_for_msg(bench_post_payload())
             .expect("post failed");
         post_json(&http, jsonrpc.clone(), proof);
     }
@@ -671,7 +676,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     let folder = member("folder");
     for _ in 0..callbacks {
         let proof = folder
-            .gen_cb_for_msg()
+            .gen_cb_for_msg(bench_post_payload())
             .expect("post failed");
         post_json(&http, jsonrpc.clone(), proof);
     }
