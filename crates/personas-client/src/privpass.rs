@@ -175,8 +175,11 @@ impl PersonaClient {
         let mut batch_user = self.take_stashed_ticket()?;
 
         let start = SystemTime::now();
+        let reply = reply_to.map(|ts| ts.to_string());
+        let payload =
+            personas_core::persona::server_post_payload(&channel, reply.as_deref(), &message);
         let redemption = batch_user
-            .use_validated_ticket::<personas_core::H, personas_core::Args, personas_core::Cr>(&[]);
+            .use_validated_ticket::<personas_core::H, personas_core::Args, personas_core::Cr>(&[payload]);
         record("pp_redeem", start);
         let body = encode_post_redemption(&PostRedemption {
             redemption,

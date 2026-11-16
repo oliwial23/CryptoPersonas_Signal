@@ -269,6 +269,23 @@ that is workstream b's Privacy Pass ticket, and it is why tickets are a service-
 
 #### Privacy Pass claim tickets require a different issuer primitive
 
+**Status (2026-11-16, branch `privacy-pass-voprf`): forgery and issuance linkability fixed;
+claim redemption still open.**
+- `hash_to_curve` maps to a Grumpkin point by try-and-increment, so nobody knows its
+  discrete log; the blinding proof checks the point in-circuit.
+- A ticket request no longer carries the clear tickets: the request's interaction part is
+  `BlindExecutedMethod`, without `cb_tik_list`. The blinding proof checks each hidden
+  ticket's method id, expirable flag and expiration, which the issuer used to check in the
+  clear. The server appends the interaction (`verify_and_append_blind`) without storing tickets.
+- Redemption omits the commitment randomness, so the issuer cannot recompute the
+  commitment it saw at issuance.
+- A post redemption's MAC covers `server_post_payload(channel, reply_to, message)`, and the
+  server checks it.
+
+`batch-zkc/examples/test.rs` checks that an honest ticket redeems and that the old
+forgery (`H(x) * Y` from the public key) is rejected. Still open: the badge and reputation
+redemption routes accept any valid ticket, with no eligibility check (below).
+
 The current ticket construction maps an input to a publicly known scalar
 multiple of the group generator. Even with a correct DLEQ proof, this does not
 give the token unforgeability expected of a VOPRF. There is a separate privacy

@@ -3628,6 +3628,7 @@ dependencies = [
  "ark-snark",
  "ark-std",
  "axum",
+ "batch-zkc",
  "dotenvy",
  "folding-schemes",
  "futures-util",

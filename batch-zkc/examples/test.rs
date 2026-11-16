@@ -233,6 +233,7 @@ fn main() {
         exec_meth.pub_blinded_tickets,
         exec_meth.proof,
         &vkb,
+        Time::from(0),
         privkey,
     )
     .unwrap();
@@ -258,6 +259,8 @@ fn main() {
     let start = SystemTime::now();
 
     let out = batch_user.use_validated_ticket::<Poseidon<2>, _, Cr>(&[F::from(0)]);
+    assert_eq!(out.callback.com_rand, F::from(0), "redemption must not reveal com_rand");
+    let forged = forge_from_public_key(&out, pubkey);
 
     println!(
         "\t (time) Generating MAC and key: {:?}",
@@ -275,4 +278,38 @@ fn main() {
     );
 
     println!("{:?}", out);
+    assert!(out, "an honestly issued ticket must redeem");
+
+    let forged_ok = verify_ticket::<Poseidon<2>, F, Cr>(privkey, forged);
+    println!("[ATTACK] Ticket forged from the public key accepted: {forged_ok}");
+    assert!(!forged_ok, "a ticket forged from the public key must be rejected");
+}
+
+/// The attack on the old `H(x) * G` hash-to-curve: with the issuer's public key
+/// `Y = k * G`, anyone could compute `k * H(x) * G = H(x) * Y` for a fresh ticket and
+/// MAC any data without ever asking the issuer. With a real hash-to-curve this guess
+/// is wrong and redemption fails.
+fn forge_from_public_key(
+    honest: &batch_zkc::RedeemExecMethod<F, Cr>,
+    pubkey: G,
+) -> batch_zkc::RedeemExecMethod<F, Cr> {
+    use ark_ec::CurveGroup;
+    use ark_ff::{BigInteger, PrimeField};
+    use zk_callbacks::crypto::hash::HasherZK;
+    let mut callback = honest.callback.clone();
+    callback.cb_entry.expiration += F::from(1); // a ticket never issued
+    let entry = callback.cb_entry.serialize();
+    let scalar = Fr::from_le_bytes_mod_order(&Poseidon::<2>::hash(&entry).into_bigint().to_bytes_le());
+    let z = (pubkey * scalar).into_affine();
+    let mut key_input = entry;
+    key_input.extend([z.x, z.y, F::from(z.infinity)]);
+    let mac_key = Poseidon::<2>::hash(&key_input);
+    let data = vec![F::from(7)];
+    let mut mac_input = vec![mac_key];
+    mac_input.extend(data.iter().copied());
+    batch_zkc::RedeemExecMethod {
+        data,
+        callback,
+        mac: Poseidon::<2>::hash(&mac_input),
+    }
 }

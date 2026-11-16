@@ -9,6 +9,9 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::alloc::AllocationMode;
 use ark_r1cs_std::convert::ToBitsGadget;
 use ark_r1cs_std::eq::EqGadget;
+use ark_r1cs_std::fields::FieldVar;
+use ark_r1cs_std::fields::fp::FpVar;
+use ark_r1cs_std::prelude::Boolean;
 use ark_r1cs_std::groups::CurveVar;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::ns;
@@ -18,7 +21,7 @@ use ark_relations::r1cs::ConstraintSystemRef;
 use ark_relations::r1cs::Namespace;
 use ark_relations::r1cs::Result as ArkResult;
 use ark_relations::r1cs::SynthesisError;
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 use rand::Rng;
 use rand::thread_rng;
@@ -38,7 +41,6 @@ use zk_callbacks::generic::object::ComVar;
 use zk_callbacks::generic::object::Ser;
 use zk_callbacks::generic::object::SerVar;
 use zk_callbacks::generic::object::{Com, Nul};
-use zk_callbacks::generic::user::ExecutedMethod;
 use zk_callbacks::generic::user::UserData;
 use zk_callbacks::generic::{object::Time, user::User};
 
@@ -161,6 +163,7 @@ where
         is_scan: bool,
     ) -> Result<BatchExecutedMethod<Snark, CBArgs, Crypto, BATCHSIZE>, SynthesisError> {
         let old = self.num_outstanding_callbacks();
+        let expected = expected_callbacks(&method);
 
         let res_exec_method = self.user.interact::<H, PubArgs, PubArgsVar, PrivArgs, PrivArgsVar, CBArgs, CBArgsVar, Crypto, Snark, Bul, BATCHSIZE>(
             rng,
@@ -176,12 +179,14 @@ where
         )?;
 
         let mut vec_blinds: Vec<Fr> = vec![];
-
+        let mut h2c_witness: Vec<H2cWitness> = vec![];
         let mut blind_tiks: Vec<G> = vec![];
 
         for i in 0..BATCHSIZE {
             vec_blinds.push(rng.r#gen::<Fr>());
-            let hashed = hash_to_curve::<H>(&res_exec_method.cb_tik_list[i].0.cb_entry.serialize());
+            let (hashed, witness) =
+                hash_to_curve::<H>(&res_exec_method.cb_tik_list[i].0.cb_entry.serialize());
+            h2c_witness.push(witness);
             blind_tiks.push(hashed * vec_blinds[i]);
         }
 
@@ -194,6 +199,9 @@ where
         let batch_tik_circuit = BatchTicketCircuit {
             priv_issued_callbacks: cb_arr.try_into().unwrap(),
             priv_blinds: vec_blinds.clone().try_into().unwrap(),
+            priv_h2c: h2c_witness.try_into().unwrap(),
+            expected_callbacks: expected,
+            pub_cur_time: cur_time,
             pub_cb_commitments: res_exec_method.cb_com_list,
             pub_new_com: res_exec_method.new_object,
             pub_blinded_tickets: blind_tiks.clone().try_into().unwrap(),
@@ -212,8 +220,18 @@ where
             self.outstanding_batched_callbacks.push((*blind, old + i));
         }
 
+        // The issuer must never see the tickets it blind-signs: the blinding proof shows
+        // they are well formed, and the user keeps its own copies in its object. Sending
+        // them would let the issuer link this request to each ticket's redemption.
         Ok(BatchExecutedMethod {
-            exec_meth: res_exec_method,
+            exec_meth: BlindExecutedMethod {
+                new_object: res_exec_method.new_object,
+                old_nullifier: res_exec_method.old_nullifier,
+                cb_com_list: res_exec_method.cb_com_list,
+                cur_time: res_exec_method.cur_time,
+                proof: res_exec_method.proof,
+            },
+            _phantom: PhantomData,
             pub_blinded_tickets: blind_tiks.try_into().unwrap(),
             proof,
         })
@@ -232,7 +250,7 @@ where
         let blinded = self.outstanding_batched_callbacks[self.pointer..(self.pointer + BATCHSIZE)]
             .iter()
             .map(|(x, i)| {
-                hash_to_curve::<H>(&self.get_cb::<Args, Crypto>(*i).cb_entry.serialize()) * x
+                hash_to_curve::<H>(&self.get_cb::<Args, Crypto>(*i).cb_entry.serialize()).0 * x
             })
             .collect::<Vec<_>>();
 
@@ -285,9 +303,17 @@ where
 
         let hmac = H::hash(&v);
 
+        // Redemption reveals the ticket (the service needs `tik` and `enc_key` to call
+        // it) but never the commitment randomness: with it, the issuer could recompute
+        // the commitment it saw at issuance and link the two.
+        let callback = CallbackCom {
+            cb_entry: cb.cb_entry,
+            com_rand: F::ZERO,
+        };
+
         RedeemExecMethod {
             data: data.to_vec(),
-            callback: cb,
+            callback,
             mac: hmac,
         }
     }
@@ -299,30 +325,102 @@ pub struct RedeemExecMethod<CBArgs: Clone, Crypto: AECipherSigZK<F, CBArgs>> {
     pub mac: F,
 }
 
-pub(crate) fn hash_to_curve<H: FieldHash<F>>(value: &[Ser<F>]) -> G {
-    let f = H::hash(value);
+/// Domain separator for [`hash_to_curve`], so its hash inputs never collide with any
+/// other use of `H` ("pptik" as a little-endian integer).
+const H2C_DOMAIN: u64 = 0x6b69_7470_70;
 
-    let fp = {
-        let digest_bits = f.into_bigint().to_bits_le();
-
-        // The truncated bits now represent an integer that's less than r. This cannot fail.
-        Fr::from_bigint(<Fr as PrimeField>::BigInt::from_bits_le(&digest_bits)).unwrap()
-    };
-
-    G::generator() * fp
+/// Grumpkin is `y^2 = x^3 - 17` over `F`, of prime order (cofactor 1), so every point
+/// on the curve is in the group and no cofactor clearing is needed.
+fn grumpkin_rhs(x: F) -> F {
+    x * x * x - F::from(17u64)
 }
 
-pub(crate) fn hash_to_curve_zk<H: FieldHash<F>>(value: &[SerVar<F>]) -> GVar {
-    let f = H::hash_in_zk(value);
-
-    let f_bits = f
-        .iter()
-        .flat_map(|b| b.to_bits_le().unwrap())
-        .collect::<Vec<_>>();
-    GVar::constant(G::generator())
-        .scalar_mul_le(f_bits.iter())
-        .unwrap()
+/// What the blinding proof needs to recompute [`hash_to_curve`] in-circuit: the
+/// counter that produced a valid x-coordinate, and the point's coordinates.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct H2cWitness {
+    pub ctr: F,
+    pub x: F,
+    pub y: F,
 }
+
+/// Hash to a Grumpkin point whose discrete logarithm nobody knows, by try-and-increment:
+/// `x = H(domain, value, ctr)` for the first `ctr` such that `x^3 - 17` is a square, and
+/// the root with an even canonical representation.
+///
+/// This replaces `H(value) * G`, whose discrete log is public: with it, anyone could
+/// compute a ticket's issuer output `H(value) * Y` from the public key `Y` and forge
+/// tickets without the issuer.
+pub fn hash_to_curve<H: FieldHash<F>>(value: &[Ser<F>]) -> (G, H2cWitness) {
+    let mut ctr = 0u64;
+    loop {
+        let mut input = Vec::with_capacity(value.len() + 2);
+        input.push(F::from(H2C_DOMAIN));
+        input.extend_from_slice(value);
+        input.push(F::from(ctr));
+        let x = H::hash(&input);
+        if let Some(root) = grumpkin_rhs(x).sqrt() {
+            let y = if root.into_bigint().is_even() { root } else { -root };
+            let point = GA::new_unchecked(x, y);
+            debug_assert!(point.is_on_curve());
+            return (
+                point.into(),
+                H2cWitness { ctr: F::from(ctr), x, y },
+            );
+        }
+        ctr += 1;
+    }
+}
+
+/// The in-circuit check for [`hash_to_curve`]: `x = H(domain, value, ctr)` and `(x, y)`
+/// is on the curve. The counter and the sign of `y` are not forced to be the canonical
+/// ones; a prover that picks another point only gets a ticket that fails redemption,
+/// since the issuer recomputes the canonical point there.
+fn hash_to_curve_zk<H: FieldHash<F>>(
+    value: &[SerVar<F>],
+    ctr: &FpVar<F>,
+    x: &FpVar<F>,
+    y: &FpVar<F>,
+) -> Result<GVar, SynthesisError> {
+    let mut input = Vec::with_capacity(value.len() + 2);
+    input.push(FpVar::constant(F::from(H2C_DOMAIN)));
+    input.extend_from_slice(value);
+    input.push(ctr.clone());
+    H::hash_in_zk(&input)?.enforce_equal(x)?;
+    y.square()?
+        .enforce_equal(&(x.square()? * x - FpVar::constant(F::from(17u64))))?;
+    Ok(GVar::new(x.clone(), y.clone(), FpVar::one()))
+}
+
+/// The shape every issued callback must have: method id, expirable, and expiration
+/// offset from the interaction's time. The issuer used to check these on the clear
+/// tickets; the blinding proof now checks them instead, so the tickets stay hidden.
+#[derive(Clone, Copy, Debug)]
+pub struct ExpectedCallback {
+    pub method_id: F,
+    pub expirable: bool,
+    pub expiration: F,
+}
+
+fn expected_callbacks<
+    U: UserData<F>,
+    PubArgs: Clone,
+    PubArgsVar: AllocVar<PubArgs, F>,
+    PrivArgs: Clone,
+    PrivArgsVar: AllocVar<PrivArgs, F>,
+    CBArgs: Clone,
+    CBArgsVar: AllocVar<CBArgs, F>,
+    const BATCHSIZE: usize,
+>(
+    method: &Interaction<F, U, PubArgs, PubArgsVar, PrivArgs, PrivArgsVar, CBArgs, CBArgsVar, BATCHSIZE>,
+) -> [ExpectedCallback; BATCHSIZE] {
+    core::array::from_fn(|i| ExpectedCallback {
+        method_id: method.callbacks[i].method_id,
+        expirable: method.callbacks[i].expirable,
+        expiration: method.callbacks[i].expiration,
+    })
+}
+
 
 #[derive(Debug, Clone)]
 pub struct ExpVar {
@@ -372,13 +470,25 @@ impl Mul<GVar> for ExpVar {
     }
 }
 
+/// The interaction part of a ticket request: an `ExecutedMethod` without its clear
+/// callback tickets (`cb_tik_list`), which the issuer must never see.
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
+pub struct BlindExecutedMethod<Snark: SNARK<F>, const BATCHSIZE: usize> {
+    pub new_object: Com<F>,
+    pub old_nullifier: Nul<F>,
+    pub cb_com_list: [Com<F>; BATCHSIZE],
+    pub cur_time: Time<F>,
+    pub proof: Snark::Proof,
+}
+
 pub struct BatchExecutedMethod<
     Snark: SNARK<F>,
     CBArgs: Clone,
     Crypto: AECipherSigZK<F, CBArgs>,
     const BATCHSIZE: usize,
 > {
-    pub exec_meth: ExecutedMethod<F, Snark, CBArgs, Crypto, BATCHSIZE>,
+    pub exec_meth: BlindExecutedMethod<Snark, BATCHSIZE>,
+    pub _phantom: PhantomData<(CBArgs, Crypto)>,
     pub pub_blinded_tickets: [G; BATCHSIZE],
     pub proof: Snark::Proof,
 }
@@ -392,6 +502,10 @@ pub struct BatchTicketCircuit<
 > {
     pub priv_issued_callbacks: [CallbackCom<F, CBArgs, Crypto>; BATCHSIZE],
     pub priv_blinds: [Fr; BATCHSIZE],
+    pub priv_h2c: [H2cWitness; BATCHSIZE],
+    /// Circuit constants, fixed by the interaction at key generation.
+    pub expected_callbacks: [ExpectedCallback; BATCHSIZE],
+    pub pub_cur_time: Time<F>,
     pub pub_cb_commitments: [Com<F>; BATCHSIZE],
     pub pub_new_com: Com<F>,
     pub pub_blinded_tickets: [G; BATCHSIZE],
@@ -449,9 +563,13 @@ pub fn generate_keys_for_batch_tickets<
         .collect::<Vec<_>>()
         .try_into()
         .unwrap_or_else(|_| panic!("Failed to create defaults."));
+    let expected = expected_callbacks(&interaction);
     let out: BatchTicketCircuit<H, CBArgs, Crypto, BATCHSIZE> = BatchTicketCircuit {
         priv_issued_callbacks: cbs,
         priv_blinds: [Fr::ZERO; BATCHSIZE],
+        priv_h2c: [H2cWitness::default(); BATCHSIZE],
+        expected_callbacks: expected,
+        pub_cur_time: F::ZERO,
         pub_cb_commitments: [F::ZERO; BATCHSIZE],
         pub_new_com: F::ZERO,
         pub_blinded_tickets: vec![G::generator(); BATCHSIZE].try_into().unwrap(),
@@ -494,6 +612,17 @@ impl<H: FieldHash<F>, CBArgs: Clone, Crypto: AECipherSigZK<F, CBArgs>, const BAT
 
         let pub_tik_var: [GVar; BATCHSIZE] = pub_tik_var_vec.try_into().unwrap();
 
+        let pub_time_var = FpVar::new_input(ns!(cs, "pub_cur_time"), || Ok(self.pub_cur_time))?;
+
+        let mut h2c_vars = vec![];
+        for w in self.priv_h2c {
+            h2c_vars.push((
+                FpVar::new_witness(ns!(cs, "h2c_ctr"), || Ok(w.ctr))?,
+                FpVar::new_witness(ns!(cs, "h2c_x"), || Ok(w.x))?,
+                FpVar::new_witness(ns!(cs, "h2c_y"), || Ok(w.y))?,
+            ));
+        }
+
         // commit to new user and enforce that that is correct
 
         // (User::commit_in_zk::<H>(new_user_var.clone())?).enforce_equal(&pub_com_var)?;
@@ -503,10 +632,23 @@ impl<H: FieldHash<F>, CBArgs: Clone, Crypto: AECipherSigZK<F, CBArgs>, const BAT
             (CallbackCom::commit_in_zk::<H>(priv_issued_callbacks[i].clone())?)
                 .enforce_equal(&pub_cb_com_var[i])?;
 
-            // check that the privacy pass blinds are correct
-            (priv_blinds_var[i].clone()
-                * hash_to_curve_zk::<H>(&priv_issued_callbacks[i].cb_entry.serialize()?))?
-            .enforce_equal(&pub_tik_var[i])?;
+            // the callback has the shape the interaction issues (the issuer no longer sees it)
+            let entry = &priv_issued_callbacks[i].cb_entry;
+            let expected = self.expected_callbacks[i];
+            entry
+                .cb_method_id
+                .enforce_equal(&FpVar::constant(expected.method_id))?;
+            entry
+                .expirable
+                .enforce_equal(&Boolean::constant(expected.expirable))?;
+            entry
+                .expiration
+                .enforce_equal(&(FpVar::constant(expected.expiration) + &pub_time_var))?;
+
+            // check that the privacy pass blinds are correct: T~ = r * H1(ticket)
+            let (ctr, x, y) = &h2c_vars[i];
+            let hashed = hash_to_curve_zk::<H>(&entry.serialize()?, ctr, x, y)?;
+            (priv_blinds_var[i].clone() * hashed)?.enforce_equal(&pub_tik_var[i])?;
         }
 
         Ok(())
@@ -543,6 +685,7 @@ pub fn verify_and_validate<
     blinded: [G; BATCHSIZE],
     blinded_proof: Snark::Proof,
     blinded_verif_key: &Snark::VerifyingKey,
+    cur_time: Time<F>,
     private_key: Fr,
 ) -> Result<ValidatedTickets<BATCHSIZE>, &'static str> {
     let out = bul.verify_in::<PubArgs, Snark, BATCHSIZE>(
@@ -583,6 +726,7 @@ pub fn verify_and_validate<
         pub_inputs.extend_from_slice(&i.into_affine().y.to_field_elements().unwrap());
         pub_inputs.push(F::from(!i.into_affine().infinity));
     }
+    pub_inputs.push(cur_time);
 
     let out = Snark::verify(blinded_verif_key, &pub_inputs, &blinded_proof).unwrap_or(false);
 
@@ -767,7 +911,7 @@ pub fn verify_ticket<H: FieldHash<F>, CBArgs: Clone, Crypto: AECipherSigZK<F, CB
     privkey: Fr,
     data: RedeemExecMethod<CBArgs, Crypto>,
 ) -> bool {
-    let t = hash_to_curve::<H>(&data.callback.cb_entry.serialize());
+    let t = hash_to_curve::<H>(&data.callback.cb_entry.serialize()).0;
     let z = t * privkey;
 
     let mut inp_hash = data.callback.cb_entry.serialize();

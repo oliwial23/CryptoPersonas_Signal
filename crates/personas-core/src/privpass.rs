@@ -94,7 +94,7 @@ impl IssuerKeys {
 fn privpass_cache_dir(cache_root: &Path, obj_pubkey_bytes: &[u8]) -> std::path::PathBuf {
     use blake2::{Blake2s256, Digest};
     let mut hasher = Blake2s256::new();
-    hasher.update(b"personas-privpass;v2;ticket-interaction;batchsize=");
+    hasher.update(b"personas-privpass;v3;hidden-tickets;batchsize=");
     hasher.update(TICKET_BATCH_SIZE.to_le_bytes());
     hasher.update(crate::circuits::scan_cap_tag().as_bytes());
     hasher.update(obj_pubkey_bytes);
@@ -351,6 +351,9 @@ pub fn issue_tickets(
         request.pub_blinded_tickets,
         request.proof.clone(),
         batch_vk,
+        // `request_ticket` runs the ticket interaction at time 0; the blinding proof
+        // checks each hidden ticket's expiration against this.
+        F::from(0),
         issuer.privkey,
     )
 }
@@ -377,19 +380,15 @@ pub fn redemption_key(redemption: &TicketRedemption) -> Vec<u8> {
     bytes
 }
 
-/// A manual clone of the request's `ExecutedMethod`. Its derive requires `Snark:
-/// Clone` even though `Snark` isn't stored data — `Groth16` doesn't implement
-/// `Clone`, so the derived one is uncallable. The server needs the same exec_meth
-/// twice: appended to the bulletin first (`verify_and_store`), then checked again —
-/// with the new object now actually registered — by [`issue_tickets`]'s internal
-/// `verify_in`, which is why the ordering there matters (see that function's docs).
+/// A manual clone of the request's interaction part. Its derive would require `Snark:
+/// Clone`, which `Groth16` doesn't implement. The server needs it twice: appended to the
+/// bulletin first, then checked again by [`issue_tickets`]'s internal `verify_in`.
 pub fn clone_exec_meth(
-    e: &zk_callbacks::generic::user::ExecutedMethod<F, Snark, Args, Cr, TICKET_BATCH_SIZE>,
-) -> zk_callbacks::generic::user::ExecutedMethod<F, Snark, Args, Cr, TICKET_BATCH_SIZE> {
-    zk_callbacks::generic::user::ExecutedMethod {
+    e: &batch_zkc::BlindExecutedMethod<Snark, TICKET_BATCH_SIZE>,
+) -> batch_zkc::BlindExecutedMethod<Snark, TICKET_BATCH_SIZE> {
+    batch_zkc::BlindExecutedMethod {
         new_object: e.new_object,
         old_nullifier: e.old_nullifier,
-        cb_tik_list: e.cb_tik_list.clone(),
         cb_com_list: e.cb_com_list,
         cur_time: e.cur_time,
         proof: e.proof.clone(),
@@ -499,6 +498,7 @@ pub fn decode_ticket_request(
         exec_meth,
         pub_blinded_tickets: tickets,
         proof,
+        _phantom: std::marker::PhantomData,
     })
 }
 

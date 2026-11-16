@@ -15,7 +15,7 @@ use personas_core::{F, persona};
 use transport_api::{ConversationId, MessageId, Outgoing};
 
 use crate::bench;
-use crate::bulletin::{self, bulk, epoch, verify_and_store};
+use crate::bulletin::{bulk, verify_and_append_blind};
 use crate::error::{AppError, AppResult, ok};
 use crate::routes::moderation::call;
 use crate::state::{Namespace, ServerLock};
@@ -42,7 +42,6 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
 
     let mut st = state.write().await;
     let interaction_vk = st.privpass.keys.interaction_vk.clone();
-    let current = epoch(&st.db);
 
     let object = request.exec_meth.new_object;
     let old_nul = request.exec_meth.old_nullifier;
@@ -53,14 +52,7 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
     // implement), hence the manual `clone_exec_meth`.
     let exec_meth_for_append = clone_exec_meth(&request.exec_meth);
     let start = std::time::SystemTime::now();
-    verify_and_store(
-        &mut st.db,
-        &interaction_vk,
-        exec_meth_for_append,
-        F::from(0),
-        current,
-        bulletin::INTERACTION,
-    )?;
+    verify_and_append_blind(&mut st.db, &interaction_vk, exec_meth_for_append, F::from(0))?;
 
     let memb_data = st.db.obj_bul.get_pubkey();
     let batch_vk = st.privpass.keys.batch_vk.clone();
@@ -131,6 +123,16 @@ async fn redeem_post(
 ) -> AppResult<Response> {
     let request = decode_post_redemption(&body)
         .map_err(|e| AppError::BadRequest(format!("that is not a post redemption: {e}")))?;
+
+    // The ticket's MAC must cover this message, so a post cannot be detached from the
+    // redemption and replayed with different content.
+    let reply = request.reply_to.map(|ts| ts.to_string());
+    let payload = persona::server_post_payload(&request.channel, reply.as_deref(), &request.message);
+    if request.redemption.data != [payload] {
+        return Err(AppError::Rejected(
+            "the ticket's MAC does not cover this message".into(),
+        ));
+    }
 
     let mut st = state.write().await;
     let start = std::time::SystemTime::now();

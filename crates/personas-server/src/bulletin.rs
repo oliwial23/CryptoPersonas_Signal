@@ -98,6 +98,35 @@ where
     Ok(callbacks)
 }
 
+/// Verify a Privacy Pass ticket request's interaction and append it to the bulletin,
+/// without its callback tickets. Unlike [`verify_and_store`], nothing is checked against
+/// or stored from the clear tickets: the issuer never sees them, so it cannot link the
+/// request to a redemption. The blinding proof checks their shape instead, and the
+/// service learns each ticket only when it is redeemed.
+pub fn verify_and_append_blind<const N: usize>(
+    db: &mut Store,
+    vk: &VK,
+    exec: batch_zkc::BlindExecutedMethod<Snark, N>,
+    pub_args: F,
+) -> Result<(), AppError> {
+    let appended = <OStore as UserBul<F, MsgUser>>::verify_interact_and_append::<F, Snark, N>(
+        &mut db.obj_bul,
+        exec.new_object,
+        exec.old_nullifier,
+        pub_args,
+        exec.cb_com_list,
+        exec.proof,
+        None,
+        vk,
+    );
+    if appended.is_err() {
+        tracing::info!("ticket request rejected: append={appended:?}");
+        return Err(interaction_rejected());
+    }
+    tracing::info!("ticket request verified and appended to the bulletin");
+    Ok(())
+}
+
 fn interaction_rejected() -> AppError {
     AppError::Rejected(
         "Cannot post message: proof failed. Check if you are banned or have inadequate reputation score.".into(),
