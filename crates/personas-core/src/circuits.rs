@@ -42,15 +42,17 @@ use crate::{Args, ArgsVar, CStore, Cr, H, OStore, PK, Snark};
 /// How many interactions a member can make between finished sweeps. This bounds how long a
 /// banned member who refuses to scan can keep posting.
 ///
-/// Set at build time with `PERSONAS_SCAN_CAP` (default 20), for benchmarks only: a
-/// benchmark build with a larger cap lets one member hold many outstanding callbacks (the
-/// folding sweep). The cap is a circuit constant, so it changes no circuit's size, but it
-/// does change the keys; the key caches name it whenever it is not the default.
+/// Set at build time with `PERSONAS_SCAN_CAP` (default 20, the serverless deployment's).
+/// The server-backed deployment builds with 128 (see `deploy/play/Dockerfile.validator` and
+/// the README), which is also the cap the folding benchmarks to k = 100 use: folding makes a
+/// large backlog cheap for its server. The cap is a circuit constant, so it changes no
+/// circuit's size, but it does change the keys; the key caches name it whenever it is not
+/// the default, and a server reports it at `/api/scan_cap` so clients can check theirs.
 pub const NUM_INTS_BEFORE_SCAN: usize = match option_env!("PERSONAS_SCAN_CAP") {
     Some(s) => parse_build_usize(s),
     None => DEFAULT_SCAN_CAP,
 };
-/// The deployed scan cap.
+/// The serverless deployment's scan cap.
 pub const DEFAULT_SCAN_CAP: usize = 20;
 const _: () = assert!(NUM_INTS_BEFORE_SCAN >= 10, "PERSONAS_SCAN_CAP must be at least 10");
 

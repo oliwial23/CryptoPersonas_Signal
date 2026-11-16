@@ -18,6 +18,9 @@ use crate::PersonaClient;
 /// lifetime and a key is megabytes: fetching one for every proof goes unnoticed on
 /// loopback but dominates over a real network.
 static FETCHED: LazyLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = LazyLock::new(Default::default);
+/// Servers whose scan cap has been checked against this build's.
+static CAP_CHECKED: LazyLock<Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(Default::default);
 
 /// How long one parameter may take to download. A client's default 30 s covers the whole
 /// request, body included, which the larger keys exceed on an ordinary connection.
@@ -35,6 +38,36 @@ fn cause_chain(error: &dyn std::error::Error) -> String {
 }
 
 impl PersonaClient {
+    /// Refuse to prove against a server whose scan cap differs from this build's: the cap
+    /// is a circuit constant, so the proofs would not verify and the failure would look
+    /// like a bad proof. Checked once per server per process. A server too old to report
+    /// its cap is not checked.
+    fn check_scan_cap(&self) {
+        let Ok(url) = self.cfg.url("api/scan_cap") else { return };
+        if !CAP_CHECKED.lock().unwrap().insert(url.to_string()) {
+            return;
+        }
+        let ours = personas_core::circuits::NUM_INTS_BEFORE_SCAN;
+        let theirs = self
+            .bul
+            .client
+            .get(url)
+            .timeout(FETCH_TIMEOUT)
+            .send()
+            .ok()
+            .filter(|r| r.status().is_success())
+            .and_then(|r| r.text().ok())
+            .and_then(|t| t.trim().parse::<usize>().ok());
+        if let Some(theirs) = theirs
+            && theirs != ours
+        {
+            panic!(
+                "this client was built with scan cap {ours}, but the server uses {theirs}; \
+                 rebuild the client with PERSONAS_SCAN_CAP={theirs}"
+            );
+        }
+    }
+
     /// GET `route` (once per process) and canonical-deserialize a parameter.
     ///
     /// Panics on failure: without the key there is no proof to produce, and every caller
@@ -46,6 +79,7 @@ impl PersonaClient {
             .url(route)
             .unwrap_or_else(|e| panic!("bad parameter route: {e}"));
 
+        self.check_scan_cap();
         let cached = FETCHED.lock().unwrap().get(url.as_str()).cloned();
         let bytes = cached.unwrap_or_else(|| {
             let bytes = Arc::new(self.download(&url, route));

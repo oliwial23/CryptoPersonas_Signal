@@ -115,6 +115,7 @@ pub fn router(state: ServerLock) -> Router {
             post_route(privpass::redeem_pseudo_post_slack),
         )
         .route("/api/privpass/pubkey", get(privpass::issuer_pubkey))
+        .route("/api/scan_cap", get(scan_cap))
         .route(
             "/api/privpass/batch_proving_key",
             get(privpass::batch_proving_key),
@@ -216,4 +217,11 @@ pub fn router(state: ServerLock) -> Router {
             get(context::slack_contexts),
         )
         .with_state(state)
+}
+
+/// The scan cap this server's circuits were built with (`PERSONAS_SCAN_CAP`), as decimal
+/// text. A client built with a different cap synthesizes different circuits, so its
+/// proofs would not verify against this server's keys; it checks this first.
+async fn scan_cap() -> String {
+    personas_core::circuits::NUM_INTS_BEFORE_SCAN.to_string()
 }
