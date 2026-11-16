@@ -39,7 +39,7 @@ use zk_callbacks::generic::object::{Com, Nul};
 use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
 use crate::circuits::{
-    BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, MsgUser, TicketInt, get_ticket_interaction,
+    MsgUser, TicketInt, get_ticket_interaction,
 };
 use crate::params::ParamsError;
 use crate::{Args, ArgsVar, Cr, F, H, OStore, PK, Snark, VK};
@@ -404,24 +404,11 @@ fn clone_redemption(r: &TicketRedemption) -> TicketRedemption {
 }
 
 // ---------------------------------------------------------------------------------------
-// Redeeming for a specific action. Deliberately not a free-form argument the redeemer
-// picks (that would let anyone self-grant any badge, or worse, self-ban/ban others, with
-// no eligibility check — see `docs/FINDINGS.md` O7's discussion) — each action here is
-// narrow and specific, matching how the rest of the service already works: `ban`,
-// `reputation`, `approve_badge` are separate routes, never one "invoke with any argument"
-// endpoint.
+// Redeeming. A ticket buys one post and nothing else: a ticket says nothing about who
+// holds it, so redeeming one for a badge or a reputation change would let any member
+// grant themselves either (FINDINGS O7). Badges and reputation go through their own,
+// proved routes.
 // ---------------------------------------------------------------------------------------
-
-/// The three badges a ticket can be redeemed for — `1` Faculty, `2` Student, `3`
-/// Industry, matching `approve_badge`'s own numbering. Anything else is rejected.
-pub fn badge_flag(index: u32) -> Option<F> {
-    match index {
-        1 => Some(F::from(BADGE1_FLAG)),
-        2 => Some(F::from(BADGE2_FLAG)),
-        3 => Some(F::from(BADGE3_FLAG)),
-        _ => None,
-    }
-}
 
 /// A one-time pseudonym for a redeemed ticket, used only for `redeem_pseudo_post`.
 ///
@@ -447,12 +434,6 @@ pub struct PostRedemption {
     pub message: String,
     pub channel: String,
     pub reply_to: Option<u64>,
-}
-
-/// What `redeem_badge` submits: a redemption plus which badge (see [`badge_flag`]).
-pub struct BadgeRedemption {
-    pub redemption: TicketRedemption,
-    pub index: u32,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -602,39 +583,6 @@ pub fn decode_post_redemption(
         message,
         channel,
         reply_to,
-    })
-}
-
-pub fn encode_badge_redemption(
-    r: &BadgeRedemption,
-) -> Result<Vec<u8>, ark_serialize::SerializationError> {
-    let mut bytes = encode_redemption(&r.redemption)?;
-    bytes.extend_from_slice(&r.index.to_le_bytes());
-    Ok(bytes)
-}
-
-pub fn decode_badge_redemption(
-    bytes: &[u8],
-) -> Result<BadgeRedemption, ark_serialize::SerializationError> {
-    use ark_serialize::SerializationError as SE;
-    let mut reader = bytes;
-    let data = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
-    let callback = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
-    let mac = CanonicalDeserialize::deserialize_compressed(&mut reader)?;
-    if reader.len() < 4 {
-        return Err(SE::IoError(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "missing badge index",
-        )));
-    }
-    let index = u32::from_le_bytes(reader[..4].try_into().unwrap());
-    Ok(BadgeRedemption {
-        redemption: RedeemExecMethod {
-            data,
-            callback,
-            mac,
-        },
-        index,
     })
 }
 

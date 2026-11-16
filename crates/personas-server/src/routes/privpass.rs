@@ -5,11 +5,9 @@
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use personas_core::circuits::arg_rep;
 use personas_core::privpass::{
-    badge_flag, clone_exec_meth, decode_badge_redemption, decode_post_redemption,
-    decode_redemption, decode_ticket_request, encode_validated_tickets, issue_tickets,
-    redemption_key, ticket_pseudonym, verify_redemption,
+    clone_exec_meth, decode_post_redemption, decode_ticket_request, encode_validated_tickets,
+    issue_tickets, redemption_key, ticket_pseudonym, verify_redemption,
 };
 use personas_core::{F, persona};
 use transport_api::{ConversationId, MessageId, Outgoing};
@@ -17,7 +15,6 @@ use transport_api::{ConversationId, MessageId, Outgoing};
 use crate::bench;
 use crate::bulletin::{bulk, verify_and_append_blind};
 use crate::error::{AppError, AppResult, ok};
-use crate::routes::moderation::call;
 use crate::state::{Namespace, ServerLock};
 
 /// The batch-ticket proving key a client needs to build a [`TicketRequest`]
@@ -77,35 +74,6 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
     let bytes = encode_validated_tickets(&validated)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("could not encode the ticket: {e}")))?;
     Ok((axum::http::StatusCode::OK, bytes).into_response())
-}
-
-/// Redeem a ticket for a specific badge — `1` Faculty, `2` Student, `3` Industry,
-/// matching `approve_badge`'s own numbering. Not a free-form argument: unlike a real
-/// badge request, this skips `badge_pred`'s eligibility proof entirely, applying the
-/// flag on possession of a valid, unspent ticket alone — an accepted simplification
-/// for now (no admin gate), not something to read as "eligibility-checked."
-pub async fn redeem_badge(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
-    let request = decode_badge_redemption(&body)
-        .map_err(|e| AppError::BadRequest(format!("that is not a badge redemption: {e}")))?;
-    let flag = badge_flag(request.index)
-        .ok_or_else(|| AppError::BadRequest("badge index must be 1, 2, or 3".into()))?;
-    let redemption = request.redemption;
-
-    let mut st = state.write().await;
-    if !verify_redemption(&st.privpass.issuer, &redemption) {
-        return Err(AppError::Rejected("the ticket did not verify".into()));
-    }
-    let key = hex::encode(redemption_key(&redemption));
-    if !st.privpass.spent.mark_spent(key)? {
-        return Err(AppError::Rejected(
-            "this ticket has already been redeemed".into(),
-        ));
-    }
-
-    call(&mut st, redemption.callback, flag)?;
-
-    tracing::info!("a privacy-pass ticket was redeemed for a badge");
-    Ok(ok())
 }
 
 /// Redeem a ticket to post one message, optionally threaded as a reply
@@ -193,35 +161,6 @@ pub async fn redeem_pseudo_post_slack(
     body: Bytes,
 ) -> AppResult<Response> {
     redeem_post(state, Namespace::Slack, true, body).await
-}
-
-/// Redeem a ticket for a small, fixed reputation bump (+1) — reusing `call()`, the
-/// same mechanism `reputation`'s own route uses, just with a fixed amount instead of
-/// the ledger's accumulated rating. Fixed rather than free-form for the same reason
-/// badge redemption is limited to three flags: an arbitrary caller-chosen amount
-/// would let anyone inflate their own reputation without limit.
-pub async fn redeem_reputation(
-    State(state): State<ServerLock>,
-    body: Bytes,
-) -> AppResult<Response> {
-    let redemption = decode_redemption(&body)
-        .map_err(|e| AppError::BadRequest(format!("that is not a redemption: {e}")))?;
-
-    let mut st = state.write().await;
-    if !verify_redemption(&st.privpass.issuer, &redemption) {
-        return Err(AppError::Rejected("the ticket did not verify".into()));
-    }
-    let key = hex::encode(redemption_key(&redemption));
-    if !st.privpass.spent.mark_spent(key)? {
-        return Err(AppError::Rejected(
-            "this ticket has already been redeemed".into(),
-        ));
-    }
-
-    call(&mut st, redemption.callback, arg_rep(1))?;
-
-    tracing::info!("a privacy-pass ticket was redeemed for a reputation bump");
-    Ok(ok())
 }
 
 /// The issuer's public key — every client needs it to unblind a validated batch

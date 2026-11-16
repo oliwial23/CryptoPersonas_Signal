@@ -131,15 +131,6 @@ pub enum Command {
     PrivPassRequest,
 
     /// Privacy Pass (FINDINGS O7): redeem a previously-stashed ticket (see
-    /// `priv-pass-request`) for a badge. `-i` is 1 Faculty, 2 Student, 3
-    /// Industry — see `personas_core::privpass` for why this skips the usual
-    /// eligibility proof.
-    PrivPassBadge {
-        #[arg(long = "index", short = 'i')]
-        index: u32,
-    },
-
-    /// Privacy Pass (FINDINGS O7): redeem a previously-stashed ticket (see
     /// `priv-pass-request`) to post one message with no persona at all. `-t`
     /// (Signal only) threads it as a reply.
     PrivPassPost {
@@ -162,10 +153,6 @@ pub enum Command {
         #[arg(long = "timestamp", short = 't')]
         reply_to: Option<u64>,
     },
-
-    /// Privacy Pass (FINDINGS O7): redeem a previously-stashed ticket (see
-    /// `priv-pass-request`) for a fixed +1 reputation bump.
-    PrivPassReputation,
 
     /// Generate a new pseudonym.
     GenPseudo,

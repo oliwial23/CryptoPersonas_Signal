@@ -91,14 +91,6 @@ pub fn router(state: ServerLock) -> Router {
         // -- privacy pass (FINDINGS O7) -------------------------------------------------
         .route("/api/privpass/issue", post_route(privpass::issue))
         .route(
-            "/api/privpass/redeem/badge",
-            post_route(privpass::redeem_badge),
-        )
-        .route(
-            "/api/privpass/redeem/reputation",
-            post_route(privpass::redeem_reputation),
-        )
-        .route(
             "/api/privpass/redeem/post",
             post_route(privpass::redeem_post_signal),
         )

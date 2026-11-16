@@ -22,11 +22,7 @@ P=(--transport signal --api http://127.0.0.1:3095 --data-dir /tmp/pp-test-client
 
 # A pseudonymous post paid for with a precomputed ticket instead of a fresh proof.
 ./target/release/personas "${P[@]}" priv-pass-pseudo-post -m "hi" -g "1"
-
-# A badge, by slot: 1 = Faculty, 2 = Student, 3 = Industry.
-./target/release/personas "${P[@]}" priv-pass-request
-./target/release/personas "${P[@]}" priv-pass-badge -i 1
 ```
 
-The other redemptions are `priv-pass-post` (no persona) and `priv-pass-reputation` (+1
-reputation). `personas --help` lists them all.
+The other redemption is `priv-pass-post` (no persona). A ticket buys only a post:
+redeeming one for a badge or reputation would let any holder grant themselves either.

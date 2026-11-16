@@ -148,10 +148,8 @@ Requesting and redeeming are separate steps — request once, redeem later
 
 ```sh
 ./target/release/personas "${P[@]}" priv-pass-request                               # [both]  request one ticket, stash it locally
-./target/release/personas "${P[@]}" priv-pass-badge -i 1                            # [both]  redeem a stashed ticket for a badge (1/2/3, no eligibility check)
 ./target/release/personas "${P[@]}" priv-pass-post -m "hi" -g "1"                   # [both, -t reply_to is Signal only]  redeem for an anonymous post, no persona
 ./target/release/personas "${P[@]}" priv-pass-pseudo-post -m "hi" -g "1"            # [both, -t reply_to is Signal only]  redeem for a post under a fresh ticket-derived pseudonym
-./target/release/personas "${P[@]}" priv-pass-reputation                            # [both]  redeem for a fixed +1 reputation bump
 ```
 
 Redeeming with nothing stashed fails cleanly:

@@ -283,8 +283,9 @@ claim redemption still open.**
   server checks it.
 
 `batch-zkc/examples/test.rs` checks that an honest ticket redeems and that the old
-forgery (`H(x) * Y` from the public key) is rejected. Still open: the badge and reputation
-redemption routes accept any valid ticket, with no eligibility check (below).
+forgery (`H(x) * Y` from the public key) is rejected. The badge and reputation redemption
+routes are removed: they accepted any valid ticket with no eligibility check, so any
+holder could grant themselves a badge or reputation. A ticket now buys only a post.
 
 The current ticket construction maps an input to a publicly known scalar
 multiple of the group generator. Even with a correct DLEQ proof, this does not

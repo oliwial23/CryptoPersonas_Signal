@@ -268,12 +268,6 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             println!("Requested and stashed a Privacy Pass ticket, ready to redeem");
         }
 
-        Command::PrivPassBadge { index } => {
-            let pc = personas.clone();
-            spawn_blocking(move || pc.privpass_redeem_badge(index)).await??;
-            println!("Redeemed a stashed Privacy Pass ticket for badge {index}");
-        }
-
         Command::PrivPassPost {
             message,
             channel,
@@ -299,12 +293,6 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             spawn_blocking(move || pc.privpass_redeem_pseudo_post(message, channel, None))
                 .await??;
             println!("Redeemed a stashed Privacy Pass ticket for a pseudonymous post");
-        }
-
-        Command::PrivPassReputation => {
-            let pc = personas.clone();
-            spawn_blocking(move || pc.privpass_redeem_reputation()).await??;
-            println!("Redeemed a stashed Privacy Pass ticket for a reputation bump");
         }
 
         Command::GenPseudo => {

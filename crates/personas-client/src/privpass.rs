@@ -21,8 +21,8 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
 use personas_core::privpass::{
-    self, BadgeRedemption, PostRedemption, PrivPassUser, decode_validated_tickets,
-    encode_badge_redemption, encode_post_redemption, encode_redemption, encode_ticket_request,
+    self, PostRedemption, PrivPassUser, decode_validated_tickets, encode_post_redemption,
+    encode_ticket_request,
 };
 
 use crate::PersonaClient;
@@ -111,36 +111,6 @@ impl PersonaClient {
         Ok(())
     }
 
-    /// Redeem a previously-requested, stashed ticket for `index`'s badge (`1`
-    /// Faculty, `2` Student, `3` Industry) — see the module docs for why this skips
-    /// the usual eligibility proof.
-    pub fn privpass_redeem_badge(&self, index: u32) -> Result<()> {
-        let mut batch_user = self.take_stashed_ticket()?;
-
-        let redemption = batch_user
-            .use_validated_ticket::<personas_core::H, personas_core::Args, personas_core::Cr>(&[]);
-        let body = encode_badge_redemption(&BadgeRedemption { redemption, index })
-            .map_err(|e| anyhow!("failed to encode the badge redemption: {e}"))?;
-
-        let resp = self
-            .bul
-            .client
-            .post(self.cfg.url("api/privpass/redeem/badge")?)
-            .body(body)
-            .send()
-            .context("failed to submit the badge redemption")?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "server rejected the badge redemption ({}): {}",
-                resp.status(),
-                resp.text().unwrap_or_default()
-            ));
-        }
-        privpass::save_stash(&self.cfg.privpass_stash(), &batch_user)
-            .map_err(|e| anyhow!("failed to save the ticket stash: {e}"))?;
-        Ok(())
-    }
-
     /// Redeem a previously-requested, stashed ticket to post `message` into
     /// `channel`, under no persona at all.
     pub fn privpass_redeem_post(
@@ -214,33 +184,4 @@ impl PersonaClient {
         Ok(())
     }
 
-    /// Redeem a previously-requested, stashed ticket for a fixed +1 reputation
-    /// bump — see the module docs for why this is a fixed amount, not a
-    /// caller-chosen one.
-    pub fn privpass_redeem_reputation(&self) -> Result<()> {
-        let mut batch_user = self.take_stashed_ticket()?;
-
-        let redemption = batch_user
-            .use_validated_ticket::<personas_core::H, personas_core::Args, personas_core::Cr>(&[]);
-        let body = encode_redemption(&redemption)
-            .map_err(|e| anyhow!("failed to encode the reputation redemption: {e}"))?;
-
-        let resp = self
-            .bul
-            .client
-            .post(self.cfg.url("api/privpass/redeem/reputation")?)
-            .body(body)
-            .send()
-            .context("failed to submit the reputation redemption")?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "server rejected the reputation redemption ({}): {}",
-                resp.status(),
-                resp.text().unwrap_or_default()
-            ));
-        }
-        privpass::save_stash(&self.cfg.privpass_stash(), &batch_user)
-            .map_err(|e| anyhow!("failed to save the ticket stash: {e}"))?;
-        Ok(())
-    }
 }
