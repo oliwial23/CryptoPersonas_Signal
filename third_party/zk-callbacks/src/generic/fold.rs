@@ -152,6 +152,10 @@ pub struct FoldInput<
     pub com_rand: ComRand<F>,
     /// Bulletin membership witness. TODO
     pub memb_witness: Bul::MembershipWitness,
+    /// A padding step: the object is left as it was, apart from a fresh nullifier and
+    /// commitment randomness. Padding every fold to the same number of steps hides how
+    /// many callbacks it answers, which Nova's step count would otherwise reveal.
+    pub noop: bool,
 }
 
 impl<
@@ -176,6 +180,7 @@ where
             nul: Nul::default(),
             com_rand: ComRand::default(),
             memb_witness: Bul::MembershipWitness::default(),
+            noop: false,
         }
     }
 }
@@ -222,6 +227,8 @@ pub struct FoldInputVar<
     pub com_rand: ComRandVar<F>,
     /// Bulletin membership witness. TODO
     pub memb_witness: Bul::MembershipWitnessVar,
+    /// Whether this is a padding step, in-circuit.
+    pub noop: Boolean<F>,
 }
 
 impl<
@@ -289,12 +296,15 @@ where
                 mode,
             )?;
 
+            let noop = Boolean::new_variable(ns!(cs, "noop"), || Ok(rec.noop), mode)?;
+
             Ok(Self {
                 user,
                 scan_args,
                 nul,
                 com_rand,
                 memb_witness,
+                noop,
             })
         })
     }
@@ -382,11 +392,17 @@ where
             p,
             external_inputs.scan_args,
         )?;
-        new_user.zk_fields.nul = external_inputs.nul;
-        new_user.zk_fields.com_rand = external_inputs.com_rand;
-        Ok(vec![
-            User::commit_in_zk::<H>(new_user)?,
-            z_i[1].clone(),
-        ])
+        new_user.zk_fields.nul = external_inputs.nul.clone();
+        new_user.zk_fields.com_rand = external_inputs.com_rand.clone();
+        // A padding step keeps the object, re-randomized.
+        let mut kept = external_inputs.user.clone();
+        kept.zk_fields.nul = external_inputs.nul;
+        kept.zk_fields.com_rand = external_inputs.com_rand;
+        let out = ark_r1cs_std::fields::fp::FpVar::conditionally_select(
+            &external_inputs.noop,
+            &User::commit_in_zk::<H>(kept)?,
+            &User::commit_in_zk::<H>(new_user)?,
+        )?;
+        Ok(vec![out, z_i[1].clone()])
     }
 }

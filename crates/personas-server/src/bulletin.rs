@@ -107,9 +107,9 @@ pub fn verify_and_append_blind<const N: usize>(
     db: &mut Store,
     vk: &VK,
     exec: batch_zkc::BlindExecutedMethod<Snark, N>,
-    pub_args: F,
+    pub_args: personas_core::circuits::PostArgs<F>,
 ) -> Result<(), AppError> {
-    let appended = <OStore as UserBul<F, MsgUser>>::verify_interact_and_append::<F, Snark, N>(
+    let appended = <OStore as UserBul<F, MsgUser>>::verify_interact_and_append::<personas_core::circuits::PostArgs<F>, Snark, N>(
         &mut db.obj_bul,
         exec.new_object,
         exec.old_nullifier,

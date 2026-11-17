@@ -18,7 +18,6 @@ use folding_schemes::folding::nova::{ProverParams, VerifierParams};
 use folding_schemes::{commitment::pedersen::Pedersen, folding::nova::Nova};
 use rand::{CryptoRng, RngCore};
 use std::borrow::Borrow;
-use zk_callbacks::generic::fold::FoldingScan;
 use zk_callbacks::generic::object::{Com, Nul};
 
 use zk_callbacks::{
@@ -192,7 +191,7 @@ pub struct MsgUser {
 pub type NF<const N: usize = NUM_SCANS_PER_FOLD> = Nova<
     Projective,
     Projective2,
-    FoldingScan<F, MsgUser, Args, ArgsVar, Cr, OStore, CStore, H, N>,
+    crate::fold::PersonasFold<OStore, CStore, N>,
     Pedersen<Projective, true>,
     Pedersen<Projective2, true>,
     true,
@@ -958,7 +957,7 @@ fn standard_callback_predicate(
     Ok(u)
 }
 
-fn scan_method<CBul: PublicCallbackBul<F, Args, Cr> + Clone, const N: usize>(
+pub fn scan_method<CBul: PublicCallbackBul<F, Args, Cr> + Clone, const N: usize>(
     tu: &User<F, MsgUser>,
     pub_args: PubScan<CBul, N>,
     priv_args: PrivScan<CBul, N>,

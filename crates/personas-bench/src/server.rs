@@ -165,6 +165,12 @@ fn try_post_json(
     Ok(us)
 }
 
+/// End the current epoch on the server (the bench's stand-in for the epoch clock).
+fn turn_epoch(http: &reqwest::blocking::Client, api: &Url) {
+    let res = http.get(api.join("api/epoch").unwrap()).send().expect("epoch request failed");
+    assert!(res.status().is_success(), "epoch turn rejected: {}", res.status());
+}
+
 fn post_bytes(http: &reqwest::blocking::Client, url: Url, body: Vec<u8>) -> u64 {
     let start = Instant::now();
     let res = http.post(url).body(body).send().expect("request failed");
@@ -661,6 +667,9 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             .expect("post failed");
         post_json(&http, jsonrpc.clone(), proof);
     }
+    // A sweep may start only once the object is from an earlier epoch (one sweep per epoch),
+    // so the posts' epoch has to end before the member can scan their tickets.
+    turn_epoch(&http, &api);
     let mut rt = Vec::new();
     let mut scan_bytes = Vec::new();
     while scanner.outstanding_callbacks().unwrap() > 0 || scanner.is_scanning().unwrap() {
@@ -692,6 +701,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             .expect("post failed");
         post_json(&http, jsonrpc.clone(), proof);
     }
+    turn_epoch(&http, &api);
     let start = Instant::now();
     let proof = folder.fold().expect("fold failed");
     let client_total = micros(start);

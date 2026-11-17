@@ -2401,10 +2401,76 @@ where
         CBul::MembershipWitness: Default,
         CBul::NonMembershipWitness: Default,
     {
+        use crate::generic::scan::scan_method;
+        self.scan_and_create_padded_fold_proof_inputs::<CBArgs, CBArgsVar, Crypto, Bul, CBul, H, Snark, NUMSCANS>(
+            rng,
+            bul_data,
+            cbul,
+            is_bul_data_const,
+            is_memb_nmemb_const,
+            cur_time,
+            cb_methods,
+            pk,
+            scan_method::<F, U, CBArgs, CBArgsVar, Crypto, CBul, H, NUMSCANS>,
+            num_folds,
+            num_folds,
+        )
+    }
+
+    /// Like [`Self::scan_and_create_fold_proof_inputs`], with the scan step given (an
+    /// application's own, e.g. one that also updates fields of its object when a sweep
+    /// ends) and the fold padded with no-op steps to `total_folds`, so every fold has the
+    /// same number of steps however many callbacks it answers.
+    #[cfg(feature = "folding")]
+    #[cfg(any(feature = "folding", doc))]
+    #[doc(cfg(feature = "folding"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan_and_create_padded_fold_proof_inputs<
+        CBArgs: Clone + std::fmt::Debug + PartialEq + Eq + Default,
+        CBArgsVar: AllocVar<CBArgs, F> + Clone,
+        Crypto: AECipherSigZK<F, CBArgs, AV = CBArgsVar> + PartialEq + Eq + Default,
+        Bul: PublicUserBul<F, U>,
+        CBul: PublicCallbackBul<F, CBArgs, Crypto> + Clone,
+        H: FieldHash<F>,
+        Snark: SNARK<F, Error = SynthesisError>,
+        const NUMSCANS: usize,
+    >(
+        &mut self,
+        rng: &mut (impl CryptoRng + RngCore),
+        bul_data: (Bul::MembershipPub, Bul::MembershipWitness),
+        cbul: &CBul,
+        is_bul_data_const: bool,
+        is_memb_nmemb_const: (bool, bool),
+        cur_time: Time<F>,
+        cb_methods: Vec<Callback<F, U, CBArgs, CBArgsVar>>,
+        pk: &Snark::ProvingKey,
+        step_method: fn(
+            &User<F, U>,
+            PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>,
+            PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS>,
+        ) -> User<F, U>,
+        num_folds: usize,
+        total_folds: usize,
+    ) -> (
+        (
+            PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>,
+            Bul::MembershipPub,
+        ),
+        Vec<F>,
+        Vec<FoldInput<F, U, CBArgs, CBArgsVar, Crypto, Bul, CBul, NUMSCANS>>,
+        (Com<F>, Nul<F>, Snark::Proof),
+    )
+    where
+        U: Default,
+        CBul::MembershipPub: Default,
+        CBul::NonMembershipPub: Default,
+        CBul::MembershipWitness: Default,
+        CBul::NonMembershipWitness: Default,
+    {
         assert!(is_bul_data_const == true);
         assert!(is_memb_nmemb_const == (true, true));
-        assert!(num_folds > 0);
-        use crate::generic::{fold::rerandomize_predicate, scan::scan_method};
+        assert!(num_folds > 0 && num_folds <= total_folds);
+        use crate::generic::fold::rerandomize_predicate;
 
         let mut v: Vec<FoldInput<F, U, CBArgs, CBArgsVar, Crypto, Bul, CBul, NUMSCANS>> = vec![];
 
@@ -2438,11 +2504,7 @@ where
 
             ps_ret = ps.clone();
 
-            let mut new_u = scan_method::<F, U, CBArgs, CBArgsVar, Crypto, CBul, H, NUMSCANS>(
-                &u,
-                ps,
-                prs.clone(),
-            );
+            let mut new_u = step_method(&u, ps, prs.clone());
 
             new_u.zk_fields.nul = rng.r#gen();
             new_u.zk_fields.com_rand = rng.r#gen();
@@ -2453,9 +2515,33 @@ where
                 nul: new_u.zk_fields.nul,
                 com_rand: new_u.zk_fields.com_rand,
                 memb_witness: bul_data.1.clone(),
+                noop: false,
             });
 
             u = new_u.clone();
+        }
+
+        // Padding: the object is kept, re-randomized. The step still evaluates a scan, so
+        // it needs a valid scan witness; any will do, since its result is discarded.
+        for _ in num_folds..total_folds {
+            let (_, prs) = u.get_scan_arguments::<CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>(
+                cbul,
+                is_memb_nmemb_const,
+                cur_time,
+                cb_methods.clone(),
+            );
+            let nul: Nul<F> = rng.r#gen();
+            let com_rand: ComRand<F> = rng.r#gen();
+            v.push(FoldInput {
+                user: u.clone(),
+                scan_args: prs,
+                nul,
+                com_rand,
+                memb_witness: bul_data.1.clone(),
+                noop: true,
+            });
+            u.zk_fields.nul = nul;
+            u.zk_fields.com_rand = com_rand;
         }
 
         *self = u;

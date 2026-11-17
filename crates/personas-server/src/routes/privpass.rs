@@ -61,7 +61,15 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
     // implement), hence the manual `clone_exec_meth`.
     let exec_meth_for_append = clone_exec_meth(&request.exec_meth);
     let start = std::time::SystemTime::now();
-    verify_and_append_blind(&mut st.db, &interaction_vk, exec_meth_for_append, F::from(0))?;
+    // The request proves the standard interaction in this epoch: public args are the
+    // (empty) payload and the epoch, as for an anonymous post.
+    let current = crate::bulletin::epoch(&st.db);
+    verify_and_append_blind(
+        &mut st.db,
+        &interaction_vk,
+        exec_meth_for_append,
+        personas_core::circuits::PostArgs { payload: F::from(0), epoch: current },
+    )?;
 
     let memb_data = st.db.obj_bul.get_pubkey();
     let batch_vk = st.privpass.keys.batch_vk.clone();
@@ -74,7 +82,7 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
         &batch_vk,
         &st.db.obj_bul,
         &st.privpass.issuer,
-        crate::bulletin::epoch(&st.db),
+        current,
     )
     .map_err(|e| AppError::Rejected(format!("ticket blinding rejected: {e}")))?;
     let millis = start

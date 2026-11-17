@@ -3,6 +3,7 @@
 //! disk cache, and the benchmark instrumentation both sides write to.
 
 pub mod circuits;
+pub mod fold;
 pub mod params;
 pub mod persona;
 pub mod privpass;

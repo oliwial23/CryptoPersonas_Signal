@@ -737,7 +737,9 @@ pub fn scan_method<
     out_user
 }
 
-pub(crate) fn scan_apply_method_zk<
+/// The in-circuit scan step: the object after scanning the slots in `priv_args`. Used by
+/// [`scan_predicate`] and by fold step circuits, including applications' own.
+pub fn scan_apply_method_zk<
     F: PrimeField + Absorb,
     U: UserData<F>,
     CBArgs: Clone,

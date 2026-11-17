@@ -20,13 +20,12 @@ use blake2::{Blake2s256, Digest};
 use folding_schemes::FoldingScheme;
 use folding_schemes::arith::r1cs::R1CS;
 use folding_schemes::folding::nova::PreprocessorParam;
-use folding_schemes::frontend::FCircuit;
 use folding_schemes::transcript::poseidon::poseidon_canonical_config;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use tracing::info;
-use zk_callbacks::generic::fold::{FoldingScan, gen_fold_proof_snark_key};
+use zk_callbacks::generic::fold::gen_fold_proof_snark_key;
 use zk_callbacks::generic::interaction::{
     generate_keys_for_statement, generate_keys_for_statement_in,
 };
@@ -42,7 +41,7 @@ use crate::circuits::{
     get_standard_pseudo_rate_interaction, join_pred,
     not_banned_pred, pseudonym_pred,
 };
-use crate::{Args, ArgsVar, CStore, Cr, F, H, OStore, PK, Snark, Store, VK};
+use crate::{CStore, Cr, F, H, OStore, PK, Snark, Store, VK};
 
 /// Bump to invalidate every previously cached artifact.
 /// Bump whenever a circuit changes: the cache key does not otherwise see circuit edits, so a
@@ -391,8 +390,8 @@ pub fn generate_folding_material(
         cb_methods: get_callbacks(),
     };
 
-    let f_circ: FoldingScan<F, MsgUser, Args, ArgsVar, Cr, OStore, CStore, H, NUM_SCANS_PER_FOLD> =
-        FoldingScan::new((ps, db.obj_bul.get_pubkey()))?;
+    let f_circ: crate::fold::PersonasFold<OStore, CStore, NUM_SCANS_PER_FOLD> =
+        <crate::fold::PersonasFold<OStore, CStore, NUM_SCANS_PER_FOLD> as folding_schemes::frontend::FCircuit<F>>::new((ps, db.obj_bul.get_pubkey()))?;
 
     let poseidon_config = poseidon_canonical_config::<F>();
     let nova_preprocess_params = PreprocessorParam::new(poseidon_config, f_circ);

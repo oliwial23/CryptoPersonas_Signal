@@ -14,13 +14,13 @@ use ark_relations::r1cs::SynthesisError;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use folding_schemes::{
     FoldingScheme, commitment::pedersen::Pedersen, folding::nova::Nova,
-    folding::nova::zk::RandomizedIVCProof, frontend::FCircuit,
+    folding::nova::zk::RandomizedIVCProof,
 };
 use hex::FromHex;
 use personas_wire::{Kind, Payload};
 
 use personas_core::{
-    Args, ArgsVar, Cr, F, H, Snark,
+    Args, F, H, Snark,
     circuits::{
         BadgesArgs, Claim, ClaimArgs, FoldingProofData, MsgUser, NUM_SCANS_PER_FOLD,
         PseudonymArgs, PseudonymArgsRate, check_claim, exec_badge_request_standint,
@@ -35,7 +35,7 @@ use serde_json::json;
 use std::time::SystemTime;
 use zk_callbacks::{
     generic::{
-        bulletin::PublicUserBul, callbacks::CallbackCom, fold::FoldingScan, object::Time,
+        bulletin::PublicUserBul, callbacks::CallbackCom,
         user::User,
     },
     impls::centralized::crypto::PlainTikCrypto,
@@ -43,11 +43,12 @@ use zk_callbacks::{
 
 use crate::{BulNet, PersonaClient};
 
-/// The Nova instance folding `NUM_SCANS_PER_FOLD` callback scans per step.
+/// The Nova instance folding `NUM_SCANS_PER_FOLD` callback scans per step, with the
+/// personas sweep rules (see `personas_core::fold`).
 pub type NFC = Nova<
     Projective,
     Projective2,
-    FoldingScan<F, MsgUser, Args, ArgsVar, Cr, BulNet, BulNet, H, NUM_SCANS_PER_FOLD>,
+    personas_core::fold::PersonasFold<BulNet, BulNet, NUM_SCANS_PER_FOLD>,
     Pedersen<Projective, true>,
     Pedersen<Projective2, true>,
     true,
@@ -144,6 +145,7 @@ impl PersonaClient {
         let mut user = self.load_user()?;
         ensure_not_scanning(&user)?;
         let pk = self.standard_pk();
+        let epoch = self.epoch()?;
 
         let start = SystemTime::now();
         let exec = exec_standint(
@@ -151,7 +153,7 @@ impl PersonaClient {
             &mut rng,
             &self.bul,
             &pk,
-            Time::from(0),
+            epoch,
             payload,
             (),
         )
@@ -228,10 +230,23 @@ impl PersonaClient {
         )
         .ok_or_else(|| anyhow!("this user is not on the bulletin; run `join` first"))?;
 
-        let steps = user.num_outstanding_callbacks() / NUM_SCANS_PER_FOLD;
+        // The real steps (one per callback, at least one so that a member with no tickets
+        // still brings its object up to the epoch), then padding to FOLD_DEPTH, which the
+        // server requires: the step count would otherwise reveal how many callbacks the
+        // fold answers.
+        let real = personas_core::fold::real_fold_steps(
+            user.num_outstanding_callbacks(),
+            NUM_SCANS_PER_FOLD,
+        );
+        let total = personas_core::fold::FOLD_DEPTH;
+        if real > total {
+            return Err(anyhow!(
+                "{real} fold steps needed, more than the {total} a fold has (more than k_max live tickets)"
+            ));
+        }
 
         let (params, init, v, extra_verif) = user
-            .scan_and_create_fold_proof_inputs::<_, _, _, _, _, H, Snark, NUM_SCANS_PER_FOLD>(
+            .scan_and_create_padded_fold_proof_inputs::<_, _, _, _, _, H, Snark, NUM_SCANS_PER_FOLD>(
                 &mut rng,
                 memb,
                 &self.bul,
@@ -240,20 +255,14 @@ impl PersonaClient {
                 epoch,
                 cb_methods,
                 &folding_key,
-                steps,
+                personas_core::circuits::scan_method::<BulNet, NUM_SCANS_PER_FOLD>,
+                real,
+                total,
             );
 
-        let f_circ: FoldingScan<
-            F,
-            MsgUser,
-            Args,
-            ArgsVar,
-            Cr,
-            BulNet,
-            BulNet,
-            H,
-            NUM_SCANS_PER_FOLD,
-        > = FoldingScan::new(params).map_err(|e| anyhow!("failed to build fold circuit: {e}"))?;
+        let f_circ: personas_core::fold::PersonasFold<BulNet, BulNet, NUM_SCANS_PER_FOLD> =
+            <personas_core::fold::PersonasFold<BulNet, BulNet, NUM_SCANS_PER_FOLD> as folding_schemes::frontend::FCircuit<F>>::new(params)
+                .map_err(|e| anyhow!("failed to build fold circuit: {e}"))?;
 
         let nova_params = self.fold_params();
         let mut folding_scheme: NFC = NFC::init(&nova_params, f_circ, init)
@@ -262,7 +271,7 @@ impl PersonaClient {
         debug_assert!(!user.is_scanning());
 
         let start = SystemTime::now();
-        for step in v.iter().take(steps) {
+        for step in v.iter() {
             folding_scheme
                 .prove_step(&mut rng, step.clone(), None)
                 .map_err(|e| anyhow!("Nova fold step failed: {e}"))?;
@@ -355,13 +364,14 @@ impl PersonaClient {
             epoch: F::from(0),
         };
 
+        let epoch = self.epoch()?;
         let start = SystemTime::now();
         let exec = exec_pseudo_rate_standint(
             &mut user,
             &mut rng,
             &self.bul,
             &pk,
-            Time::from(0),
+            epoch,
             pseudo,
             (),
         )

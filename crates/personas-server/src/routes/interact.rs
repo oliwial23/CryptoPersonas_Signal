@@ -236,7 +236,11 @@ pub async fn fold_scan(
         )
         .unwrap_or(false);
 
-        folded && bound && tied
+        // 4. Every fold has the same number of steps, so its step count, which Nova's
+        //    verifier takes in the clear, says nothing about how many callbacks it answers.
+        let fixed_depth = proof.i == ark_grumpkin::Fq::from(personas_core::fold::FOLD_DEPTH as u64);
+
+        folded && bound && tied && fixed_depth
     });
 
     personas_core::timing::append_timing_line_fold(
