@@ -293,6 +293,15 @@ impl PersonaClient {
     /// Note this folds `k / NUM_SCANS_PER_FOLD` steps and so silently drops the
     /// `k mod NUM_SCANS_PER_FOLD` remainder — the fold-size menu is what fixes that.
     pub fn fold(&self) -> Result<Vec<u8>> {
+        self.fold_to_depth(personas_core::fold::FOLD_DEPTH)
+    }
+
+    /// [`fold`](Self::fold), padded to `total` steps instead of `FOLD_DEPTH`. For
+    /// benchmarks only: a deployment's server accepts only `FOLD_DEPTH`-step folds, and the
+    /// benchmark's server (started in bench mode) accepts any, so the cost can be measured
+    /// for each fold depth. Every step is the same circuit with the same keys whatever the
+    /// depth.
+    pub fn fold_to_depth(&self, total: usize) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
 
@@ -314,7 +323,6 @@ impl PersonaClient {
             user.num_outstanding_callbacks(),
             NUM_SCANS_PER_FOLD,
         );
-        let total = personas_core::fold::FOLD_DEPTH;
         if real > total {
             return Err(anyhow!(
                 "{real} fold steps needed, more than the {total} a fold has (more than k_max live tickets)"

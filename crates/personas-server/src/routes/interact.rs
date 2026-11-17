@@ -246,7 +246,10 @@ pub async fn fold_scan(
 
         // 4. Every fold has the same number of steps, so its step count, which Nova's
         //    verifier takes in the clear, says nothing about how many callbacks it answers.
-        let fixed_depth = proof.i == ark_grumpkin::Fq::from(personas_core::fold::FOLD_DEPTH as u64);
+        //    (A benchmark's own server, started with PERSONAS_ALLOW_UNPADDED_SCAN, accepts
+        //    any depth, so the cost can be measured at each one.)
+        let fixed_depth = proof.i == ark_grumpkin::Fq::from(personas_core::fold::FOLD_DEPTH as u64)
+            || std::env::var_os("PERSONAS_ALLOW_UNPADDED_SCAN").is_some();
 
         folded && bound && tied && fixed_depth
     });

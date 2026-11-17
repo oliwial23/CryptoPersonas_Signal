@@ -70,6 +70,9 @@ struct Args {
     server_dir: PathBuf,
     /// Callbacks the server-based run answers by scanning and by folding.
     callbacks: usize,
+    /// Fold depths for the server-based fold sweep: at each depth `k`, members with `k`
+    /// tickets fold exactly `k` steps (`--iters` of them). Empty: no sweep.
+    fold_sweep: Vec<usize>,
     /// Seconds per epoch on the server started here (`PERSONAS_EPOCH_SECS`). The run waits
     /// for epoch boundaries, and each stretch between two of them must fit in one epoch.
     epoch_secs: u64,
@@ -97,6 +100,7 @@ fn parse_args() -> Args {
         server: false,
         server_dir: server::default_work_dir(),
         callbacks: 16,
+        fold_sweep: Vec::new(),
         epoch_secs: server::DEFAULT_EPOCH_SECS,
         server_url: None,
         load: false,
@@ -134,6 +138,7 @@ fn parse_args() -> Args {
             "--fold-k" => args.fold_ks = list(value(), "--fold-k"),
             "--server" => args.server = true,
             "--server-dir" => args.server_dir = PathBuf::from(value()),
+            "--fold-sweep" => args.fold_sweep = list(value(), "--fold-sweep"),
             "--callbacks" => {
                 args.callbacks = value().parse().unwrap_or_else(|_| usage("bad --callbacks"))
             }

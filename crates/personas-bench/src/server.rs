@@ -187,6 +187,45 @@ fn next_epoch(clock: &PersonaClient) {
     eprintln!("epoch {epoch}");
 }
 
+/// What posting tickets and folding need.
+struct Ctx<'a> {
+    clock: &'a PersonaClient,
+    schedule: &'a personas_core::schedule::EpochSchedule,
+    http: &'a reqwest::blocking::Client,
+    jsonrpc: &'a Url,
+    fold_url: &'a Url,
+}
+
+/// Post `k` tickets from `m`, at most its per-epoch allowance in each epoch. A member that
+/// carries on into a later epoch must first bring its object up to it, with one (untimed)
+/// fold of `depth` steps, as every member does at the start of an epoch; its unexpired
+/// tickets stay outstanding, so a later fold still answers all `k`.
+fn post_tickets(ctx: &Ctx, m: &PersonaClient, k: usize, depth: usize) {
+    use ark_ff::PrimeField;
+    let mut left = k;
+    while left > 0 {
+        let n = left.min(POSTS_PER_MEMBER);
+        ensure_time_left(ctx.clock, ctx.schedule, BLOCK_SECS);
+        let current = ctx.clock.epoch().expect("epoch");
+        let ep = m.load_user().expect("user").data.ep;
+        if ep.into_bigint() < current.into_bigint() {
+            let proof = m.fold_to_depth(depth).expect("epoch fold failed");
+            post_bytes(ctx.http, ctx.fold_url.clone(), proof);
+        }
+        for _ in 0..n {
+            let proof = m.gen_cb_for_msg(bench_post_payload()).expect("post failed");
+            post_json(ctx.http, ctx.jsonrpc.clone(), proof);
+        }
+        left -= n;
+        if left > 0 {
+            next_epoch(ctx.clock);
+        }
+    }
+}
+
+/// How much of an epoch one Privacy Pass member's requests and redemptions may take.
+const PP_WINDOW_SECS: u64 = 60;
+
 /// The longest one member's block of history posts can take, with room to spare on a slow
 /// machine.
 const BLOCK_SECS: u64 = 30;
@@ -687,16 +726,32 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         // --- Privacy Pass: request tickets offline, redeem them to post -------------------------
         // Ticket requests count toward the interaction cap too (TICKET_BATCH each): a fresh
         // member every REQUESTS_PER_MEMBER requests, and each redeems its own tickets.
-        let ticketed: Vec<PersonaClient> = (0..total.div_ceil(REQUESTS_PER_MEMBER))
-            .map(|k| member(&format!("ticketed-{k}")))
-            .collect();
+        // One member at a time, all inside one epoch: its object must be from the epoch it
+        // proves in, and the issuer key rotates at each boundary, expiring unredeemed
+        // tickets. So each member joins, requests and redeems with PP_WINDOW_SECS of the
+        // epoch left (large batches take seconds per request).
+        let mut req_rt = Vec::new();
         let mut rt = Vec::new();
-        for i in 0..total {
-            let start = Instant::now();
-            ticketed[i / REQUESTS_PER_MEMBER]
-                .privpass_request()
-                .expect("ticket request failed");
-            rt.push(micros(start));
+        let (mut requested, mut redeemed) = (0, 0);
+        let mut k = 0;
+        while requested < total {
+            ensure_time_left(&clock, &schedule, PP_WINDOW_SECS.min(schedule.length / 2));
+            let m = member(&format!("ticketed-{k}"));
+            k += 1;
+            let n = REQUESTS_PER_MEMBER.min(total - requested);
+            for _ in 0..n {
+                let start = Instant::now();
+                m.privpass_request().expect("ticket request failed");
+                req_rt.push(micros(start));
+            }
+            requested += n;
+            for _ in 0..(n * TICKET_BATCH).min(total - redeemed) {
+                let start = Instant::now();
+                m.privpass_redeem_post("bench".into(), "bench".into(), None)
+                    .expect("redemption failed");
+                rt.push(micros(start));
+                redeemed += 1;
+            }
         }
         ops.insert(
             "pp_request".to_string(),
@@ -708,14 +763,6 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
                 proof_bytes: None,
             },
         );
-        let mut rt = Vec::new();
-        for i in 0..total {
-            let start = Instant::now();
-            ticketed[i / TICKETS_PER_MEMBER]
-                .privpass_redeem_post("bench".into(), "bench".into(), None)
-                .expect("redemption failed");
-            rt.push(micros(start));
-        }
         ops.insert(
             "pp_post".to_string(),
             ServerOp {
@@ -769,19 +816,15 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     eprintln!("scan: {} callbacks one by one", rt.len());
 
     let fold_url = api.join("api/interact/foldscan").unwrap();
+    let ctx = Ctx { clock: &clock, schedule: &schedule, http: &http, jsonrpc: &jsonrpc, fold_url: &fold_url };
     let folder = member("folder");
-    for _ in 0..callbacks {
-        let proof = folder
-            .gen_cb_for_msg(bench_post_payload())
-            .expect("post failed");
-        post_json(&http, jsonrpc.clone(), proof);
-    }
+    post_tickets(&ctx, &folder, callbacks, personas_core::fold::FOLD_DEPTH);
     next_epoch(&clock);
     let start = Instant::now();
     let proof = folder.fold().expect("fold failed");
     let client_total = micros(start);
     let fold_bytes = proof.len() as f64;
-    let rt = post_bytes(&http, fold_url, proof);
+    let rt = post_bytes(&http, fold_url.clone(), proof);
     let steps = logged("fold", "step_timings.jsonl", 0);
     let randomize = logged("fold", "proof_timings.jsonl", 0);
     ops.insert(
@@ -806,6 +849,45 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         },
     );
     eprintln!("fold: {callbacks} callbacks folded");
+
+    // --- the fold sweep: the cost of a fold of each depth k ----------------------------------
+    // A deployment folds exactly FOLD_DEPTH (= k_max) steps; this server, started in bench
+    // mode, accepts any depth, so the cost can be measured as a function of k. Members with
+    // k tickets each fold exactly k steps, so every step is a real one.
+    for &k in &args.fold_sweep {
+        let members: Vec<PersonaClient> =
+            (0..args.iters).map(|i| member(&format!("sweep-{k}-{i}"))).collect();
+        for m in &members {
+            post_tickets(&ctx, m, k, k);
+        }
+        next_epoch(&clock);
+        let (mut client, mut server, mut bytes, mut steps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for m in &members {
+            // The fold is proved for this epoch and must reach the server in it.
+            ensure_time_left(&clock, &schedule, schedule.length / 2);
+            let before_steps = logged("fold", "step_timings.jsonl", 0).len();
+            let start = Instant::now();
+            let proof = m.fold_to_depth(k).expect("fold failed");
+            client.push(micros(start));
+            bytes.push(proof.len() as f64);
+            post_bytes(&http, fold_url.clone(), proof);
+            if let Some(&v) = logged("fold", "verify_timings.jsonl", 0).last() {
+                server.push(v);
+            }
+            steps.extend(logged("fold", "step_timings.jsonl", 0).into_iter().skip(before_steps));
+        }
+        ops.insert(
+            format!("fold_k{k:03}"),
+            ServerOp {
+                client: summarize(&client),
+                server: summarize(&server),
+                round_trip: None,
+                client_after: summarize(&steps),
+                proof_bytes: Some(bytes.iter().sum::<f64>() / bytes.len().max(1) as f64),
+            },
+        );
+        eprintln!("fold sweep: k = {k} done");
+    }
 
     let report = ServerReport {
         machine: machine(&args.label),
