@@ -154,6 +154,14 @@ fn parse_args() -> Args {
     args
 }
 
+/// Barriers until a ticket filed now is settled: it expires `TICKET_LIFETIME` epochs after
+/// this one and settles at the last barrier of that epoch, so wait out that many epochs and
+/// one more.
+fn settle_wait() -> usize {
+    let c = Config::fast();
+    ((personas_core::circuits::TICKET_LIFETIME + 1) * c.barriers_per_epoch + 1) as usize
+}
+
 fn usage(problem: &str) -> ! {
     if !problem.is_empty() {
         eprintln!("personas-bench: {problem}\n");
@@ -452,12 +460,12 @@ impl Group {
             self.deliver_all_but(poster, &e);
             self.settle_all();
             if i % 24 == 23 {
-                self.barrier_all(Config::fast().settlement_barriers as usize + 1);
+                self.barrier_all(settle_wait());
                 self.drain_untimed(Who::Bob);
                 self.drain_untimed(Who::Carol);
             }
         }
-        self.barrier_all(Config::fast().settlement_barriers as usize + 1);
+        self.barrier_all(settle_wait());
         eprintln!(
             "history: {n} records in {:.1}s",
             started.elapsed().as_secs_f64()
@@ -495,7 +503,7 @@ impl Group {
             self.deliver_all_but(Who::Alice, &e);
             self.settle_all();
         }
-        self.barrier_all(Config::fast().settlement_barriers as usize + 1);
+        self.barrier_all(settle_wait());
         let member = self.alice.member().expect("alice is a member");
         let replica = self.alice.replica();
         eprintln!(
@@ -513,7 +521,7 @@ impl Group {
     /// Let every outstanding ticket settle, then have Alice absorb everything with scans
     /// (each one a scan sample). Keeps her clear of the interaction cap between batches.
     fn settle_and_drain(&mut self, scans: &mut Samples) {
-        self.barrier_all(Config::fast().settlement_barriers as usize + 1);
+        self.barrier_all(settle_wait());
         let mut rounds = 0;
         while self.alice.scan_needed() && rounds < 400 {
             rounds += 1;
@@ -697,7 +705,7 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
             // One rating per member per post: Bob posts, Alice rates it.
             &mut |g, _| {
                 if g.bob.scan_required() {
-                    g.barrier_all(Config::fast().settlement_barriers as usize + 1);
+                    g.barrier_all(settle_wait());
                     g.drain_untimed(Who::Bob);
                 }
                 let post = g.bob.emit_post_anon(&mut g.rng, "rate me").expect("post");
@@ -805,7 +813,7 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
         // it can make only the interactions left before the cap: Carol posts until then,
         // then Alice. Both start clear. This is the last operation, so neither is needed
         // after it.
-        g.barrier_all(Config::fast().settlement_barriers as usize + 1);
+        g.barrier_all(settle_wait());
         g.drain_untimed(Who::Carol);
         g.drain_untimed(Who::Alice);
         let mut s = Samples::default();

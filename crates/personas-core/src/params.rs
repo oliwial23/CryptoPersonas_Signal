@@ -231,7 +231,7 @@ pub fn ensure_params(
 /// Generate all Groth16 key pairs against `db`'s public keys.
 pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) -> ServerKeys {
     let standard_interaction = get_standard_interaction();
-    let dummy_pub_std = F::from(0);
+    let dummy_pub_std = crate::circuits::PostArgs::default();
     let (standard_proving_key, standard_verifying_key) = standard_interaction
         .generate_keys::<H, Snark, Cr, OStore>(
             rng,
@@ -265,6 +265,7 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
         i: F::from(0),
         claimed: F::from(0),
         pk: F::from(0),
+        epoch: F::from(0),
     };
     let (badge_request_proving_key, badge_request_verifying_key) = badge_request_interaction
         .generate_keys::<H, Snark, Cr, OStore>(

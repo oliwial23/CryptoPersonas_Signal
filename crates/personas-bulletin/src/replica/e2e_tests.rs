@@ -13,13 +13,13 @@
 //! ban propagates so that every replica pins it and a stale pre-ban scan is
 //! rejected (§5.2, the O10 defense).
 
-use ark_r1cs_std::fields::fp::FpVar;
 use rand::{SeedableRng, rngs::StdRng};
 
 use ark_ff::UniformRand;
 
 use personas_core::circuits::{
-    BAN_FLAG, MsgUser, NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate,
+    BAN_FLAG, MsgUser, NUM_SCANS_PER_FOLD, PostArgs, PostArgsVar, PrivScan, PrivScanVar,
+    PseudonymArgs, PseudonymArgsRate,
     PseudonymArgsRateVar, PseudonymArgsVar, PubScan, PubScanVar, ScanInt, get_callbacks,
     get_scan_interaction, get_standard_interaction, get_standard_pseudo_interaction,
     get_standard_pseudo_rate_interaction,
@@ -49,7 +49,7 @@ type ObjT = MerkleObjStore<F, OH>;
 type CbT = MerkleCallbackStore<F, MH, NH>;
 
 fn standard_keys(rng: &mut StdRng) -> (PK, VK) {
-    get_standard_interaction().generate_keys::<H, Snark, Cr, ObjT>(rng, None, F::from(0), false)
+    get_standard_interaction().generate_keys::<H, Snark, Cr, ObjT>(rng, None, PostArgs::default(), false)
 }
 
 fn scan_keys(rng: &mut StdRng, cstore: &CbT) -> (PK, VK) {
@@ -131,7 +131,7 @@ fn anon_post(
     body: &str,
 ) -> Record {
     let exec: ExecutedMethod<F, Snark, Args, Cr, 1> = user
-        .exec_method_create_cb::<H, F, FpVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
+        .exec_method_create_cb::<H, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
             rng,
             get_standard_interaction(),
             [FakeSigPubkey::pk()],
@@ -139,7 +139,7 @@ fn anon_post(
             obj,
             false,
             pk,
-            super::record::post_payload(body),
+            PostArgs { payload: super::record::post_payload(body), epoch: F::from(0) },
             (),
         )
         .expect("post proof");
@@ -305,6 +305,7 @@ fn ban_vote(
         context,
         claimed,
         payload: super::record::ballot_payload(poll, BAN_OPTION),
+        epoch: F::from(0),
     };
     let exec = voter
         .exec_method_create_cb::<H, PseudonymArgs<F>, PseudonymArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
@@ -341,11 +342,12 @@ fn scan_of(
     cbs: &CbT,
     scan_pk: &PK,
     obj_root: F,
+    epoch: u64,
 ) -> Record {
     let (ps, prs) = user.get_scan_arguments::<Args, ArgsVar, Cr, CbT, NUM_SCANS_PER_FOLD>(
         cbs,
         (false, false),
-        Time::from(0),
+        Time::from(epoch),
         get_callbacks(),
     );
     let md = <ObjT as PublicUserBul<F, MsgUser>>::get_membership_data(shadow, user.commit::<H>())
@@ -355,7 +357,7 @@ fn scan_of(
             rng,
             get_scan_interaction::<CbT, NUM_SCANS_PER_FOLD>(),
             [],
-            Time::from(0),
+            Time::from(epoch),
             md,
             false,
             scan_pk,
@@ -375,12 +377,12 @@ fn scan_of(
 /// Invoke a callback with `arg` into a callback store, exactly as `settle_barrier`
 /// does — used to reconstruct the replica's post-ban callback store so a member can
 /// prove an absorbing scan against it.
-fn invoke_into(cbs: &mut CbT, ticket: &super::tally::Callback, arg: F) {
+fn invoke_into(cbs: &mut CbT, ticket: &super::tally::Callback, arg: F, epoch: u64) {
     let enc_key = ticket.cb_entry.enc_key.clone();
     let tik = ticket.cb_entry.tik.clone();
     let (enc, sig) =
         <Cr as AECipherSigZK<F, F>>::encrypt_and_sign(arg, enc_key, FakeSigPrivkey::sk());
-    <CbT as CallbackBul<F, F, Cr>>::verify_call_and_append(cbs, tik, enc, sig, Time::from(0))
+    <CbT as CallbackBul<F, F, Cr>>::verify_call_and_append(cbs, tik, enc, sig, Time::from(epoch))
         .expect("invoke");
     cbs.update_epoch();
 }
@@ -395,7 +397,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
     let keys = full_keys(&std_vk, &scan_vk, &pred_vk);
     let config = Config {
         root_window: 256,
-        settlement_barriers: 3,
+        barriers_per_epoch: 2,
         poll_close_barriers: 1,
     };
 
@@ -415,7 +417,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
 
     // T posts the offending message (anonymous), committing a callback ticket.
     let p_exec = t
-        .exec_method_create_cb::<H, F, FpVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
+        .exec_method_create_cb::<H, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
             &mut rng,
             get_standard_interaction(),
             [FakeSigPubkey::pk()],
@@ -423,7 +425,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
             &shadow_joined,
             false,
             &std_pk,
-            super::record::post_payload("the offending post"),
+            PostArgs { payload: super::record::post_payload("the offending post"), epoch: F::from(0) },
             (),
         )
         .expect("post proof");
@@ -532,6 +534,12 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
         r.ingest(bytes.clone()).unwrap();
     }
     r.barrier();
+    // The ban was settled at barrier 2 (epoch 1). Scans prove against the callback set
+    // pinned at the start of an epoch, so it reaches members at the next one: cross to
+    // epoch 2, where the scans below are made.
+    r.barrier();
+    r.barrier();
+    let scan_epoch = r.current_epoch();
 
     // (b) A stale, pre-ban scan (nonmembership against the empty callback set) is
     //     rejected once the replica has crossed the ban barrier — the O10 defense.
@@ -543,6 +551,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
         &CbT::new(),
         &scan_pk,
         root_after_p,
+        scan_epoch,
     );
     let (stale_b, _) = encode(&stale).unwrap();
     assert_eq!(
@@ -554,8 +563,11 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
     // (c) T's post-ban scan, against the replica's current callback store,
     //     ABSORBS the ban (the membership branch — d1's untested path) and is
     //     accepted.
-    let mut cbs_post = CbT::new();
-    invoke_into(&mut cbs_post, &p_ticket, F::from(BAN_FLAG));
+    // What an honest member proves against: the callback set the replica pinned at the
+    // start of this epoch. It holds the ban (settled at barrier 2, in epoch 1) and the
+    // ballots' tickets, settled with no reputation when they expired at the end of epoch 1.
+    let cbs_post = r.callback_store().clone();
+    assert_ne!(cbs_post.memb_root(), CbT::new().memb_root(), "the pinned set holds the ban");
     let mut t_good = t.clone();
     let good = scan_of(
         &mut rng,
@@ -564,6 +576,7 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
         &cbs_post,
         &scan_pk,
         root_after_p,
+        scan_epoch,
     );
     let (good_b, _) = encode(&good).unwrap();
     assert_eq!(
@@ -622,11 +635,11 @@ fn verifying_with_a_prepared_key_gives_the_same_answers() {
         ),
     ];
     for (i, (label, object, nul, root)) in cases.into_iter().enumerate() {
-        let library = <ObjT as UserBul<F, MsgUser>>::verify_interaction::<F, Snark, 1>(
+        let library = <ObjT as UserBul<F, MsgUser>>::verify_interaction::<PostArgs<F>, Snark, 1>(
             &fresh,
             object,
             nul,
-            payload.0,
+            PostArgs { payload: payload.0, epoch: F::from(0) },
             exec.cb_com_list,
             exec.proof.clone(),
             Some(root),
@@ -639,7 +652,7 @@ fn verifying_with_a_prepared_key_gives_the_same_answers() {
             &prepared,
             object,
             nul,
-            payload.0,
+            PostArgs { payload: payload.0, epoch: F::from(0) },
             exec.cb_com_list,
             &exec.proof,
             root,
@@ -689,7 +702,7 @@ fn audit_setup() -> AuditSetup {
     }
     let root = shadow.root();
     let exec = author
-        .exec_method_create_cb::<H, F, FpVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
+        .exec_method_create_cb::<H, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
             &mut rng,
             get_standard_interaction(),
             [FakeSigPubkey::pk()],
@@ -697,7 +710,7 @@ fn audit_setup() -> AuditSetup {
             &shadow,
             false,
             &std_pk,
-            super::record::post_payload("honest text"),
+            PostArgs { payload: super::record::post_payload("honest text"), epoch: F::from(0) },
             (),
         )
         .expect("post proof");
@@ -726,7 +739,7 @@ fn audit_setup() -> AuditSetup {
 fn audit_replica(s: &AuditSetup) -> Replica<OH, MH, NH> {
     let config = Config {
         root_window: 256,
-        settlement_barriers: 3,
+        barriers_per_epoch: 2,
         poll_close_barriers: 1,
     };
     let mut r = Replica::<OH, MH, NH>::new(s.keys.clone(), config).trust_unproven_joins_for_tests();
@@ -875,6 +888,7 @@ fn a_rate_limited_post_cannot_change_its_topic_or_persona() {
                 claimed,
                 i,
                 payload,
+                epoch: F::from(0),
             },
             (),
         )
@@ -902,7 +916,7 @@ fn a_rate_limited_post_cannot_change_its_topic_or_persona() {
 
     let config = Config {
         root_window: 256,
-        settlement_barriers: 3,
+        barriers_per_epoch: 2,
         poll_close_barriers: 1,
     };
     let mut r = Replica::<OH, MH, NH>::new(keys, config).trust_unproven_joins_for_tests();
@@ -958,6 +972,7 @@ fn claim_post(
                     context,
                     claimed,
                     payload,
+                    epoch: F::from(0),
                 },
                 a,
                 b,
@@ -1002,7 +1017,7 @@ fn posts_with_a_claim_prove_it_and_nothing_else() {
     for (com, _, _) in &joins {
         obj.push(*com, F::from(0), vec![]);
     }
-    let config = Config { root_window: 256, settlement_barriers: 3, poll_close_barriers: 1 };
+    let config = Config { root_window: 256, barriers_per_epoch: 2, poll_close_barriers: 1 };
     let fresh = || {
         let mut r = Replica::<OH, MH, NH>::new(keys.clone(), config).trust_unproven_joins_for_tests();
         for j in &joins {

@@ -177,6 +177,8 @@ impl PersonaClient {
             i: i_f,
             claimed: badge,
             pk: member_pk,
+            // The exec helper sets this to the epoch it proves in.
+            epoch: F::from(0),
         };
 
         let exec =
@@ -315,6 +317,8 @@ impl PersonaClient {
             context,
             claimed,
             payload,
+            // The exec helper sets this to the epoch it proves in.
+            epoch: F::from(0),
         };
 
         let start = SystemTime::now();
@@ -347,6 +351,8 @@ impl PersonaClient {
             claimed,
             i,
             payload,
+            // The exec helper sets this to the epoch it proves in.
+            epoch: F::from(0),
         };
 
         let start = SystemTime::now();
@@ -383,6 +389,8 @@ impl PersonaClient {
             context,
             claimed,
             payload,
+            // The exec helper sets this to the epoch it proves in.
+            epoch: F::from(0),
         };
 
         let start = SystemTime::now();
@@ -422,6 +430,8 @@ impl PersonaClient {
                 context,
                 claimed,
                 payload,
+                // The exec helper sets this to the epoch it proves in.
+                epoch: F::from(0),
             },
             a,
             b,

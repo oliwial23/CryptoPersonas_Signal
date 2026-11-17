@@ -52,9 +52,10 @@ pub struct EngineOptions {
     /// OS entropy.
     pub seed: Option<f64>,
     /// Replica accept-rule config; each defaults to the demo values
-    /// (`root_window: 256`, a 48-hour ban window, 24-hour polls).
+    /// (`root_window: 256`, day-long epochs, 24-hour polls).
     pub root_window: Option<u32>,
-    pub settlement_barriers: Option<u32>,
+    /// Barriers per epoch (defaults to a day of barriers); tests set a few.
+    pub barriers_per_epoch: Option<u32>,
     pub poll_close_barriers: Option<u32>,
     /// Shared barrier schedule (§14). Set both to bucket ingests by service
     /// timestamp; omit for the default (local-barrier) cadence the tests/demo drive
@@ -388,9 +389,9 @@ impl Engine {
             root_window: options
                 .root_window
                 .map_or(deployed.root_window, |n| n as usize),
-            settlement_barriers: options
-                .settlement_barriers
-                .map_or(deployed.settlement_barriers, u64::from),
+            barriers_per_epoch: options
+                .barriers_per_epoch
+                .map_or(deployed.barriers_per_epoch, u64::from),
             poll_close_barriers: options
                 .poll_close_barriers
                 .map_or(deployed.poll_close_barriers, u64::from),

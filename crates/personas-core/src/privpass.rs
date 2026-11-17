@@ -183,12 +183,12 @@ pub fn ensure_batch_ticket_keys(
     let interaction: TicketInt<TICKET_BATCH_SIZE> = get_ticket_interaction();
     let (interaction_pk, interaction_vk) = interaction
         .clone()
-        .generate_keys::<H, Snark, Cr, OStore>(rng, Some(obj_pubkey), F::from(0), false);
+        .generate_keys::<H, Snark, Cr, OStore>(rng, Some(obj_pubkey), crate::circuits::PostArgs::default(), false);
     let (batch_pk, batch_vk) = generate_keys_for_batch_tickets::<
         H,
         MsgUser,
-        F,
-        ArgsVar,
+        crate::circuits::PostArgs<F>,
+        crate::circuits::PostArgsVar<F>,
         (),
         (),
         Args,
@@ -217,13 +217,17 @@ pub fn request_ticket<Bul: PublicUserBul<F, MsgUser>>(
     bul: &Bul,
     interaction_pk: &PK,
     batch_pk: &PK,
+    epoch: F,
 ) -> Result<TicketRequest, ark_relations::r1cs::SynthesisError> {
+    use crate::circuits::{PostArgs, PostArgsVar};
     let bul_data = bul.get_membership_data(user.commit::<H>()).unwrap();
-    user.batch_issue_tickets::<H, F, ArgsVar, (), (), Args, ArgsVar, Cr, Snark, Bul, TICKET_BATCH_SIZE>(
+    user.batch_issue_tickets::<H, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, TICKET_BATCH_SIZE>(
         rng,
         get_ticket_interaction::<TICKET_BATCH_SIZE>(),
         core::array::from_fn(|_| FakeSigPubkey::pk()),
-        zk_callbacks::generic::object::Time::from(0),
+        // The current epoch: the tickets are issued in it (and expire `TICKET_LIFETIME`
+        // epochs later), and the object must have `ep` = it.
+        epoch,
         bul_data,
         // is_memb_data_const: the object bulletin's pubkey is baked in as a circuit
         // constant here, matching every other standard-interaction proof in this
@@ -233,7 +237,7 @@ pub fn request_ticket<Bul: PublicUserBul<F, MsgUser>>(
         true,
         interaction_pk,
         batch_pk,
-        F::from(0),
+        PostArgs { payload: F::from(0), epoch },
         (),
         false,
     )
@@ -353,11 +357,12 @@ pub fn issue_tickets(
     batch_vk: &VK,
     bul: &OStore,
     issuer: &IssuerKeys,
+    epoch: F,
 ) -> Result<ValidatedTicketBatch, &'static str> {
-    verify_and_validate::<H, MsgUser, F, Args, ArgsVar, Cr, Snark, OStore, TICKET_BATCH_SIZE>(
+    verify_and_validate::<H, MsgUser, crate::circuits::PostArgs<F>, Args, ArgsVar, Cr, Snark, OStore, TICKET_BATCH_SIZE>(
         object,
         old_nul,
-        F::from(0),
+        crate::circuits::PostArgs { payload: F::from(0), epoch },
         request.exec_meth.cb_com_list,
         request.exec_meth.proof.clone(),
         memb_data,
@@ -367,9 +372,9 @@ pub fn issue_tickets(
         request.pub_blinded_tickets,
         request.proof.clone(),
         batch_vk,
-        // `request_ticket` runs the ticket interaction at time 0; the blinding proof
-        // checks each hidden ticket's expiration against this.
-        F::from(0),
+        // The epoch the request was proved in; the blinding proof checks each hidden
+        // ticket's expiration against it.
+        epoch,
         issuer.privkey,
     )
 }

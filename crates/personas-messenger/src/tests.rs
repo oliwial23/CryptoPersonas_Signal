@@ -195,7 +195,7 @@ mod e2e {
 
     fn keygen(rng: &mut StdRng) -> Keys {
         let (std_pk, std_vk): (PK, VK) = get_standard_interaction()
-            .generate_keys::<H, Snark, Cr, ObjT>(rng, None, F::from(0), false);
+            .generate_keys::<H, Snark, Cr, ObjT>(rng, None, personas_core::circuits::PostArgs::default(), false);
         let dummy_pseudo = PseudonymArgs::default();
         let (pseudo_pk, pseudo_vk): (PK, VK) = get_standard_pseudo_interaction()
             .generate_keys::<H, Snark, Cr, ObjT>(rng, None, dummy_pseudo.clone(), false);
@@ -278,13 +278,48 @@ mod e2e {
     fn config() -> Config {
         Config {
             root_window: 256,
-            settlement_barriers: 10,
+            barriers_per_epoch: 5,
             poll_close_barriers: 3,
         }
     }
 
+    /// Barriers until a ticket filed now has settled: it expires `TICKET_LIFETIME` epochs
+    /// after this one and settles at the last barrier of that epoch.
+    fn settle_barriers() -> u64 {
+        (personas_core::circuits::TICKET_LIFETIME + 1) * config().barriers_per_epoch
+    }
+
     /// Cross barriers until what was just sent is in a root members can prove from.
     fn settle(ms: &mut [&mut Msg]) {
+        cross_settle_lag(ms);
+        // What the Desktop scheduler does: a member whose object is from an earlier epoch
+        // scans before anything else (every interaction proves `ep = t`), and everyone
+        // receives the scan. A member that has not joined yet cannot, and is skipped.
+        let mut rng = StdRng::seed_from_u64(0xe90c);
+        for _ in 0..3 {
+            let mut scanned = false;
+            for i in 0..ms.len() {
+                if !ms[i].epoch_scan_needed() {
+                    continue;
+                }
+                let Ok(scan) = ms[i].emit_scan(&mut rng) else {
+                    continue;
+                };
+                scanned = true;
+                for (j, m) in ms.iter_mut().enumerate() {
+                    if j != i {
+                        deliver(m, &scan);
+                    }
+                }
+            }
+            if !scanned {
+                break;
+            }
+            cross_settle_lag(ms);
+        }
+    }
+
+    fn cross_settle_lag(ms: &mut [&mut Msg]) {
         for m in ms {
             for _ in 0..personas_bulletin::replica::SETTLE_LAG {
                 m.barrier();
@@ -1204,7 +1239,7 @@ mod e2e {
         );
 
         // Cross the settlement window: every post's ticket is invoked.
-        for _ in 0..=config().settlement_barriers {
+        for _ in 0..=settle_barriers() {
             m.barrier();
         }
         assert!(
@@ -1474,6 +1509,7 @@ mod e2e {
                 personas_core::circuits::JoinArgs {
                     account: F::from(1u64),
                     pk: persona::member_pk(&forger.user.data.sk),
+                    epoch: F::from(0u64),
                 },
                 (),
             )
@@ -1550,7 +1586,7 @@ mod e2e {
             "not swept since posting"
         );
         for m in [&mut alice, &mut admin] {
-            for _ in 0..=config().settlement_barriers {
+            for _ in 0..=settle_barriers() {
                 m.barrier();
             }
         }
@@ -1669,7 +1705,7 @@ mod e2e {
             settle(&mut [&mut admin, &mut alice]);
         }
         for m in [&mut alice, &mut admin] {
-            for _ in 0..=config().settlement_barriers {
+            for _ in 0..=settle_barriers() {
                 m.barrier();
             }
         }
@@ -1765,7 +1801,7 @@ mod e2e {
         let old = alice.emit_post_pseudo(&mut rng, "old", context).unwrap();
         assert_eq!(status_of(&mut admin, &old), Status::Applied);
         for m in [&mut admin, &mut alice] {
-            for _ in 0..=config().settlement_barriers {
+            for _ in 0..=settle_barriers() {
                 m.barrier();
             }
         }
@@ -1809,7 +1845,7 @@ mod e2e {
         let post = alice.emit_post_anon(&mut rng, "text").unwrap();
         assert_eq!(status_of(&mut admin, &post), Status::Applied);
         for m in [&mut admin, &mut alice] {
-            for _ in 0..config().settlement_barriers - 1 {
+            for _ in 0..settle_barriers() - 1 {
                 m.barrier();
             }
         }

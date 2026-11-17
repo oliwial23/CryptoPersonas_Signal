@@ -69,6 +69,8 @@ impl PersonaClient {
     pub fn join(&self) -> Result<()> {
         let mut rng = OsRng;
 
+        // A fresh object starts in the server's current epoch.
+        let ep = self.epoch()?;
         let user = User::create(
             MsgUser {
                 sk: F::rand(&mut rng),
@@ -79,6 +81,7 @@ impl PersonaClient {
                 badge1: F::from(0),
                 badge2: F::from(0),
                 badge3: F::from(0),
+                ep,
             },
             &mut rng,
         );

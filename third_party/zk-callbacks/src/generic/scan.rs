@@ -460,6 +460,10 @@ pub struct PrivScanArgs<
     /// Private nonmembership data for callback tickets. If the callback ticket is a member
     /// (has been called), then this should be set to a default value.
     pub nmemb_priv: [CBul::NonMembershipWitness; NUMCBS],
+    /// Slots that pad the scan to its fixed size. A dummy slot leaves the object exactly as
+    /// it was, so a scan has the same shape however many tickets its owner holds. Its
+    /// ticket is a placeholder no one ever called, whose non-membership witness is real.
+    pub dummy: [bool; NUMCBS],
 }
 
 impl<
@@ -480,6 +484,7 @@ where
             post_times: core::array::from_fn(|i| self.post_times[i].clone()),
             memb_priv: core::array::from_fn(|i| self.memb_priv[i].clone()),
             nmemb_priv: core::array::from_fn(|i| self.nmemb_priv[i].clone()),
+            dummy: self.dummy,
         }
     }
 }
@@ -504,6 +509,7 @@ where
             enc_args: core::array::from_fn(|_| Crypto::Ct::default()),
             post_times: core::array::from_fn(|_| Time::<F>::default()),
             priv_n_tickets: pnt,
+            dummy: [false; NUMCBS],
         }
     }
 }
@@ -542,6 +548,8 @@ pub struct PrivScanArgsVar<
     pub memb_priv: [CBul::MembershipWitnessVar; NUMCBS],
     /// The private nonmembership data for a callback ticket in-circuit.
     pub nmemb_priv: [CBul::NonMembershipWitnessVar; NUMCBS],
+    /// Which slots are padding, in-circuit.
+    pub dummy: [Boolean<F>; NUMCBS],
 }
 
 impl<
@@ -595,12 +603,21 @@ impl<
             let enc_args: [<Crypto::EncKey as CPACipher<F>>::CV; NUMCBS] =
                 ArrayVar::new_variable(ns!(cs, "enc_args"), || Ok(rec.enc_args.clone()), mode)?.0;
 
+            let mut dummy_vec = Vec::with_capacity(NUMCBS);
+            for d in rec.dummy {
+                dummy_vec.push(Boolean::new_variable(ns!(cs, "dummy"), || Ok(d), mode)?);
+            }
+            let dummy: [Boolean<F>; NUMCBS] = dummy_vec
+                .try_into()
+                .unwrap_or_else(|_| panic!("Unexpected failure."));
+
             Ok(Self {
                 priv_n_tickets: priv_n_tickets.0,
                 enc_args,
                 post_times,
                 memb_priv,
                 nmemb_priv,
+                dummy,
             })
         })
     }
@@ -638,7 +655,11 @@ pub fn scan_method<
 
     let mut marked_for_deletion = vec![];
 
-    for i in priv_args.priv_n_tickets {
+    for (i, dummy) in priv_args.priv_n_tickets.into_iter().zip(priv_args.dummy) {
+        // Padding: no ticket, so nothing changes.
+        if dummy {
+            continue;
+        }
         out_user.zk_fields.old_in_progress_callback_hash = add_ticket_to_hc::<F, H, CBArgs, Crypto>(
             out_user.zk_fields.old_in_progress_callback_hash,
             i.cb_entry.clone(),
@@ -765,6 +786,8 @@ where
     }
 
     for i in 0..NUMCBS {
+        // What a dummy (padding) slot leaves: the object as it was before the slot.
+        let slot_start = inprog_user.clone();
         add_ticket_to_hc_zk::<F, H, CBArgs, Crypto>(
             &mut inprog_user.zk_fields.old_in_progress_callback_hash,
             priv_args.priv_n_tickets[i].cb_entry.clone(),
@@ -861,7 +884,13 @@ where
         let correct_updated_user =
             UserVar::conditionally_select(&memb, &memb_world_user, &nmemb_world_user)?;
 
-        inprog_user = correct_updated_user;
+        // A dummy slot adds no ticket to the in-progress chain, so it cannot stand in for a
+        // real one: a sweep that skips a ticket never matches `callback_hash` and never ends.
+        inprog_user = UserVar::conditionally_select(
+            &priv_args.dummy[i],
+            &slot_start,
+            &correct_updated_user,
+        )?;
     }
 
     let updated_cbh = FpVar::<F>::conditionally_select(
@@ -933,10 +962,29 @@ where
         user_old, pub_args, priv_args,
     )?;
 
-    let b = out_user.data.is_eq(&user_new.data)?;
-
-    // let b = User::commit_in_zk::<H>(inprog_user)?
-    //    .is_eq(&(User::commit_in_zk::<H>(user_new.clone())?))?;
+    // The WHOLE scanned state must match, not just `data`. The interaction circuit does not
+    // constrain a scan's new callback fields (it skips them when `is_scan`), so comparing
+    // only `data` let a "scan" set its own ticket list, sweep progress and `is_ingest_over`:
+    // drop every ticket, a pending ban's included, and reset the post count.
+    let b = Boolean::kary_and(&[
+        out_user.data.is_eq(&user_new.data)?,
+        out_user
+            .zk_fields
+            .callback_hash
+            .is_eq(&user_new.zk_fields.callback_hash)?,
+        out_user
+            .zk_fields
+            .new_in_progress_callback_hash
+            .is_eq(&user_new.zk_fields.new_in_progress_callback_hash)?,
+        out_user
+            .zk_fields
+            .old_in_progress_callback_hash
+            .is_eq(&user_new.zk_fields.old_in_progress_callback_hash)?,
+        out_user
+            .zk_fields
+            .is_ingest_over
+            .is_eq(&user_new.zk_fields.is_ingest_over)?,
+    ])?;
 
     Ok(b)
 }

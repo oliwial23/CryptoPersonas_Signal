@@ -32,7 +32,6 @@
 //! send-then-ingest-own-echo flow does.
 
 use ark_ff::UniformRand;
-use ark_r1cs_std::fields::fp::FpVar;
 use ark_relations::r1cs::SynthesisError;
 use rand::{CryptoRng, RngCore};
 
@@ -41,7 +40,7 @@ use personas_bulletin::replica::record::{
     Ark, Eh, Flavour, PollKind, Record, ballot_payload, post_payload, rating_payload,
 };
 use personas_core::circuits::{
-    BadgesArgs, BadgesArgsVar, Claim, ClaimArgs, ClaimArgsVar, JoinArgs, JoinArgsVar, MsgUser,
+    BadgesArgs, BadgesArgsVar, Claim, ClaimArgs, PostArgs, PostArgsVar, ClaimArgsVar, JoinArgs, JoinArgsVar, MsgUser,
     NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate, PseudonymArgsVar,
     PubScan, PubScanVar, REP_THRESHOLD_MAX, ResetArgs, ResetArgsVar, get_badge_request_interaction,
     get_callbacks, get_claim_interaction, rep_threshold,
@@ -150,6 +149,9 @@ pub struct Member {
     /// `data.banned` after a scan absorbs a ban; treat it as owned state.
     pub user: User<F, MsgUser>,
     keys: MemberKeys,
+    /// The current epoch, set by the messenger before each proof (`set_epoch`): every
+    /// proof names it, and tickets are issued in it.
+    epoch: u64,
 }
 
 impl Member {
@@ -162,12 +164,21 @@ impl Member {
             },
             rng,
         );
-        Self { user, keys }
+        Self { user, keys, epoch: 0 }
     }
 
     /// Wrap an existing user (e.g. restored from disk).
     pub fn from_user(user: User<F, MsgUser>, keys: MemberKeys) -> Self {
-        Self { user, keys }
+        Self { user, keys, epoch: 0 }
+    }
+
+    /// The epoch the next proof names; the messenger sets it from its replica.
+    pub fn set_epoch(&mut self, epoch: u64) {
+        self.epoch = epoch;
+    }
+
+    fn epoch_f(&self) -> F {
+        F::from(self.epoch)
     }
 
     /// The member's private state (its zk user object: secret key, commitment
@@ -194,7 +205,7 @@ impl Member {
             ark_serialize::Compress::No,
             ark_serialize::Validate::Yes,
         )?;
-        Ok(Self { user, keys })
+        Ok(Self { user, keys, epoch: 0 })
     }
 
     /// Whether a scan would accomplish anything right now — a sweep is unfinished, one
@@ -258,13 +269,15 @@ impl Member {
     /// identical leaf. `account` is the joining Signal account
     /// (`personas_core::account_field`).
     pub fn join(
-        &self,
+        &mut self,
         rng: &mut (impl CryptoRng + RngCore),
         account: F,
     ) -> Result<Record, MemberError> {
         if !self.is_fresh() {
             return Err(MemberError::NotFresh);
         }
+        // A fresh object starts in the epoch it joins in.
+        self.user.data.ep = self.epoch_f();
         let pk = persona::member_pk(&self.user.data.sk);
         let result = self
             .user
@@ -272,7 +285,7 @@ impl Member {
                 rng,
                 join_pred,
                 &self.keys.join,
-                JoinArgs { account, pk },
+                JoinArgs { account, pk, epoch: self.epoch_f() },
                 (),
             )?;
         Ok(Record::Join {
@@ -371,15 +384,15 @@ impl Member {
         let payload = post_payload(&body);
         let exec = self
             .user
-            .exec_method_create_cb::<H, F, FpVar<F>, (), (), Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 1>(
+            .exec_method_create_cb::<H, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 1>(
                 rng,
                 get_standard_interaction(),
                 [FakeSigPubkey::pk()],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 obj,
                 false,
                 &self.keys.standard,
-                payload,
+                PostArgs { payload, epoch: self.epoch_f() },
                 (),
             )?;
         Ok(Record::Post {
@@ -419,7 +432,7 @@ impl Member {
                 rng,
                 get_badge_request_interaction(),
                 [FakeSigPubkey::pk()],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 obj,
                 false,
                 &self.keys.badge_request,
@@ -430,6 +443,7 @@ impl Member {
                     // meaningful to claim here.
                     claimed: F::from(0),
                     pk,
+                    epoch: self.epoch_f(),
                 },
                 (),
             )?;
@@ -461,6 +475,7 @@ impl Member {
             context,
             claimed,
             payload,
+            epoch: self.epoch_f(),
         };
         let exec = self
             .user
@@ -468,7 +483,7 @@ impl Member {
                 rng,
                 get_standard_pseudo_interaction(),
                 [FakeSigPubkey::pk()],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 obj,
                 false,
                 &self.keys.pseudo,
@@ -505,6 +520,7 @@ impl Member {
             claimed,
             i,
             payload,
+            epoch: self.epoch_f(),
         };
         let exec = self
             .user
@@ -512,7 +528,7 @@ impl Member {
                 rng,
                 get_standard_pseudo_rate_interaction(),
                 [FakeSigPubkey::pk()],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 obj,
                 false,
                 &self.keys.pseudo_rate,
@@ -549,7 +565,7 @@ impl Member {
                 rng,
                 get_standard_pseudo_interaction(),
                 [FakeSigPubkey::pk()],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 obj,
                 false,
                 &self.keys.pseudo,
@@ -557,6 +573,7 @@ impl Member {
                     context,
                     claimed,
                     payload: ballot_payload(poll, option),
+                    epoch: self.epoch_f(),
                 },
                 (),
             )?;
@@ -599,7 +616,7 @@ impl Member {
                 rng,
                 get_claim_interaction(claim),
                 [FakeSigPubkey::pk()],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 obj,
                 false,
                 pk,
@@ -608,6 +625,7 @@ impl Member {
                         context,
                         claimed,
                         payload,
+                        epoch: self.epoch_f(),
                     },
                     a,
                     b,
@@ -720,20 +738,15 @@ impl Member {
         cbs: &MerkleCallbackStore<F, MH, NH>,
     ) -> Result<Record, MemberError> {
         self.require_member(obj)?;
-        let have = self.user.num_outstanding_callbacks();
-        if have < NUM_SCANS_PER_FOLD {
-            return Err(MemberError::NothingToScan {
-                have,
-                need: NUM_SCANS_PER_FOLD,
-            });
-        }
+        // No minimum: a member with no tickets still scans once per epoch. Its scan is all
+        // padding, finishes an empty sweep and brings its object up to this epoch.
         let root = obj.root();
         let (ps, prs) = self
             .user
             .get_scan_arguments::<Args, ArgsVar, Cr, MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>(
                 cbs,
                 (false, false),
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 get_callbacks(),
             );
         let md = <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
@@ -747,7 +760,7 @@ impl Member {
                 rng,
                 get_scan_interaction::<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>(),
                 [],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 md,
                 false,
                 &self.keys.scan,
@@ -777,7 +790,7 @@ impl Member {
             return Err(MemberError::SweepUnderway);
         }
         let root = obj.root();
-        let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(cbs, Time::from(0));
+        let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(cbs, Time::from(self.epoch_f()));
         let prs = dummy_scan_witness::<MH, NH>(cbs);
         let md = <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
             obj,
@@ -790,7 +803,7 @@ impl Member {
                 rng,
                 get_dummy_scan_interaction::<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>(),
                 [],
-                Time::from(0),
+                Time::from(self.epoch_f()),
                 md,
                 false,
                 &self.keys.scan,
@@ -826,6 +839,7 @@ impl Member {
             context,
             claimed,
             payload,
+            epoch: self.epoch_f(),
         };
         let proof = self
             .user
@@ -839,6 +853,13 @@ impl Member {
                 (),
             )?;
         Ok((root, claimed, proof))
+    }
+
+    /// Whether this member must scan before it can do anything in `epoch`: its object was
+    /// last brought up to date in an earlier one (every interaction proves `ep = t`).
+    pub fn epoch_scan_needed(&self, epoch: u64) -> bool {
+        use ark_ff::PrimeField;
+        self.user.data.ep.into_bigint() < F::from(epoch).into_bigint()
     }
 
     /// Whether this member has used up its interactions between sweeps. Its next post could
@@ -910,6 +931,8 @@ fn dummy_scan_witness<const MH: usize, const NH: usize>(
         post_times: [Default::default()],
         memb_priv: [memb],
         nmemb_priv: [nmemb],
+        // A no-op scan: every slot is padding.
+        dummy: [true],
     }
 }
 

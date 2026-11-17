@@ -89,7 +89,7 @@ use zk_callbacks::impls::centralized::crypto::FakeSigPrivkey;
 
 use personas_core::circuits::{
     BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, BadgesArgs, Claim, ClaimArgs,
-    NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsRate, RATE_LIMITED_PERSONAS_PER_CONTEXT,
+    NUM_SCANS_PER_FOLD, PostArgs, PseudonymArgs, PseudonymArgsRate, RATE_LIMITED_PERSONAS_PER_CONTEXT,
     arg_rep,
 };
 use personas_core::params::ServerKeys;
@@ -192,14 +192,17 @@ pub struct Config {
     /// `K`: how far behind a prover's object root may lag before it is dropped
     /// rather than buffered. Safe at any size (monotone, §5.1); bounds memory.
     pub root_window: usize,
-    /// `W`: how many barriers a post's ticket lives before forced settlement (§7).
-    pub settlement_barriers: u64,
+    /// Barriers per epoch. Epochs are public and the same for every member: epoch
+    /// `e` is barriers `e * barriers_per_epoch ..`. A proof names the epoch of the barrier
+    /// its record is placed at, tickets expire `TICKET_LIFETIME` epochs after the one they
+    /// were issued in, and scans prove against the callback set pinned at the epoch's start.
+    pub barriers_per_epoch: u64,
     /// How many barriers a poll accepts votes for before it closes (§8).
     pub poll_close_barriers: u64,
 }
 
-/// How long a post's ticket stays open to a ban.
-pub const BAN_WINDOW_MS: u64 = 48 * 60 * 60 * 1000;
+/// How long an epoch lasts: a day.
+pub const EPOCH_MS: u64 = 24 * 60 * 60 * 1000;
 /// How long a poll takes ballots.
 pub const POLL_OPEN_MS: u64 = 24 * 60 * 60 * 1000;
 /// The barrier period a group gets unless its bundle says otherwise.
@@ -212,7 +215,7 @@ impl Config {
         let period = period_ms.max(1);
         Self {
             root_window: 256,
-            settlement_barriers: BAN_WINDOW_MS.div_ceil(period),
+            barriers_per_epoch: (EPOCH_MS / period).max(1),
             poll_close_barriers: POLL_OPEN_MS.div_ceil(period),
         }
     }
@@ -221,10 +224,34 @@ impl Config {
     pub fn fast() -> Self {
         Self {
             root_window: 256,
-            settlement_barriers: 3,
+            barriers_per_epoch: 4,
             poll_close_barriers: 2,
         }
     }
+}
+
+impl Config {
+    /// The epoch barrier `barrier` belongs to.
+    pub fn epoch_at(&self, barrier: u64) -> u64 {
+        barrier / self.barriers_per_epoch
+    }
+
+    /// The last barrier of `epoch`: a ticket expiring at `epoch` is settled there, the
+    /// latest point at which a call on it still counts.
+    pub fn last_barrier_of(&self, epoch: u64) -> u64 {
+        (epoch + 1) * self.barriers_per_epoch - 1
+    }
+
+    /// When a ticket must be settled: the last barrier of the epoch it expires in.
+    fn settle_barrier_for(&self, callback: &tally::Callback) -> u64 {
+        self.last_barrier_of(field_u64(callback.cb_entry.expiration))
+    }
+}
+
+/// A small field element (an epoch or a ticket's expiry) as an integer.
+fn field_u64(f: F) -> u64 {
+    use ark_ff::PrimeField;
+    f.into_bigint().as_ref()[0]
 }
 
 impl Default for Config {
@@ -875,12 +902,18 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
     /// only ever valid against the latest barrier, so a member must read the live
     /// store here rather than reconstruct a stale one.
     pub fn callback_store(&self) -> &MerkleCallbackStore<F, MH, NH> {
-        &self.state.cbs
+        // The snapshot pinned at the start of this epoch, which every scan proves against.
+        &self.state.pinned
     }
 
     /// The barrier the replica has reached.
     pub fn current_barrier(&self) -> u64 {
         self.current_barrier
+    }
+
+    /// The epoch the replica has reached: the one a proof made now names.
+    pub fn current_epoch(&self) -> u64 {
+        self.config.epoch_at(self.current_barrier)
     }
 
     /// The status the accept rule assigned a record, by envelope hash.
@@ -908,6 +941,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
 
     fn record_proof_holds(&self, rec: &Record, eh: Eh) -> Option<bool> {
         let mut cache = HashMap::new();
+        // A benchmark checks a record made just now, in the current epoch.
+        let epoch_f = F::from(self.config.epoch_at(self.current_barrier));
         let ok = match rec {
             Record::Join {
                 object,
@@ -919,7 +954,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 &mut cache,
                 eh,
                 &self.prepared.join,
-                &[object.0, account.0, pk.0],
+                &[object.0, account.0, pk.0, epoch_f],
                 &proof.0,
             ),
             Record::Post {
@@ -938,6 +973,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 &extra.0,
                 payload.0,
                 obj_root.0,
+                epoch_f,
             ),
             Record::BadgeRequest {
                 exec,
@@ -957,6 +993,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                         i: F::from(u64::from(*slot)),
                         claimed: F::from(0),
                         pk: pk.0,
+                        epoch: epoch_f,
                     },
                     exec.cb_com_list,
                     &exec.proof,
@@ -966,8 +1003,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             Record::Scan { exec, obj_root, .. } => {
                 let exec = &exec.0;
                 let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(
-                    &self.state.cbs,
-                    Time::from(0),
+                    &self.state.pinned,
+                    Time::from(epoch_f),
                 );
                 memo_interaction::<OH, _, 0>(
                     &mut cache,
@@ -1003,7 +1040,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 exec,
                 claimed,
                 obj_root,
-            } => verify_vote::<OH>(&mut cache, &self.prepared, eh, *poll, *option, &exec.0, claimed.0, obj_root.0),
+            } => verify_vote::<OH>(&mut cache, &self.prepared, eh, *poll, *option, &exec.0, claimed.0, obj_root.0, epoch_f),
             Record::RejoinApprove {
                 account,
                 spent: Some(spent),
@@ -1187,8 +1224,24 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             //     therefore prove against the *post*-settlement callback set — which
             //     is exactly what makes a ban enforceable the moment a replica crosses
             //     its barrier. (At `b == 0` there is nothing yet to settle.)
-            let settled = settle_barrier(b, &self.config, &mut st.cbs, &mut st.derived);
-            if settled.invoked > 0 {
+            // (0) At the first barrier of an epoch, re-pin the callback set scans prove
+            //     against, so it holds every call made up to the epoch boundary.
+            let mut settled = SettleTimings::default();
+            if b > 0 && b % self.config.barriers_per_epoch == 0 && st.repin_due {
+                let started = std::time::Instant::now();
+                st.cbs.update_epoch();
+                st.pinned = st.cbs.clone();
+                st.repin_due = false;
+                settled.epoch_update_us =
+                    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            }
+            let calls = settle_barrier(b, &self.config, &mut st.cbs, &mut st.derived);
+            settled.invoke_us = calls.invoke_us;
+            settled.invoked = calls.invoked;
+            if calls.invoked > 0 {
+                st.repin_due = true;
+            }
+            if settled.invoked > 0 || settled.epoch_update_us > 0 {
                 self.last_settle = Some((b, settled));
             }
 
@@ -1245,7 +1298,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 eh,
                 b,
                 &mut st.obj,
-                &st.cbs,
+                &st.pinned,
                 &mut st.derived,
             );
             st.statuses.insert(eh, status);
@@ -1357,10 +1410,13 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
         cbs: &MerkleCallbackStore<F, MH, NH>,
         derived: &mut Derived,
     ) -> Status {
-        let w = self.config.settlement_barriers;
         // Borrow the record out of `seen` for the duration; `self.verify_cache` is a
         // disjoint field, so a free helper can memoise while we hold `&record`.
         let seen = &self.seen[&eh];
+        // THE EPOCH a record is proved in: that of the barrier it was placed at (its
+        // sender's own timestamp). Every proof names it, so a record cannot claim another.
+        let epoch = self.config.epoch_at(seen.first_barrier);
+        let epoch_f = F::from(epoch);
         match &seen.record {
             Record::Join {
                 object,
@@ -1377,7 +1433,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                         &mut self.verify_cache,
                         eh,
                         &self.prepared.join,
-                        &[object.0, account.0, pk.0],
+                        &[object.0, account.0, pk.0, epoch_f],
                         &proof.0,
                     )
                 {
@@ -1497,6 +1553,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     &extra.0,
                     payload.0,
                     root,
+                    epoch_f,
                 );
                 if !ok {
                     return Status::Rejected("post proof failed");
@@ -1518,7 +1575,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 // File the callback ticket the poster committed to (§7).
                 let callback = exec.cb_tik_list[0].0.clone();
                 let claimed = flavour.has_persona().then(|| tally::f_key(extra.0[1]));
-                let mut ticket = Outstanding::new(callback, Time::from(0), barrier + w, claimed);
+                let settle = self.config.settle_barrier_for(&callback);
+                let mut ticket = Outstanding::new(callback, Time::from(epoch), settle, claimed);
                 // A pseudonym a ban has reached: this post is flagged, and its ticket
                 // carries the ban to the member's object.
                 let flagged = claimed.is_some_and(|c| derived.banned_personas.contains(&c));
@@ -1585,6 +1643,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     i: F::from(*slot as u64),
                     claimed: F::from(0),
                     pk: pk.0,
+                    epoch: epoch_f,
                 };
                 let ok = memo_interaction::<OH, _, 1>(
                     &mut self.verify_cache,
@@ -1613,7 +1672,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 let callback = exec.cb_tik_list[0].0.clone();
                 derived
                     .outstanding
-                    .insert(eh, Outstanding::new(callback, Time::from(0), barrier + w, None));
+                    .insert(eh, {
+                        let settle = self.config.settle_barrier_for(&callback);
+                        Outstanding::new(callback, Time::from(epoch), settle, None)
+                    });
                 derived.open_tickets.insert(eh);
 
                 derived.log.push(LogEntry {
@@ -1673,7 +1735,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 if cb_memb_root.0 != cbs.memb_root() || cb_nmemb_root.0 != cbs.nmemb_root() {
                     return Status::Rejected("scan names a superseded barrier");
                 }
-                let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(cbs, Time::from(0));
+                let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(cbs, Time::from(epoch_f));
                 let ok = memo_interaction::<OH, _, 0>(
                     &mut self.verify_cache,
                     eh,
@@ -1753,6 +1815,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     exec,
                     claimed.0,
                     obj_root.0,
+                    epoch_f,
                 ) {
                     return Status::Rejected("vote proof failed");
                 }
@@ -1771,7 +1834,11 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 // A ballot files a ticket like any interaction, and it settles like any
                 // other, but it names no persona and nothing may target it.
                 let mut ticket =
-                    Outstanding::new(exec.cb_tik_list[0].0.clone(), Time::from(0), barrier + w, None);
+                    {
+                        let callback = exec.cb_tik_list[0].0.clone();
+                        let settle = self.config.settle_barrier_for(&callback);
+                        Outstanding::new(callback, Time::from(epoch), settle, None)
+                    };
                 ticket.targetable = false;
                 derived.outstanding.insert(eh, ticket);
                 derived.open_tickets.insert(eh);
@@ -1884,6 +1951,12 @@ struct BuildState<const OH: usize, const MH: usize, const NH: usize> {
     /// sorts after it can be applied by continuing the pass instead of replaying it
     /// (see `ingest_inner`).
     pass_max: Option<Eh>,
+    /// The callback set as of the start of the current epoch. Every scan in an epoch
+    /// proves against this snapshot, so calls made during the epoch reach members at the
+    /// next one, and members scanning at different moments of an epoch see the same set.
+    pinned: MerkleCallbackStore<F, MH, NH>,
+    /// Calls were made since the snapshot, so it must be re-taken at the next epoch.
+    repin_due: bool,
 }
 
 impl<const OH: usize, const MH: usize, const NH: usize> BuildState<OH, MH, NH> {
@@ -1903,6 +1976,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> BuildState<OH, MH, NH> {
             produced_order,
             applied: HashSet::new(),
             pass_max: None,
+            pinned: MerkleCallbackStore::new(),
+            repin_due: false,
         }
     }
 }
@@ -2052,13 +2127,22 @@ fn settle_barrier<const MH: usize, const NH: usize>(
     // Ascending eh is the same tiebreak the log order uses (§4).
     due.sort();
 
-    let mut any_called = false;
+    let now = config.epoch_at(barrier);
     for eh in due {
         let out = derived
             .outstanding
             .get(&eh)
             .expect("just collected")
             .clone();
+        // A call on an expired ticket would never reach its owner (a scan drops the
+        // ticket), so it is not made: the post's moderation window has closed.
+        if now > field_u64(out.callback.cb_entry.expiration) {
+            if let Some(o) = derived.outstanding.get_mut(&eh) {
+                o.settled = true;
+            }
+            derived.open_tickets.remove(&eh);
+            continue;
+        }
         // ORDER MATTERS: a ticket is invoked once with one argument, so these are
         // mutually exclusive. Ban wins over a badge — a member being revoked should not
         // simultaneously be granted a credential.
@@ -2075,11 +2159,10 @@ fn settle_barrier<const MH: usize, const NH: usize>(
             arg_rep(out.clamped_rep())
         };
         let started = std::time::Instant::now();
-        let called = invoke(cbs, &out, arg);
+        let called = invoke(cbs, &out, arg, Time::from(now));
         timings.invoke_us += u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         if called {
             timings.invoked += 1;
-            any_called = true;
             if let Some(o) = derived.outstanding.get_mut(&eh) {
                 o.settled = true;
             }
@@ -2087,15 +2170,8 @@ fn settle_barrier<const MH: usize, const NH: usize>(
         }
     }
 
-    // Re-pin the nonmembership root over the (possibly grown) called set. The epoch
-    // counter advances, but soundness rests on the range partition (d1 §3.3): a
-    // grown called set yields a distinct partition and so a distinct root, which is
-    // what makes a pre-ban scan stale.
-    if any_called {
-        let started = std::time::Instant::now();
-        cbs.update_epoch();
-        timings.epoch_update_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    }
+    // The nonmembership root is re-pinned at the next epoch boundary, not here (the
+    // barrier loop does it): scans in an epoch all prove against the same called set.
     timings
 }
 
@@ -2106,6 +2182,7 @@ fn invoke<const MH: usize, const NH: usize>(
     cbs: &mut MerkleCallbackStore<F, MH, NH>,
     out: &Outstanding,
     arg: F,
+    time: Time<F>,
 ) -> bool {
     let enc_key = out.callback.cb_entry.enc_key.clone();
     let tik = out.callback.cb_entry.tik.clone();
@@ -2116,7 +2193,7 @@ fn invoke<const MH: usize, const NH: usize>(
         tik,
         enc,
         sig,
-        out.filed_at,
+        time,
     )
     .is_ok()
 }
@@ -2138,6 +2215,7 @@ fn verify_post<const OH: usize>(
     extra: &[F],
     payload: F,
     root: F,
+    epoch: F,
 ) -> bool {
     if extra.len() != flavour.arity() {
         return false;
@@ -2146,6 +2224,7 @@ fn verify_post<const OH: usize>(
         context: extra[0],
         claimed: extra[1],
         payload,
+        epoch,
     };
     let check = |cache: &mut HashMap<Eh, bool>, vk: &PreparedVk, args| {
         memo_interaction::<OH, ClaimArgs<F>, 1>(
@@ -2167,7 +2246,7 @@ fn verify_post<const OH: usize>(
             &prepared.standard,
             exec.new_object,
             exec.old_nullifier,
-            payload,
+            PostArgs { payload, epoch },
             exec.cb_com_list,
             &exec.proof,
             root,
@@ -2194,6 +2273,7 @@ fn verify_post<const OH: usize>(
                 claimed: extra[1],
                 i: extra[2],
                 payload,
+                epoch,
             },
             exec.cb_com_list,
             &exec.proof,
@@ -2227,6 +2307,7 @@ fn verify_vote<const OH: usize>(
     exec: &record::PostExec,
     claimed: F,
     root: F,
+    epoch: F,
 ) -> bool {
     memo_interaction::<OH, _, 1>(
         cache,
@@ -2238,6 +2319,7 @@ fn verify_vote<const OH: usize>(
             context: poll.context(),
             claimed,
             payload: record::ballot_payload(poll, option),
+            epoch,
         },
         exec.cb_com_list,
         &exec.proof,

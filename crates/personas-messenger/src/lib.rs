@@ -341,15 +341,26 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
 
     /// Whether a scan would absorb anything now ([`Member::scan_needed`]).
     pub fn scan_needed(&self) -> bool {
-        self.member
-            .as_ref()
-            .is_some_and(|m| m.scan_needed(self.replica.callback_store()))
+        self.epoch_scan_needed()
+            || self
+                .member
+                .as_ref()
+                .is_some_and(|m| m.scan_needed(self.replica.callback_store()))
     }
 
     /// Scans left in the sweep in progress ([`Member::sweep_remaining`]).
     /// Whether this member must finish a scan before its next post.
     pub fn scan_required(&self) -> bool {
         self.member.as_ref().is_some_and(Member::scan_required)
+    }
+
+    /// Whether this member must scan before acting in the current epoch. A member scans
+    /// once at the start of each epoch, before anything else.
+    pub fn epoch_scan_needed(&self) -> bool {
+        let epoch = self.replica.current_epoch();
+        self.member
+            .as_ref()
+            .is_some_and(|m| m.epoch_scan_needed(epoch))
     }
 
     pub fn sweep_remaining(&self) -> usize {
@@ -588,11 +599,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             return Err(SendError::ScanPending);
         }
         self.op_started = Some(std::time::Instant::now());
-        let record = self
-            .member
-            .as_ref()
-            .ok_or(SendError::Observer)?
-            .join(rng, account)?;
+        let epoch = self.replica.current_epoch();
+        let member = self.member.as_mut().ok_or(SendError::Observer)?;
+        member.set_epoch(epoch);
+        let record = member.join(rng, account)?;
         self.emit(record)
     }
 
@@ -1049,7 +1059,10 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         // ...so this is where proving starts, for OpTimings.
         self.op_started = Some(std::time::Instant::now());
         let lag = self.proving_lag();
+        let epoch = self.replica.current_epoch();
         let member = self.member.as_mut().ok_or(SendError::Observer)?;
+        // Every proof names the current epoch.
+        member.set_epoch(epoch);
         let settled = self.replica.proving_store_at(lag).ok_or(SendError::Settling)?;
         if !member.is_on_bulletin(settled) {
             return Err(if member.is_on_bulletin(self.replica.obj_store()) {
@@ -1120,7 +1133,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         self.op_started = Some(std::time::Instant::now());
         let lag = self.proving_lag();
         let settled = self.replica.proving_store_at(lag).ok_or(SendError::Settling)?;
+        let epoch = self.replica.current_epoch();
         let member = self.member.as_mut().ok_or(SendError::Observer)?;
+        member.set_epoch(epoch);
         if member.is_on_bulletin(settled) {
             return Ok(prove(member, settled)?);
         }

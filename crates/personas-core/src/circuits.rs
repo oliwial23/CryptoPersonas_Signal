@@ -39,22 +39,33 @@ use lazy_static::lazy_static;
 
 use crate::{Args, ArgsVar, CStore, Cr, H, OStore, PK, Snark};
 
-/// How many interactions a member can make between finished sweeps. This bounds how long a
-/// banned member who refuses to scan can keep posting.
-///
-/// Set at build time with `PERSONAS_SCAN_CAP` (default 20, the serverless deployment's).
-/// The server-backed deployment builds with 128 (see `deploy/play/Dockerfile.validator` and
-/// the README), which is also the cap the folding benchmarks to k = 100 use: folding makes a
-/// large backlog cheap for its server. The cap is a circuit constant, so it changes no
-/// circuit's size, but it does change the keys; the key caches name it whenever it is not
-/// the default, and a server reports it at `/api/scan_cap` so clients can check theirs.
-pub const NUM_INTS_BEFORE_SCAN: usize = match option_env!("PERSONAS_SCAN_CAP") {
+/// `k_max`: the most live tickets a member can hold, and so the number of slots a padded
+/// scan has. Set at build time with `PERSONAS_K_MAX`: 20 for the serverless deployment (the
+/// default), 60 for the server-backed one (`deploy/play/Dockerfile.validator`). A circuit
+/// constant, so it changes the keys; key caches name it whenever it is not the default, and
+/// a server reports its cap at `/api/scan_cap` so clients can check theirs.
+pub const K_MAX: usize = match option_env!("PERSONAS_K_MAX") {
     Some(s) => parse_build_usize(s),
-    None => DEFAULT_SCAN_CAP,
+    None => DEFAULT_K_MAX,
 };
-/// The serverless deployment's scan cap.
-pub const DEFAULT_SCAN_CAP: usize = 20;
-const _: () = assert!(NUM_INTS_BEFORE_SCAN >= 10, "PERSONAS_SCAN_CAP must be at least 10");
+/// The serverless deployment's `k_max`.
+pub const DEFAULT_K_MAX: usize = 20;
+
+/// `W`: how many epochs a ticket stays open to moderation. A ticket issued in epoch `t`
+/// expires at the end of epoch `t + W - 1`, so a post can be moderated for at least one
+/// full epoch and at most `W`.
+pub const EPOCH_W: usize = 2;
+
+/// How long a ticket lives past the epoch it was issued in: its callback's `expiration` is
+/// `t + TICKET_LIFETIME`, and a scan drops it once the epoch is later than that.
+pub const TICKET_LIFETIME: u64 = (EPOCH_W - 1) as u64;
+
+/// Interactions a member may make per epoch: `k_max / W`. A member scans once per epoch (at
+/// the start, before anything else) and its tickets live `W` epochs, so it never holds more
+/// than `k_max` live tickets. The circuits allow one interaction fewer than this constant
+/// (`count != NUM_INTS_BEFORE_SCAN`), hence the `+ 1`.
+pub const NUM_INTS_BEFORE_SCAN: usize = K_MAX / EPOCH_W + 1;
+const _: () = assert!(K_MAX >= 10 && K_MAX % EPOCH_W == 0, "PERSONAS_K_MAX must be a multiple of W, at least 10");
 
 /// A decimal number from a build-time setting (`option_env!`).
 pub const fn parse_build_usize(s: &str) -> usize {
@@ -72,10 +83,10 @@ pub const fn parse_build_usize(s: &str) -> usize {
 
 /// A suffix naming a non-default scan cap, for key-cache names (empty for the default).
 pub fn scan_cap_tag() -> String {
-    if NUM_INTS_BEFORE_SCAN == DEFAULT_SCAN_CAP {
+    if K_MAX == DEFAULT_K_MAX {
         String::new()
     } else {
-        format!("-cap{NUM_INTS_BEFORE_SCAN}")
+        format!("-kmax{K_MAX}")
     }
 }
 /// How many rate-limited personas a member has in each context: persona `i` of context
@@ -167,6 +178,10 @@ pub struct MsgUser {
     pub badge1: F,
     pub badge2: F,
     pub badge3: F,
+    /// The epoch this object was last brought up to date in: set at join and by the scan
+    /// that finishes a sweep. Every interaction proves `ep = t`, the current epoch, so a
+    /// member must have scanned this epoch before it can do anything.
+    pub ep: F,
 }
 
 pub type NF<const N: usize = NUM_SCANS_PER_FOLD> = Nova<
@@ -204,12 +219,52 @@ pub struct FoldingProofData {
     pub extra_verif: (Com<Fq>, Nul<Fq>, <Snark as SNARK<Fq>>::Proof),
 }
 
+/// The public inputs of an anonymous post or a ticket request: what it is about, and the
+/// epoch it is proved in.
+#[derive(Clone, Copy, Debug, Default, CanonicalDeserialize, CanonicalSerialize)]
+pub struct PostArgs<F: PrimeField> {
+    /// A hash of the post text, or zero for a ticket request.
+    pub payload: F,
+    /// The current epoch `t`; the object must have `ep = t`.
+    pub epoch: F,
+}
+
+#[derive(Clone)]
+pub struct PostArgsVar<F: PrimeField> {
+    pub payload: FpVar<F>,
+    pub epoch: FpVar<F>,
+}
+
+impl<F: PrimeField> AllocVar<PostArgs<F>, F> for PostArgsVar<F> {
+    fn new_variable<T: Borrow<PostArgs<F>>>(
+        cs: impl Into<Namespace<F>>,
+        f: impl FnOnce() -> Result<T, SynthesisError>,
+        mode: AllocationMode,
+    ) -> Result<Self, SynthesisError> {
+        let ns = cs.into();
+        let cs = ns.cs();
+        let PostArgs { payload, epoch } = *f()?.borrow();
+        Ok(Self {
+            payload: FpVar::new_variable(cs.clone(), || Ok(payload), mode)?,
+            epoch: FpVar::new_variable(cs, || Ok(epoch), mode)?,
+        })
+    }
+}
+
+impl<F: PrimeField> ToConstraintField<F> for PostArgs<F> {
+    fn to_field_elements(&self) -> Option<Vec<F>> {
+        Some(vec![self.payload, self.epoch])
+    }
+}
+
 #[derive(Clone, Debug, Default, CanonicalDeserialize, CanonicalSerialize)]
 pub struct PseudonymArgs<F: PrimeField> {
     pub context: F,
     pub claimed: F,
     /// What the proof is about: a hash of the post text, ballot or rating it travels with.
     pub payload: F,
+    /// The current epoch `t`; the object must have `ep = t`.
+    pub epoch: F,
 }
 
 #[derive(Clone)]
@@ -217,6 +272,7 @@ pub struct PseudonymArgsVar<F: PrimeField> {
     pub context: FpVar<F>,
     pub claimed: FpVar<F>,
     pub payload: FpVar<F>,
+    pub epoch: FpVar<F>,
 }
 #[derive(Clone, Debug, Default, CanonicalDeserialize, CanonicalSerialize)]
 pub struct PseudonymArgsRate<F: PrimeField> {
@@ -225,6 +281,8 @@ pub struct PseudonymArgsRate<F: PrimeField> {
     pub i: F,
     /// See [`PseudonymArgs::payload`].
     pub payload: F,
+    /// See [`PseudonymArgs::epoch`].
+    pub epoch: F,
 }
 
 #[derive(Clone)]
@@ -233,6 +291,7 @@ pub struct PseudonymArgsRateVar<F: PrimeField> {
     pub claimed: FpVar<F>,
     pub i: FpVar<F>,
     pub payload: FpVar<F>,
+    pub epoch: FpVar<F>,
 }
 
 #[derive(Clone, Debug, Default, CanonicalDeserialize, CanonicalSerialize)]
@@ -243,6 +302,8 @@ pub struct BadgesArgs<F: PrimeField> {
     /// request only from the account that registered this key at join, so a member cannot
     /// have someone else's account vouch for a badge that lands in its own object.
     pub pk: F,
+    /// See [`PseudonymArgs::epoch`].
+    pub epoch: F,
 }
 
 #[derive(Clone)]
@@ -250,6 +311,7 @@ pub struct BadgesArgsVar<F: PrimeField> {
     pub i: FpVar<F>,
     pub claimed: FpVar<F>,
     pub pk: FpVar<F>,
+    pub epoch: FpVar<F>,
 }
 
 impl<F: PrimeField> AllocVar<PseudonymArgs<F>, F> for PseudonymArgsVar<F> {
@@ -265,18 +327,20 @@ impl<F: PrimeField> AllocVar<PseudonymArgs<F>, F> for PseudonymArgsVar<F> {
             context,
             claimed,
             payload,
+            epoch,
         } = *f()?.borrow();
         Ok(Self {
             context: FpVar::new_variable(cs.clone(), || Ok(context), mode)?,
             claimed: FpVar::new_variable(cs.clone(), || Ok(claimed), mode)?,
-            payload: FpVar::new_variable(cs, || Ok(payload), mode)?,
+            payload: FpVar::new_variable(cs.clone(), || Ok(payload), mode)?,
+            epoch: FpVar::new_variable(cs, || Ok(epoch), mode)?,
         })
     }
 }
 
 impl<F: PrimeField> ToConstraintField<F> for PseudonymArgs<F> {
     fn to_field_elements(&self) -> Option<Vec<F>> {
-        Some(vec![self.context, self.claimed, self.payload])
+        Some(vec![self.context, self.claimed, self.payload, self.epoch])
     }
 }
 
@@ -307,19 +371,21 @@ impl<F: PrimeField> AllocVar<PseudonymArgsRate<F>, F> for PseudonymArgsRateVar<F
             claimed,
             i,
             payload,
+            epoch,
         } = *f()?.borrow();
         Ok(Self {
             context: FpVar::new_variable(cs.clone(), || Ok(context), mode)?,
             claimed: FpVar::new_variable(cs.clone(), || Ok(claimed), mode)?,
             i: FpVar::new_variable(cs.clone(), || Ok(i), mode)?,
-            payload: FpVar::new_variable(cs, || Ok(payload), mode)?,
+            payload: FpVar::new_variable(cs.clone(), || Ok(payload), mode)?,
+            epoch: FpVar::new_variable(cs, || Ok(epoch), mode)?,
         })
     }
 }
 
 impl<F: PrimeField> ToConstraintField<F> for PseudonymArgsRate<F> {
     fn to_field_elements(&self) -> Option<Vec<F>> {
-        Some(vec![self.context, self.claimed, self.i, self.payload])
+        Some(vec![self.context, self.claimed, self.i, self.payload, self.epoch])
     }
 }
 
@@ -332,18 +398,19 @@ impl<F: PrimeField> AllocVar<BadgesArgs<F>, F> for BadgesArgsVar<F> {
         let ns = cs.into();
         let cs = ns.cs(); // ConstraintSystemRef<F>
 
-        let BadgesArgs { i, claimed, pk } = *f()?.borrow();
+        let BadgesArgs { i, claimed, pk, epoch } = *f()?.borrow();
         Ok(Self {
             i: FpVar::new_variable(cs.clone(), || Ok(i), mode)?,
             claimed: FpVar::new_variable(cs.clone(), || Ok(claimed), mode)?,
-            pk: FpVar::new_variable(cs, || Ok(pk), mode)?,
+            pk: FpVar::new_variable(cs.clone(), || Ok(pk), mode)?,
+            epoch: FpVar::new_variable(cs, || Ok(epoch), mode)?,
         })
     }
 }
 
 impl<F: PrimeField> ToConstraintField<F> for BadgesArgs<F> {
     fn to_field_elements(&self) -> Option<Vec<F>> {
-        Some(vec![self.i, self.claimed, self.pk])
+        Some(vec![self.i, self.claimed, self.pk, self.epoch])
     }
 }
 
@@ -353,6 +420,18 @@ impl<F: PrimeField> ToConstraintField<F> for BadgesArgs<F> {
 fn bind_public_input(value: &FpVar<F>) -> ArkResult<()> {
     let _bound = value * value;
     Ok(())
+}
+
+/// THE EPOCH RULE every interaction (everything but a scan) proves: the object was brought
+/// up to date in the current epoch `t` (`old.ep = t`, which only a finished sweep in this
+/// epoch or a join in it can make true), and the interaction leaves `ep` alone, so `ep` can
+/// move forward only through a scan.
+fn epoch_holds(
+    tu_old: &UserVar<F, MsgUser>,
+    tu_new: &UserVar<F, MsgUser>,
+    epoch: &FpVar<F>,
+) -> ArkResult<Boolean<F>> {
+    Ok(tu_old.data.ep.is_eq(epoch)? & tu_new.data.ep.is_eq(&tu_old.data.ep)?)
 }
 
 /// A member's public key: a hash of `sk` that identifies the member across objects. It is
@@ -401,12 +480,15 @@ fn rate_pseudonym_zk(sk: &FpVar<F>, context: &FpVar<F>, i: &FpVar<F>) -> ArkResu
 pub struct JoinArgs<F: PrimeField> {
     pub account: F,
     pub pk: F,
+    /// The epoch of the join: a fresh object starts with `ep = epoch`.
+    pub epoch: F,
 }
 
 #[derive(Clone)]
 pub struct JoinArgsVar<F: PrimeField> {
     pub account: FpVar<F>,
     pub pk: FpVar<F>,
+    pub epoch: FpVar<F>,
 }
 
 impl<F: PrimeField> AllocVar<JoinArgs<F>, F> for JoinArgsVar<F> {
@@ -417,17 +499,18 @@ impl<F: PrimeField> AllocVar<JoinArgs<F>, F> for JoinArgsVar<F> {
     ) -> Result<Self, SynthesisError> {
         let ns = cs.into();
         let cs = ns.cs();
-        let JoinArgs { account, pk } = *f()?.borrow();
+        let JoinArgs { account, pk, epoch } = *f()?.borrow();
         Ok(Self {
             account: FpVar::new_variable(cs.clone(), || Ok(account), mode)?,
-            pk: FpVar::new_variable(cs, || Ok(pk), mode)?,
+            pk: FpVar::new_variable(cs.clone(), || Ok(pk), mode)?,
+            epoch: FpVar::new_variable(cs, || Ok(epoch), mode)?,
         })
     }
 }
 
 impl<F: PrimeField> ToConstraintField<F> for JoinArgs<F> {
     fn to_field_elements(&self) -> Option<Vec<F>> {
-        Some(vec![self.account, self.pk])
+        Some(vec![self.account, self.pk, self.epoch])
     }
 }
 
@@ -508,6 +591,7 @@ pub fn join_pred(
         tu.zk_fields.new_in_progress_callback_hash.is_eq(&zero)?,
         tu.zk_fields.old_in_progress_callback_hash.is_eq(&zero)?,
         tu.zk_fields.is_ingest_over.clone(),
+        tu.data.ep.is_eq(&pub_args.epoch)?,
     ];
     Boolean::kary_and(&checks)
 }
@@ -541,7 +625,7 @@ pub fn not_banned_pred(
     Boolean::kary_and(&checks)
 }
 
-fn standard_method(tu: &User<F, MsgUser>, _args: F, _priv: ()) -> User<F, MsgUser> {
+fn standard_method(tu: &User<F, MsgUser>, _args: PostArgs<F>, _priv: ()) -> User<F, MsgUser> {
     let mut u = tu.clone();
     u.data.num_interactions_since_last_scan += F::from(1);
     u
@@ -580,11 +664,12 @@ fn standard_badge_request_method(
 fn standard_predicate<'a>(
     tu_old: &'a UserVar<F, MsgUser>,
     tu_new: &'a UserVar<F, MsgUser>,
-    args: FpVar<F>,
+    args: PostArgsVar<F>,
     _priv: (),
 ) -> ArkResult<Boolean<F>> {
-    // `args` is the post's payload hash.
-    bind_public_input(&args)?;
+    // The post's payload hash.
+    bind_public_input(&args.payload)?;
+    let ep = epoch_holds(tu_old, tu_new, &args.epoch)?;
     let x1 = tu_new.data.num_interactions_since_last_scan.is_eq(
         &(tu_old.data.num_interactions_since_last_scan.clone() + FpVar::Constant(F::from(1))),
     )?;
@@ -606,7 +691,7 @@ fn standard_predicate<'a>(
     // with posts and never finish it.
     let x9 = tu_old.zk_fields.is_ingest_over.clone();
 
-    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8 & x9)
+    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8 & x9 & ep)
 }
 
 fn standard_pseudo_predicate<'a>(
@@ -636,11 +721,12 @@ fn standard_pseudo_predicate<'a>(
     bind_public_input(&pub_args.payload)?;
     let context = pub_args.context;
     let claimed = pub_args.claimed;
+    let ep = epoch_holds(tu_old, tu_new, &pub_args.epoch)?;
     let derived = pseudonym_zk(&tu_new.data.sk, &context)?;
     let x9 = derived.is_eq(&claimed)?;
     let x10 = tu_old.zk_fields.is_ingest_over.clone();
 
-    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8 & x9 & x10)
+    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8 & x9 & x10 & ep)
 }
 
 fn standard_pseudo_rate_predicate<'a>(
@@ -685,8 +771,9 @@ fn standard_pseudo_rate_predicate<'a>(
     let derived = rate_pseudonym_zk(&tu_new.data.sk, &context, &i)?;
     let x10 = derived.is_eq(&claimed)?;
     let x11 = tu_old.zk_fields.is_ingest_over.clone();
+    let ep = epoch_holds(tu_old, tu_new, &pub_args.epoch)?;
 
-    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8 & x9 & x10 & x11)
+    Ok(x1 & x2 & x3 & x4 & x5 & x6 & x7 & x8 & x9 & x10 & x11 & ep)
 }
 
 fn standard_badge_request_predicate<'a>(
@@ -717,6 +804,7 @@ fn standard_badge_request_predicate<'a>(
     // The request names its requester's public key, which the validation logic ties to the
     // sending account; see `BadgesArgs::pk`.
     let owns_pk = member_pk_zk(&tu_new.data.sk)?.is_eq(&pub_args.pk)?;
+    let ep = epoch_holds(tu_old, tu_new, &pub_args.epoch)?;
 
     let is_one = index.is_eq(&FpVar::Constant(F::from(1)))?;
     let is_two = index.is_eq(&FpVar::Constant(F::from(2)))?;
@@ -763,6 +851,7 @@ fn standard_badge_request_predicate<'a>(
         & x9
         & tu_old.zk_fields.is_ingest_over.clone()
         & owns_pk
+        & ep
         & faculty_request_ok
         & student_request_ok
         & industry_request_ok;
@@ -868,11 +957,14 @@ fn scan_method<CBul: PublicCallbackBul<F, Args, Cr> + Clone, const N: usize>(
 ) -> User<F, MsgUser> {
     let interaction =
         scan::get_scan_interaction::<F, MsgUser, Args, ArgsVar, Cr, CBul, Poseidon<2>, N>();
+    let cur_time = pub_args.cur_time;
     let mut out_user = (interaction.meth.0)(tu, pub_args, priv_args);
     // Only a FINISHED sweep resets the count: one scan of a long sweep must not buy another
     // full allowance of posts.
     if out_user.zk_fields.is_ingest_over {
         out_user.data.num_interactions_since_last_scan = F::ZERO;
+        // A finished sweep brings the object up to date in this epoch.
+        out_user.data.ep = cur_time;
     }
     out_user
 }
@@ -895,16 +987,31 @@ fn scan_predicate<CBul: PublicCallbackBul<F, Args, Cr> + Clone, const N: usize>(
     priv_args: PrivScanVar<CBul, N>,
 ) -> ArkResult<Boolean<F>> {
     let interaction = scan::get_scan_interaction::<F, MsgUser, Args, ArgsVar, Cr, CBul, H, N>();
+    let cur_time = pub_args.cur_time.clone();
     let mut user_new_prime = user_new.clone();
     user_new_prime.data.num_interactions_since_last_scan =
         user_old.data.num_interactions_since_last_scan.clone();
+    user_new_prime.data.ep = user_old.data.ep.clone();
     let real = (interaction.meth.1)(user_old, &user_new_prime, pub_args, priv_args)?;
+
+    // ONE SWEEP PER EPOCH. A sweep may start only if the object was last brought up to date
+    // in an earlier epoch, and the scan that finishes it sets `ep` to this one; no other
+    // scan touches `ep`. Epochs are small integers, so the comparison is sound.
+    let starting = user_old.zk_fields.is_ingest_over.clone();
+    let earlier = user_old.data.ep.is_cmp(&cur_time, core::cmp::Ordering::Less, false)?;
+    let may_start = !starting | earlier;
+    let new_ep = FpVar::conditionally_select(
+        &user_new.zk_fields.is_ingest_over,
+        &cur_time,
+        &user_old.data.ep,
+    )?;
+    let ep_ok = user_new.data.ep.is_eq(&new_ep)? & may_start;
     let count = FpVar::conditionally_select(
         &user_new.zk_fields.is_ingest_over,
         &FpVar::zero(),
         &user_old.data.num_interactions_since_last_scan,
     )?;
-    let counted = user_new.data.num_interactions_since_last_scan.is_eq(&count)?;
+    let counted = user_new.data.num_interactions_since_last_scan.is_eq(&count)? & ep_ok;
 
     // Nothing at all changed: harmless, and it can neither skip a ticket nor reset the count.
     let same = Boolean::kary_and(&[
@@ -933,8 +1040,11 @@ fn scan_predicate<CBul: PublicCallbackBul<F, Args, Cr> + Clone, const N: usize>(
 pub fn get_callbacks() -> Vec<Callback<F, MsgUser, Args, ArgsVar>> {
     let standard_callback = Callback {
         method_id: Id::from(0),
-        expirable: false,
-        expiration: Time::from(10),
+        // Tickets expire: issued in epoch `t`, a ticket can be called through epoch
+        // `t + TICKET_LIFETIME`, and the first scan after that drops it. That is what bounds
+        // a member's live tickets by `k_max`, and so the size of a padded scan.
+        expirable: true,
+        expiration: Time::from(TICKET_LIFETIME),
         method: standard_callback_method,
         predicate: standard_callback_predicate,
     };
@@ -942,7 +1052,7 @@ pub fn get_callbacks() -> Vec<Callback<F, MsgUser, Args, ArgsVar>> {
     vec![standard_callback]
 }
 
-pub type StandInt = Interaction<F, MsgUser, F, FpVar<F>, (), (), Args, ArgsVar, 1>;
+pub type StandInt = Interaction<F, MsgUser, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, 1>;
 
 pub type PseudoStandInt =
     Interaction<F, MsgUser, PseudonymArgs<F>, PseudonymArgsVar<F>, (), (), Args, ArgsVar, 1>;
@@ -965,9 +1075,9 @@ pub type BadgeRequestStandInt =
 /// Privacy Pass issuance of `N` tickets in one proof: one interaction that leaves `N`
 /// callbacks (one per ticket) and counts as `N` interactions toward the scan cap.
 pub type TicketInt<const N: usize> =
-    Interaction<F, MsgUser, F, FpVar<F>, (), (), Args, ArgsVar, N>;
+    Interaction<F, MsgUser, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, N>;
 
-fn ticket_method<const N: usize>(tu: &User<F, MsgUser>, _args: F, _priv: ()) -> User<F, MsgUser> {
+fn ticket_method<const N: usize>(tu: &User<F, MsgUser>, _args: PostArgs<F>, _priv: ()) -> User<F, MsgUser> {
     let mut u = tu.clone();
     u.data.num_interactions_since_last_scan += F::from(N as u64);
     u
@@ -980,10 +1090,11 @@ fn ticket_method<const N: usize>(tu: &User<F, MsgUser>, _args: F, _priv: ()) -> 
 fn ticket_predicate<'a, const N: usize>(
     tu_old: &'a UserVar<F, MsgUser>,
     tu_new: &'a UserVar<F, MsgUser>,
-    args: FpVar<F>,
+    args: PostArgsVar<F>,
     _priv: (),
 ) -> ArkResult<Boolean<F>> {
-    bind_public_input(&args)?;
+    bind_public_input(&args.payload)?;
+    let ep = epoch_holds(tu_old, tu_new, &args.epoch)?;
     let new_count = &tu_new.data.num_interactions_since_last_scan;
     let x1 = new_count.is_eq(
         &(tu_old.data.num_interactions_since_last_scan.clone()
@@ -1000,7 +1111,7 @@ fn ticket_predicate<'a, const N: usize>(
     let x7 = tu_new.data.badge2.is_eq(&tu_old.data.badge2)?;
     let x8 = tu_new.data.badge3.is_eq(&tu_old.data.badge3)?;
     let x9 = tu_old.zk_fields.is_ingest_over.clone();
-    Ok(x1 & under_cap & x2 & x4 & x5 & x6 & x7 & x8 & x9)
+    Ok(x1 & under_cap & x2 & x4 & x5 & x6 & x7 & x8 & x9 & ep)
 }
 
 pub fn get_ticket_interaction<const N: usize>() -> TicketInt<N> {
@@ -1111,7 +1222,9 @@ fn persona_post_checks(
 ) -> ArkResult<Boolean<F>> {
     bind_public_input(&post.payload)?;
     let derived = pseudonym_zk(&tu_new.data.sk, &post.context)?;
+    let ep = epoch_holds(tu_old, tu_new, &post.epoch)?;
     Boolean::kary_and(&[
+        ep,
         tu_new.data.num_interactions_since_last_scan.is_eq(
             &(tu_old.data.num_interactions_since_last_scan.clone() + FpVar::Constant(F::from(1))),
         )?,
@@ -1310,10 +1423,13 @@ pub fn exec_standint<Bul: PublicUserBul<F, MsgUser>>(
     bul: &Bul,
     pk: &PK,
     cur_time: Time<F>,
-    pub_args: F,
+    payload: F,
     priv_args: (),
 ) -> ArkResult<ExecutedMethod<F, Snark, Args, Cr, 1>> {
-    user.exec_method_create_cb::<H, F, FpVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, 1>(
+    // The epoch a proof names is the time its tickets are issued at, so one value serves
+    // both; the same holds for every helper below.
+    let pub_args = PostArgs { payload, epoch: cur_time };
+    user.exec_method_create_cb::<H, PostArgs<F>, PostArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, 1>(
         rng,
         get_standard_interaction(),
         [FakeSigPubkey::pk()],
@@ -1332,9 +1448,10 @@ pub fn exec_pseudo_standint<Bul: PublicUserBul<F, MsgUser>>(
     bul: &Bul,
     pk: &PK,
     cur_time: Time<F>,
-    pub_args: PseudonymArgs<F>,
+    mut pub_args: PseudonymArgs<F>,
     priv_args: (),
 ) -> ArkResult<ExecutedMethod<F, Snark, Args, Cr, 1>> {
+    pub_args.epoch = cur_time;
     user.exec_method_create_cb::<H, PseudonymArgs<F>, PseudonymArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, 1>(
         rng,
         get_standard_pseudo_interaction(),
@@ -1356,8 +1473,9 @@ pub fn exec_claim_standint<Bul: PublicUserBul<F, MsgUser>>(
     pk: &PK,
     cur_time: Time<F>,
     claim: Claim,
-    pub_args: ClaimArgs<F>,
+    mut pub_args: ClaimArgs<F>,
 ) -> ArkResult<ExecutedMethod<F, Snark, Args, Cr, 1>> {
+    pub_args.post.epoch = cur_time;
     user.exec_method_create_cb::<H, ClaimArgs<F>, ClaimArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, 1>(
         rng,
         get_claim_interaction(claim),
@@ -1377,9 +1495,10 @@ pub fn exec_pseudo_rate_standint<Bul: PublicUserBul<F, MsgUser>>(
     bul: &Bul,
     pk: &PK,
     cur_time: Time<F>,
-    pub_args: PseudonymArgsRate<F>,
+    mut pub_args: PseudonymArgsRate<F>,
     priv_args: (),
 ) -> ArkResult<ExecutedMethod<F, Snark, Args, Cr, 1>> {
+    pub_args.epoch = cur_time;
     user.exec_method_create_cb::<H, PseudonymArgsRate<F>, PseudonymArgsRateVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, 1>(
         rng,
         get_standard_pseudo_rate_interaction(),
@@ -1399,9 +1518,10 @@ pub fn exec_badge_request_standint<Bul: PublicUserBul<F, MsgUser>>(
     bul: &Bul,
     pk: &PK,
     cur_time: Time<F>,
-    pub_args: BadgesArgs<F>,
+    mut pub_args: BadgesArgs<F>,
     priv_args: (),
 ) -> ArkResult<ExecutedMethod<F, Snark, Args, Cr, 1>> {
+    pub_args.epoch = cur_time;
     user.exec_method_create_cb::<H, BadgesArgs<F>, BadgesArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, Bul, 1>(
         rng,
         get_badge_request_interaction(),
@@ -1666,6 +1786,7 @@ mod join_and_reset_predicate_tests {
         let args = JoinArgs {
             account: F::from(42u64),
             pk: crate::persona::member_pk(&user.data.sk),
+            epoch: user.data.ep,
         };
         let args = JoinArgsVar::new_input(cs.clone(), || Ok(args)).unwrap();
         let ok = pred(&user_var, &com_var, args, ()).unwrap();
@@ -1768,7 +1889,6 @@ mod rate_limit_circuit_tests {
     use super::*;
     use ark_r1cs_std::R1CSVar;
     use ark_relations::r1cs::ConstraintSystem;
-    use zk_callbacks::crypto::hash::HasherZK;
 
     /// Whether the rate-limited post predicate accepts persona index `i`, all else valid.
     fn accepts(i: u64) -> bool {
@@ -1794,6 +1914,7 @@ mod rate_limit_circuit_tests {
                 claimed,
                 i: F::from(i),
                 payload: F::from(0u64),
+                epoch: F::from(0u64),
             })
         })
         .unwrap();
@@ -1831,12 +1952,12 @@ mod ticket_predicate_tests {
             &mut rng,
         );
         old.data.num_interactions_since_last_scan = F::from(old_count as u64);
-        let new = ticket_method::<N>(&old, F::from(0u64), ());
+        let new = ticket_method::<N>(&old, PostArgs::default(), ());
 
         let cs = ConstraintSystem::<F>::new_ref();
         let old_var = UserVar::new_witness(cs.clone(), || Ok(old.clone())).unwrap();
         let new_var = UserVar::new_witness(cs.clone(), || Ok(new.clone())).unwrap();
-        let args = FpVar::new_input(cs.clone(), || Ok(F::from(0u64))).unwrap();
+        let args = PostArgsVar::new_input(cs.clone(), || Ok(PostArgs::default())).unwrap();
         let ok = ticket_predicate::<N>(&old_var, &new_var, args, ()).unwrap();
         ok.value().unwrap() && cs.is_satisfied().unwrap()
     }
@@ -1865,12 +1986,12 @@ mod ticket_predicate_tests {
         // The new object must count all N interactions, not fewer.
         let mut rng = rand::thread_rng();
         let old = User::create(MsgUser::default(), &mut rng);
-        let mut new = ticket_method::<10>(&old, F::from(0u64), ());
+        let mut new = ticket_method::<10>(&old, PostArgs::default(), ());
         new.data.num_interactions_since_last_scan = F::from(1u64);
         let cs = ConstraintSystem::<F>::new_ref();
         let old_var = UserVar::new_witness(cs.clone(), || Ok(old)).unwrap();
         let new_var = UserVar::new_witness(cs.clone(), || Ok(new)).unwrap();
-        let args = FpVar::new_input(cs.clone(), || Ok(F::from(0u64))).unwrap();
+        let args = PostArgsVar::new_input(cs.clone(), || Ok(PostArgs::default())).unwrap();
         let ok = ticket_predicate::<10>(&old_var, &new_var, args, ()).unwrap();
         assert!(!(ok.value().unwrap() && cs.is_satisfied().unwrap()));
     }
@@ -1901,6 +2022,7 @@ mod claim_predicate_tests {
                 context,
                 claimed: crate::persona::pseudonym(&old.data.sk, &context),
                 payload: F::from(5u64),
+                epoch: old.data.ep,
             },
             a,
             b,

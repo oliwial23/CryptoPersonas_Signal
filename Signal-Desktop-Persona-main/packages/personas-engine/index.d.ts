@@ -16,9 +16,10 @@ export interface EngineOptions {
   member?: boolean;
   /** Deterministic RNG seed for reproducible runs; omit for OS entropy. */
   seed?: number;
-  /** Replica accept-rule config (defaults: 256 / 3 / 1). */
+  /** Replica accept-rule config (defaults: 256 / a day of barriers / a day). */
   rootWindow?: number;
-  settlementBarriers?: number;
+  /** Barriers per epoch. Epochs are public; tickets expire after W of them. */
+  barriersPerEpoch?: number;
   pollCloseBarriers?: number;
   /**
    * Shared barrier schedule (§14). Set both to bucket ingests by service

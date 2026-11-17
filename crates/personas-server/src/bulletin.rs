@@ -194,6 +194,7 @@ mod tests {
             context,
             claimed: pseudonym(&user.data.sk, &context),
             payload: server_ballot_payload("signal", "upvote"),
+            epoch: epoch(&db),
         };
         let current = epoch(&db);
         let vote = exec_pseudo_standint(
@@ -282,6 +283,7 @@ mod tests {
                 context,
                 claimed: pseudonym(&user.data.sk, &context),
                 payload: server_claim_payload("group-a", "my message"),
+                epoch: epoch(&db),
             },
             a: rep_threshold(-1),
             b: F::from(0),

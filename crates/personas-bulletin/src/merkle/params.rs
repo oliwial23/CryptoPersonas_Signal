@@ -31,7 +31,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate
 use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
 use personas_core::circuits::{
-    BadgesArgs, Claim, ClaimArgs, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsRate,
+    BadgesArgs, Claim, ClaimArgs, PostArgs, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsRate,
     PseudonymArgsVar, PubScan, ScanInt, get_badge_request_interaction, get_callbacks,
     get_claim_interaction, get_scan_interaction,
     get_standard_interaction, get_standard_pseudo_interaction,
@@ -280,7 +280,7 @@ pub fn generate_merkle_circuit_keys<S: SNARK<F>>(
     cstore: &MerkleCStore,
 ) -> MerkleCircuitKeys<S> {
     let (standard_proving_key, standard_verifying_key) = get_standard_interaction()
-        .generate_keys::<H, S, Cr, MerkleOStore>(rng, None, F::from(0), false);
+        .generate_keys::<H, S, Cr, MerkleOStore>(rng, None, PostArgs::default(), false);
 
     let dummy_pseudo = PseudonymArgs::default();
     let (standard_pseudo_proving_key, standard_pseudo_verifying_key) =
@@ -304,6 +304,7 @@ pub fn generate_merkle_circuit_keys<S: SNARK<F>>(
         i: F::from(0),
         claimed: F::from(0),
         pk: F::from(0),
+        epoch: F::from(0),
     };
     let (badge_request_proving_key, badge_request_verifying_key) = get_badge_request_interaction()
         .generate_keys::<H, S, Cr, MerkleOStore>(
@@ -440,7 +441,7 @@ pub fn generate_merkle_standard_key(rng: &mut (impl CryptoRng + RngCore)) -> (PK
     get_standard_interaction().generate_keys::<H, Snark, Cr, MerkleOStore>(
         rng,
         None,
-        F::from(0),
+        PostArgs::default(),
         false,
     )
 }
@@ -587,10 +588,10 @@ mod tests {
         PrivScan, PrivScanVar, PubScan as PubScanAlias, PubScanVar, get_scan_interaction,
     };
     use personas_core::{Args, ArgsVar};
+    use personas_core::circuits::PostArgsVar;
     use rand::{SeedableRng, rngs::StdRng};
     use zk_callbacks::generic::bulletin::{PublicUserBul, UserBul};
     use zk_callbacks::generic::user::User;
-    use ark_r1cs_std::fields::fp::FpVar;
     use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
     // Small heights keep the circuits tiny; the mechanism under test (root as a
@@ -643,14 +644,14 @@ mod tests {
         let (pk, vk) = get_standard_interaction().generate_keys::<H, Snark, Cr, ObjT>(
             &mut rng,
             None,
-            Fr::from(0),
+            PostArgs::default(),
             false,
         );
 
         let (mut user, obj) = register_user(&mut rng);
 
         let exec = user
-            .exec_method_create_cb::<H, Fr, FpVar<Fr>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
+            .exec_method_create_cb::<H, PostArgs<Fr>, PostArgsVar<Fr>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
                 &mut rng,
                 get_standard_interaction(),
                 [FakeSigPubkey::pk()],
@@ -658,7 +659,7 @@ mod tests {
                 &obj,
                 false, // is_memb_data_const — MUST match the None-keygen above
                 &pk,
-                Fr::from(0),
+                PostArgs::default(),
                 (),
             )
             .unwrap();
@@ -666,11 +667,11 @@ mod tests {
         let root = obj.root();
         // The real root, supplied as the public membership input, verifies.
         assert!(
-            <ObjT as UserBul<Fr, MsgUser>>::verify_interaction::<Args, Snark, 1>(
+            <ObjT as UserBul<Fr, MsgUser>>::verify_interaction::<PostArgs<Fr>, Snark, 1>(
                 &obj,
                 exec.new_object,
                 exec.old_nullifier,
-                Fr::from(0),
+                PostArgs::default(),
                 exec.cb_com_list,
                 exec.proof.clone(),
                 Some(root),
@@ -682,11 +683,11 @@ mod tests {
         // A tampered root (what a replica pinning a different tree would supply)
         // does not — this is the pinning that closes the door on stale trees.
         assert!(
-            !<ObjT as UserBul<Fr, MsgUser>>::verify_interaction::<Args, Snark, 1>(
+            !<ObjT as UserBul<Fr, MsgUser>>::verify_interaction::<PostArgs<Fr>, Snark, 1>(
                 &obj,
                 exec.new_object,
                 exec.old_nullifier,
-                Fr::from(0),
+                PostArgs::default(),
                 exec.cb_com_list,
                 exec.proof,
                 Some(root + Fr::from(1)),
@@ -708,7 +709,7 @@ mod tests {
         let (std_pk, _std_vk) = get_standard_interaction().generate_keys::<H, Snark, Cr, ObjT>(
             &mut rng,
             None,
-            Fr::from(0),
+            PostArgs::default(),
             false,
         );
         let cstore = CbT::new();
@@ -721,7 +722,7 @@ mod tests {
         // Register and post once so the user has one outstanding, uncalled callback.
         let (mut user, mut obj) = register_user(&mut rng);
         let post = user
-            .exec_method_create_cb::<H, Fr, FpVar<Fr>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
+            .exec_method_create_cb::<H, PostArgs<Fr>, PostArgsVar<Fr>, (), (), Args, ArgsVar, Cr, Snark, ObjT, 1>(
                 &mut rng,
                 get_standard_interaction(),
                 [FakeSigPubkey::pk()],
@@ -729,7 +730,7 @@ mod tests {
                 &obj,
                 false,
                 &std_pk,
-                Fr::from(0),
+                PostArgs::default(),
                 (),
             )
             .unwrap();
@@ -742,10 +743,11 @@ mod tests {
 
         // The callback bulletin never called the ticket, so the scan proves
         // nonmembership. `(false, false)` = both roots are public inputs.
+        // A sweep may start only in a later epoch than the object's: scan in epoch 1.
         let (ps, prs) = user.get_scan_arguments::<Args, ArgsVar, Cr, CbT, NUM_SCANS_PER_FOLD>(
             &cstore,
             (false, false),
-            Time::from(0),
+            Time::from(1),
             get_callbacks(),
         );
 
@@ -766,7 +768,7 @@ mod tests {
                 &mut rng,
                 get_scan_interaction::<CbT, NUM_SCANS_PER_FOLD>(),
                 [],
-                Time::from(0),
+                Time::from(1),
                 <ObjT as PublicUserBul<Fr, MsgUser>>::get_membership_data(&obj, user.commit::<H>())
                     .unwrap(),
                 false, // object membership is a public input

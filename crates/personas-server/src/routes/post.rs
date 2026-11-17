@@ -169,6 +169,7 @@ pub(super) fn verify_vote(
                 context: poll_context,
                 claimed,
                 payload,
+                epoch: current,
             },
             current,
             INTERACTION,
@@ -198,7 +199,14 @@ fn verify_post(
     let current = epoch(&st.db);
 
     let (result, start, millis) = bench::time(|| match flavour {
-        Flavour::Anon => verify_and_store(&mut st.db, &vk, exec, payload, current, INTERACTION)
+        Flavour::Anon => verify_and_store(
+            &mut st.db,
+            &vk,
+            exec,
+            personas_core::circuits::PostArgs { payload, epoch: current },
+            current,
+            INTERACTION,
+        )
             .map(|callbacks| Verified {
                 callbacks,
                 persona: None,
@@ -218,6 +226,7 @@ fn verify_post(
                     context,
                     claimed,
                     payload,
+                    epoch: current,
                 },
                 current,
                 INTERACTION,
@@ -246,6 +255,7 @@ fn verify_post(
                     claimed,
                     i,
                     payload,
+                    epoch: current,
                 },
                 current,
                 INTERACTION,
@@ -272,6 +282,7 @@ fn verify_post(
                         context,
                         claimed,
                         payload,
+                        epoch: current,
                     },
                     a,
                     b,
@@ -574,7 +585,7 @@ pub async fn slack_request_badge(
             &mut st.db,
             &vk,
             exec,
-            BadgesArgs { i: index, claimed, pk },
+            BadgesArgs { i: index, claimed, pk, epoch: current },
             current,
             INTERACTION,
         )

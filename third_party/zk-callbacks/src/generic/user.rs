@@ -684,15 +684,17 @@ where
         self.scan_index = None
     }
 
-    /// Gets the arguments for a scan.
-    pub fn get_scan_arguments<
+    /// The arguments for the next scan of `NUMSCANS` slots: the next tickets of the sweep,
+    /// in order, then dummy slots once they run out. Padding gives every scan the same shape
+    /// whatever the member holds, and lets a member with no tickets finish an empty sweep.
+    fn build_scan_args<
         CBArgs: Clone + std::fmt::Debug + PartialEq + Eq,
         CBArgsVar: AllocVar<CBArgs, F> + Clone,
         Crypto: AECipherSigZK<F, CBArgs, AV = CBArgsVar> + PartialEq + Eq,
         CBul: PublicCallbackBul<F, CBArgs, Crypto> + Clone,
         const NUMSCANS: usize,
     >(
-        &mut self,
+        &self,
         cbul: &CBul,
         is_memb_nmemb_const: (bool, bool),
         cur_time: Time<F>,
@@ -701,16 +703,8 @@ where
         PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>,
         PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS>,
     ) {
-        let start_ind = match self.scan_index {
-            Some(ind) => {
-                assert!(NUMSCANS + ind <= self.callbacks.len());
-                ind
-            }
-            None => {
-                assert!(NUMSCANS <= self.callbacks.len());
-                0
-            }
-        };
+        let start_ind = self.scan_index.unwrap_or(0);
+        assert!(start_ind <= self.callbacks.len());
 
         let mut vec_cbs = vec![];
         let mut vec_memb_pub = vec![];
@@ -719,11 +713,30 @@ where
         let mut vec_nmemb_priv = vec![];
         let mut vec_enc = vec![];
         let mut vec_times = vec![];
+        let mut vec_dummy = vec![];
 
         for i in 0..NUMSCANS {
-            let cb: CallbackCom<F, CBArgs, Crypto> = self.get_cb::<CBArgs, Crypto>(start_ind + i);
+            let real = start_ind + i < self.callbacks.len();
+            let cb: CallbackCom<F, CBArgs, Crypto> = if real {
+                self.get_cb::<CBArgs, Crypto>(start_ind + i)
+            } else {
+                // A placeholder ticket no one ever called: its non-membership witness is real.
+                CallbackCom {
+                    cb_entry: crate::generic::callbacks::CallbackTicket {
+                        tik: Crypto::SigPK::default(),
+                        cb_method_id: F::ZERO,
+                        expirable: false,
+                        expiration: F::ZERO,
+                        enc_key: Crypto::EncKey::default(),
+                    },
+                    com_rand: F::ZERO,
+                }
+            };
             let data = cbul.get_membership_data(cb.get_ticket());
             let if_in = cbul.verify_in(cb.get_ticket());
+            if !real {
+                assert!(if_in.is_none(), "the placeholder ticket must never be called");
+            }
             let (enc, sig, time) = match if_in {
                 Some((e, s, t)) => (e, s, t),
                 None => (
@@ -748,6 +761,7 @@ where
             vec_memb_priv.push(data.1);
             vec_nmemb_pub.push(data.2);
             vec_nmemb_priv.push(data.3);
+            vec_dummy.push(!real);
         }
 
         let ps: PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS> = PubScanArgs {
@@ -765,7 +779,7 @@ where
         };
 
         let prs: PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS> = PrivScanArgs {
-            priv_n_tickets: vec_cbs.try_into().unwrap(),
+            priv_n_tickets: vec_cbs.try_into().unwrap_or_else(|_| panic!("Unexpected failure.")),
             post_times: vec_times.try_into().unwrap(),
             enc_args: vec_enc
                 .try_into()
@@ -776,7 +790,35 @@ where
             nmemb_priv: vec_nmemb_priv
                 .try_into()
                 .unwrap_or_else(|_| panic!("Unexpected failure.")),
+            dummy: vec_dummy.try_into().unwrap(),
         };
+
+        (ps, prs)
+    }
+
+    /// Gets the arguments for a scan.
+    pub fn get_scan_arguments<
+        CBArgs: Clone + std::fmt::Debug + PartialEq + Eq,
+        CBArgsVar: AllocVar<CBArgs, F> + Clone,
+        Crypto: AECipherSigZK<F, CBArgs, AV = CBArgsVar> + PartialEq + Eq,
+        CBul: PublicCallbackBul<F, CBArgs, Crypto> + Clone,
+        const NUMSCANS: usize,
+    >(
+        &mut self,
+        cbul: &CBul,
+        is_memb_nmemb_const: (bool, bool),
+        cur_time: Time<F>,
+        cb_methods: Vec<Callback<F, U, CBArgs, CBArgsVar>>,
+    ) -> (
+        PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>,
+        PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS>,
+    ) {
+        let (ps, prs) = self.build_scan_args::<CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>(
+            cbul,
+            is_memb_nmemb_const,
+            cur_time,
+            cb_methods,
+        );
 
         (ps, prs)
     }
@@ -1809,84 +1851,13 @@ where
         CBul::MembershipPub: std::fmt::Debug,
         CBul::NonMembershipPub: std::fmt::Debug,
     {
-        let start_ind = match self.scan_index {
-            Some(ind) => {
-                assert!(NUMSCANS + ind <= self.callbacks.len());
-                ind
-            }
-            None => {
-                assert!(NUMSCANS <= self.callbacks.len());
-                0
-            }
-        };
-
-        let bul_data = bul.get_membership_data(self.commit::<H>()).unwrap();
-
-        let mut vec_cbs = vec![];
-        let mut vec_memb_pub = vec![];
-        let mut vec_nmemb_pub = vec![];
-        let mut vec_memb_priv = vec![];
-        let mut vec_nmemb_priv = vec![];
-        let mut vec_enc = vec![];
-        let mut vec_times = vec![];
-
-        for i in 0..NUMSCANS {
-            let cb: CallbackCom<F, CBArgs, Crypto> = self.get_cb::<CBArgs, Crypto>(start_ind + i);
-            let data = cbul.get_membership_data(cb.get_ticket());
-            let if_in = cbul.verify_in(cb.get_ticket());
-            let (enc, sig, time) = match if_in {
-                Some((e, s, t)) => (e, s, t),
-                None => (
-                    Crypto::Ct::default(),
-                    Crypto::Sig::default(),
-                    Time::default(),
-                ),
-            };
-
-            assert!(
-                <Crypto as AECipherSigZK<F, CBArgs>>::SigPK::verify(
-                    &cb.get_ticket(),
-                    enc.clone(),
-                    sig
-                ) == true
-            );
-
-            vec_enc.push(enc);
-            vec_times.push(time);
-            vec_cbs.push(cb);
-            vec_memb_pub.push(data.0);
-            vec_memb_priv.push(data.1);
-            vec_nmemb_pub.push(data.2);
-            vec_nmemb_priv.push(data.3);
-        }
-
-        let ps: PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS> = PubScanArgs {
-            memb_pub: vec_memb_pub
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            nmemb_pub: vec_nmemb_pub
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            bulletin: cbul.clone(),
-            is_memb_data_const: is_memb_nmemb_const.0,
-            is_nmemb_data_const: is_memb_nmemb_const.1,
+        let (ps, prs) = self.build_scan_args::<CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>(
+            cbul,
+            is_memb_nmemb_const,
             cur_time,
             cb_methods,
-        };
-
-        let prs: PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS> = PrivScanArgs {
-            priv_n_tickets: vec_cbs.try_into().unwrap(),
-            post_times: vec_times.try_into().unwrap(),
-            enc_args: vec_enc
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            memb_priv: vec_memb_priv
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            nmemb_priv: vec_nmemb_priv
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-        };
+        );
+        let bul_data = bul.get_membership_data(self.commit::<H>()).unwrap();
 
         let out = self.interact::<H, PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>, PubScanArgsVar<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>, PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS>, PrivScanArgsVar<F, CBArgs, Crypto, CBul, NUMSCANS>, CBArgs, CBArgsVar, Crypto, Snark, Bul, 0>(
             rng,
@@ -1938,84 +1909,13 @@ where
     where
         U::UserDataVar: CondSelectGadget<F> + EqGadget<F>,
     {
-        let start_ind = match self.scan_index {
-            Some(ind) => {
-                assert!(NUMSCANS + ind <= self.callbacks.len());
-                ind
-            }
-            None => {
-                assert!(NUMSCANS <= self.callbacks.len());
-                0
-            }
-        };
-
-        let bul_data = bul.get_membership_data(self.commit::<H>()).unwrap();
-
-        let mut vec_cbs = vec![];
-        let mut vec_memb_pub = vec![];
-        let mut vec_nmemb_pub = vec![];
-        let mut vec_memb_priv = vec![];
-        let mut vec_nmemb_priv = vec![];
-        let mut vec_enc = vec![];
-        let mut vec_times = vec![];
-
-        for i in 0..NUMSCANS {
-            let cb: CallbackCom<F, CBArgs, Crypto> = self.get_cb::<CBArgs, Crypto>(start_ind + i);
-            let data = cbul.get_membership_data(cb.get_ticket());
-            let if_in = cbul.verify_in(cb.get_ticket());
-            let (enc, sig, time) = match if_in {
-                Some((e, s, t)) => (e, s, t),
-                None => (
-                    Crypto::Ct::default(),
-                    Crypto::Sig::default(),
-                    Time::default(),
-                ),
-            };
-
-            assert!(
-                <Crypto as AECipherSigZK<F, CBArgs>>::SigPK::verify(
-                    &cb.get_ticket(),
-                    enc.clone(),
-                    sig
-                ) == true
-            );
-
-            vec_enc.push(enc);
-            vec_times.push(time);
-            vec_cbs.push(cb);
-            vec_memb_pub.push(data.0);
-            vec_memb_priv.push(data.1);
-            vec_nmemb_pub.push(data.2);
-            vec_nmemb_priv.push(data.3);
-        }
-
-        let ps: PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS> = PubScanArgs {
-            memb_pub: vec_memb_pub
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            nmemb_pub: vec_nmemb_pub
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            bulletin: cbul.clone(),
-            is_memb_data_const: is_memb_nmemb_const.0,
-            is_nmemb_data_const: is_memb_nmemb_const.1,
+        let (ps, prs) = self.build_scan_args::<CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>(
+            cbul,
+            is_memb_nmemb_const,
             cur_time,
             cb_methods,
-        };
-
-        let prs: PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS> = PrivScanArgs {
-            priv_n_tickets: vec_cbs.try_into().unwrap(),
-            post_times: vec_times.try_into().unwrap(),
-            enc_args: vec_enc
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            memb_priv: vec_memb_priv
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            nmemb_priv: vec_nmemb_priv
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-        };
+        );
+        let bul_data = bul.get_membership_data(self.commit::<H>()).unwrap();
 
         let out = self.constraint_interact::<H, PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>, PubScanArgsVar<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>, PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS>, PrivScanArgsVar<F, CBArgs, Crypto, CBul, NUMSCANS>, CBArgs, CBArgsVar, Crypto, Bul, 0>(
             rng,
@@ -2075,84 +1975,13 @@ where
     where
         U::UserDataVar: CondSelectGadget<F> + EqGadget<F>,
     {
-        let start_ind = match self.scan_index {
-            Some(ind) => {
-                assert!(NUMSCANS + ind <= self.callbacks.len());
-                ind
-            }
-            None => {
-                assert!(NUMSCANS <= self.callbacks.len());
-                0
-            }
-        };
-
-        let bul_data = bul.get_membership_data(self.commit::<H>()).unwrap();
-
-        let mut vec_cbs = vec![];
-        let mut vec_memb_pub = vec![];
-        let mut vec_nmemb_pub = vec![];
-        let mut vec_memb_priv = vec![];
-        let mut vec_nmemb_priv = vec![];
-        let mut vec_enc = vec![];
-        let mut vec_times = vec![];
-
-        for i in 0..NUMSCANS {
-            let cb: CallbackCom<F, CBArgs, Crypto> = self.get_cb::<CBArgs, Crypto>(start_ind + i);
-            let data = cbul.get_membership_data(cb.get_ticket());
-            let if_in = cbul.verify_in(cb.get_ticket());
-            let (enc, sig, time) = match if_in {
-                Some((e, s, t)) => (e, s, t),
-                None => (
-                    Crypto::Ct::default(),
-                    Crypto::Sig::default(),
-                    Time::default(),
-                ),
-            };
-
-            assert!(
-                <Crypto as AECipherSigZK<F, CBArgs>>::SigPK::verify(
-                    &cb.get_ticket(),
-                    enc.clone(),
-                    sig
-                ) == true
-            );
-
-            vec_enc.push(enc);
-            vec_times.push(time);
-            vec_cbs.push(cb);
-            vec_memb_pub.push(data.0);
-            vec_memb_priv.push(data.1);
-            vec_nmemb_pub.push(data.2);
-            vec_nmemb_priv.push(data.3);
-        }
-
-        let ps: PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS> = PubScanArgs {
-            memb_pub: vec_memb_pub
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            nmemb_pub: vec_nmemb_pub
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            bulletin: cbul.clone(),
-            is_memb_data_const: is_memb_nmemb_const.0,
-            is_nmemb_data_const: is_memb_nmemb_const.1,
+        let (ps, prs) = self.build_scan_args::<CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>(
+            cbul,
+            is_memb_nmemb_const,
             cur_time,
             cb_methods,
-        };
-
-        let prs: PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS> = PrivScanArgs {
-            priv_n_tickets: vec_cbs.try_into().unwrap(),
-            post_times: vec_times.try_into().unwrap(),
-            enc_args: vec_enc
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            memb_priv: vec_memb_priv
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-            nmemb_priv: vec_nmemb_priv
-                .try_into()
-                .unwrap_or_else(|_| panic!("Unexpected failure.")),
-        };
+        );
+        let bul_data = bul.get_membership_data(self.commit::<H>()).unwrap();
 
         let out = self.circuit_interact::<H, PubScanArgs<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>, PubScanArgsVar<F, U, CBArgs, CBArgsVar, Crypto, CBul, NUMSCANS>, PrivScanArgs<F, CBArgs, Crypto, CBul, NUMSCANS>, PrivScanArgsVar<F, CBArgs, Crypto, CBul, NUMSCANS>, CBArgs, CBArgsVar, Crypto, Bul, 0>(
             rng,

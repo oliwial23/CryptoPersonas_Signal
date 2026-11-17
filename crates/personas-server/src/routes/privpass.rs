@@ -74,6 +74,7 @@ pub async fn issue(State(state): State<ServerLock>, body: Bytes) -> AppResult<Re
         &batch_vk,
         &st.db.obj_bul,
         &st.privpass.issuer,
+        crate::bulletin::epoch(&st.db),
     )
     .map_err(|e| AppError::Rejected(format!("ticket blinding rejected: {e}")))?;
     let millis = start

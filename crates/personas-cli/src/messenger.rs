@@ -97,7 +97,7 @@ async fn scenario(rk: ReplicaKeys, mk: MemberKeys) -> Result<()> {
     let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
     let config = ReplicaConfig {
         root_window: 256,
-        settlement_barriers: 3,
+        barriers_per_epoch: 2,
         poll_close_barriers: 1,
     };
 
