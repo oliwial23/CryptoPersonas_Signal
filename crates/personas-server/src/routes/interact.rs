@@ -121,6 +121,14 @@ pub async fn arbitrary_pred(
 /// they earned. The scan does — and it is why an unscanned member eventually cannot post at
 /// all (`num_interactions_since_last_scan` hits the rate limit).
 pub async fn scan(State(state): State<ServerLock>, body: Bytes) -> AppResult<impl IntoResponse> {
+    // A single-ticket scan reveals how many tickets its sender holds (one scan per ticket),
+    // so a deployment accepts only folded scans of fixed depth (`fold_scan`). The bench
+    // turns this route back on to time the per-callback baseline.
+    if std::env::var_os("PERSONAS_ALLOW_UNPADDED_SCAN").is_none() {
+        return Err(AppError::Rejected(
+            "single-ticket scans are disabled; send one folded scan (`fold`) per epoch".into(),
+        ));
+    }
     if body.is_empty() {
         // The client sends an empty body when it has nothing outstanding to scan.
         tracing::info!("empty scan payload; nothing to do");

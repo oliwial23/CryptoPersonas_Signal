@@ -256,6 +256,8 @@ fn start_server(repo: &Path, work: &Path, port: u16, epoch_secs: u64) -> Server 
             personas_core::schedule::now_unix().to_string(),
         )
         .env("PERSONAS_EPOCH_SECS", epoch_secs.to_string())
+        // The bench times single-ticket scans as the per-callback baseline for folding.
+        .env("PERSONAS_ALLOW_UNPADDED_SCAN", "1")
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log))
         .spawn()

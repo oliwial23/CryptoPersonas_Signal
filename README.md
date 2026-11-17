@@ -69,9 +69,10 @@ Running the app against a private Signal server is described in `deploy/play/REA
 Running it locally:
 
 ```sh
-# The server-backed deployment uses k_max = 60 (serverless Desktop keeps 20); the server
-# and every client must be built with the same value.
-PERSONAS_K_MAX=60 cargo build --release --bin server --bin personas
+# The server-backed deployment uses k_max = 100 and 15 tickets per Privacy Pass request
+# (serverless Desktop keeps k_max = 20); the server and every client must be built with
+# the same values.
+PERSONAS_K_MAX=100 PERSONAS_TICKET_BATCH=15 cargo build --release --bin server --bin personas
 
 # The `local` profile relays to an in-process mock chat and needs no credentials.
 PERSONAS_PROFILE=local PERSONAS_BIND=127.0.0.1:3010 ./target/release/server &

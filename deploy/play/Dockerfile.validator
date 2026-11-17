@@ -14,11 +14,16 @@ COPY batch-zkc ./batch-zkc
 # Cargo.toml [patch]es these paths; cargo wants them present.
 COPY third_party ./third_party
 # The server-backed deployment's k_max (the most live tickets a member holds, so k_max/W
-# interactions per epoch): 60, against the serverless default of 20. Folding makes a
-# larger backlog cheap for the server. Clients must be built with the same value (the
-# server reports its per-epoch cap at /api/scan_cap).
-ARG PERSONAS_K_MAX=60
+# interactions per epoch): 100, against the serverless default of 20. Every folded scan
+# has exactly k_max steps, so the server verifies one fixed-shape proof per member per
+# epoch. Clients must be built with the same value (the server reports its per-epoch cap
+# at /api/scan_cap).
+ARG PERSONAS_K_MAX=100
 ENV PERSONAS_K_MAX=${PERSONAS_K_MAX}
+# Privacy Pass tickets per request: fixed per deployment, so every batch looks alike.
+# Must stay below k_max/W + 1.
+ARG PERSONAS_TICKET_BATCH=15
+ENV PERSONAS_TICKET_BATCH=${PERSONAS_TICKET_BATCH}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release -p personas-server --bin server -p personas-bench --bin personas-bench \
