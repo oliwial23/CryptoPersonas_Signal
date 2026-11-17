@@ -68,8 +68,9 @@ pub enum RotationReason {
 }
 
 /// What a ban rotation points at: the ban's entry in the public callback bulletin
-/// (`/api/callbacks/bulletin`). A client checks that the entry exists, is a ban, and was
-/// called in the rotation's epoch.
+/// (`/api/callbacks/bulletin`). A client checks that the entry exists, holds this ticket,
+/// and was called in the rotation's epoch. It cannot check the call was a ban: the
+/// bulletin holds the argument encrypted to the ticket's owner.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BanRef {
     /// The entry's position in the callback bulletin.

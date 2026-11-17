@@ -292,8 +292,8 @@ drops a ticket the server refuses. The epoch turns only on the server's publishe
 (`PERSONAS_EPOCH_START`/`_SECS`; the old unauthenticated `GET /api/epoch` is gone), and
 every rotation is appended to a public log (`/api/privpass/rotations`): a client accepts a
 key it has not seen only if the log explains each rotation since its last accepted key —
-one per epoch boundary at most, and each ban rotation tied to a ban in the public callback
-bulletin (`NOTES-items-1-11.md`). A redeemed post files its ticket's callback
+one per epoch boundary at most, and each ban rotation tied to its own call in the public
+callback bulletin, made in that epoch (`NOTES-items-1-11.md`). A redeemed post files its ticket's callback
 against the message, so a ticketed post can be banned or rated like a proved one.
 
 The current ticket construction maps an input to a publicly known scalar

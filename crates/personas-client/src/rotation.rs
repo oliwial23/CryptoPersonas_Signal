@@ -6,8 +6,10 @@
 //! tickets whenever it liked. So a client keeps the last key it accepted, next to its
 //! other state, and accepts a different key only if the server's public, append-only
 //! rotation log explains every rotation since: at most one per epoch boundary, none ahead
-//! of the published schedule, and each ban rotation tied to a ban in the public callback
-//! bulletin. Every member fetches the same log, so a key served to only some of them is
+//! of the published schedule, and each ban rotation tied to its own call in the public
+//! callback bulletin, made in that epoch. (The bulletin holds each call's argument
+//! encrypted to the ticket's owner, so a client sees that a call was made, not that it
+//! was a ban.) Every member fetches the same log, so a key served to only some of them is
 //! one the log cannot explain to the rest.
 //!
 //! The epoch itself is checked the same way: the server publishes its schedule with the
@@ -93,8 +95,9 @@ pub fn pin_schedule(path: &Path, served: EpochSchedule) -> Result<()> {
 ///   there, at most one epoch rotation per epoch and in increasing order, none ahead of
 ///   the schedule (by this client's clock, allowing skew), and every ban rotation in the
 ///   epoch of the turn before it, each citing a different bulletin entry.
-/// - Every rotation after `last_accepted` that is a ban must cite a ban `ban_is_public`
-///   can see (its arguments: the reference and the rotation's epoch).
+/// - Every rotation after `last_accepted` that is a ban must cite a call `ban_is_public`
+///   finds in the public callback bulletin (its arguments: the reference and the
+///   rotation's epoch).
 ///
 /// With no `last_accepted` (a client's first ticket) there is nothing to have rotated
 /// from, so the served key is accepted on first use if it ends a well-formed log. A
@@ -188,8 +191,8 @@ pub fn check_rotations(
             && !ban_is_public(ban, entry.epoch)?
         {
             bail!(
-                "ban rotation {} cites callback bulletin entry {}, which is not a ban made \
-                 in epoch {}; refusing the key",
+                "ban rotation {} cites callback bulletin entry {}, which is not a call on \
+                 that ticket made in epoch {}; refusing the key",
                 entry.seq,
                 ban.index,
                 entry.epoch
@@ -255,7 +258,7 @@ mod tests {
             Ok(ban.index != 4)
         })
         .unwrap_err();
-        assert!(err.to_string().contains("not a ban"), "{err}");
+        assert!(err.to_string().contains("not a call"), "{err}");
 
         // A rotation that claims to be a ban but cites nothing.
         let mut log = valid_log();

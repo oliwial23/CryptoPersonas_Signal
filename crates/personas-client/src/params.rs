@@ -10,7 +10,6 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
-use personas_core::circuits::BAN_FLAG;
 use personas_core::schedule::{BanRef, RotationEntry, now_unix};
 use personas_core::{Args, CStore, Cr, F, PK, circuits::NP};
 use zk_callbacks::generic::bulletin::PublicCallbackBul;
@@ -253,8 +252,8 @@ impl PersonaClient {
             .with_context(|| format!("server returned an undecodable parameter for {route}"))
     }
 
-    /// The public callback bulletin: every callback invoked so far, with its argument and
-    /// the epoch it was invoked in.
+    /// The public callback bulletin: every callback invoked so far, with its (encrypted)
+    /// argument and the epoch it was invoked in.
     fn callback_bulletin(&self) -> CallbackBulletin {
         let route = "api/callbacks/bulletin";
         let url = self
@@ -275,10 +274,16 @@ type CallbackBulletin = Vec<(
     <CStore as PublicCallbackBul<F, Args, Cr>>::MembershipWitness,
 )>;
 
-/// Whether `ban` names a ban in `bulletin`: the entry it cites holds the ticket it names,
-/// was invoked with the ban argument, and in `epoch`.
+/// Whether `ban` names a call in `bulletin`: the entry it cites holds the ticket it names
+/// and was invoked in `epoch`.
+///
+/// Not whether the call *was a ban*: the bulletin holds each call's argument encrypted to
+/// the ticket's owner (`NoSigOTP`), so only the banned member can read it. What a client
+/// can check is that the rotation is tied to a real, public call in that epoch, and (in
+/// `check_rotations`) that no call is cited twice — so rotations are bounded by public
+/// calls. See `NOTES-items-1-11.md`.
 fn is_ban_in(bulletin: &CallbackBulletin, ban: &BanRef, epoch: u64) -> bool {
-    let Some((ticket, arg, time, _)) = usize::try_from(ban.index)
+    let Some((ticket, _, time, _)) = usize::try_from(ban.index)
         .ok()
         .and_then(|i| bulletin.get(i))
     else {
@@ -288,5 +293,5 @@ fn is_ban_in(bulletin: &CallbackBulletin, ban: &BanRef, epoch: u64) -> bool {
     if ticket.serialize_with_mode(&mut bytes, Compress::No).is_err() {
         return false;
     }
-    hex::encode(bytes) == ban.ticket && *arg == F::from(BAN_FLAG) && *time == F::from(epoch)
+    hex::encode(bytes) == ban.ticket && *time == F::from(epoch)
 }

@@ -65,6 +65,11 @@ impl PersonaClient {
     /// below — everything up to the point of deciding what to redeem for is
     /// identical.
     fn request_and_validate(&self, batch_user: &mut PrivPassUser) -> Result<()> {
+        // Check the issuer key before proving anything: the request appends an interaction
+        // to the bulletin, so a key refused only afterwards would leave this member's saved
+        // object behind the bulletin's. (A rotation between here and the response makes the
+        // issuance proof fail to verify against this key, as it always did.)
+        let issuer_pubkey = self.privpass_issuer_pubkey()?;
         let interaction_pk = self.privpass_interaction_pk();
         let batch_pk = self.privpass_batch_pk();
         let mut rng = rand::rngs::OsRng;
@@ -101,7 +106,6 @@ impl PersonaClient {
         let validated = decode_validated_tickets(&resp.bytes()?)
             .map_err(|e| anyhow!("server returned an undecodable ticket: {e}"))?;
 
-        let issuer_pubkey = self.privpass_issuer_pubkey()?;
         let start = SystemTime::now();
         batch_user
             .store_validated_tickets::<personas_core::H, personas_core::Args, personas_core::Cr, { privpass::TICKET_BATCH_SIZE }>(
