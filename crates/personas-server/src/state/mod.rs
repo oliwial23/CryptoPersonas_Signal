@@ -51,6 +51,17 @@ pub struct PrivPassState {
     pub data_dir: std::path::PathBuf,
 }
 
+/// Registration (`AllowedToRegister`): which invites may still join, and which accounts and
+/// public keys have joined. Public keys are unique, so no secret key can back two objects,
+/// and each invite admits one member, so a banned member cannot simply join again.
+pub struct RegistrationState {
+    /// Accounts (`personas_core::persona::invite_account`, as hex) that may join, from
+    /// `PERSONAS_INVITES_FILE`. `None` admits any account.
+    pub invites: Option<std::collections::HashSet<String>>,
+    pub used_accounts: SpentTicketLog,
+    pub used_pks: SpentTicketLog,
+}
+
 /// One messenger, and the server's memory of what it relayed there.
 ///
 /// The Signal and Slack deployments run side by side over the same bulletin and the same
@@ -91,6 +102,8 @@ pub struct ServerState {
     pub badges: BadgeLog,
 
     pub privpass: PrivPassState,
+
+    pub registration: RegistrationState,
 }
 
 /// Which messenger's routes a request came in on.
@@ -130,6 +143,7 @@ impl ServerState {
         slack: Arc<dyn Transport>,
         privpass_issuer: IssuerKeys,
         privpass_keys: TicketKeys,
+        invites: Option<std::collections::HashSet<String>>,
     ) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
 
@@ -158,6 +172,11 @@ impl ServerState {
                 spent: SpentTicketLog::open(data_dir.join("privpass_spent.jsonl"))?,
                 rotations: RotationLog::open(data_dir.join("privpass_rotations.jsonl"))?,
                 data_dir: data_dir.to_path_buf(),
+            },
+            registration: RegistrationState {
+                invites,
+                used_accounts: SpentTicketLog::open(data_dir.join("registered_accounts.jsonl"))?,
+                used_pks: SpentTicketLog::open(data_dir.join("registered_pks.jsonl"))?,
             },
         })
     }

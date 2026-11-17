@@ -98,9 +98,9 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             bail!("serverless messenger mode is handled before transport dispatch");
         }
 
-        Command::Join => {
+        Command::Join { invite } => {
             let pc = personas.clone();
-            spawn_blocking(move || pc.join()).await??;
+            spawn_blocking(move || pc.join(&invite)).await??;
             println!("Joined successfully");
         }
 
@@ -354,6 +354,7 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         }
 
         Command::AdminKeygen { out } => crate::admin_keygen(&out)?,
+        Command::InviteGen { count } => crate::invite_gen(count),
 
         Command::UpdateEpoch => {
             let pc = personas.clone();

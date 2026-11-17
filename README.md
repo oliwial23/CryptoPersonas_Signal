@@ -75,10 +75,13 @@ Running it locally:
 PERSONAS_K_MAX=100 PERSONAS_TICKET_BATCH=15 cargo build --release --bin server --bin personas
 
 # The `local` profile relays to an in-process mock chat and needs no credentials.
-PERSONAS_PROFILE=local PERSONAS_BIND=127.0.0.1:3010 ./target/release/server &
+# Registration needs a one-time invite code per member (AllowedToRegister); without
+# PERSONAS_INVITES_FILE the server admits anyone with a valid registration proof.
+./target/release/personas invite-gen --count 5 > invites.txt
+PERSONAS_PROFILE=local PERSONAS_BIND=127.0.0.1:3010 PERSONAS_INVITES_FILE=invites.txt ./target/release/server &
 
 P=(--transport signal --api http://127.0.0.1:3010 --data-dir /tmp/d/client)
-./target/release/personas "${P[@]}" join
+./target/release/personas "${P[@]}" join --invite "$(sed -n 1p invites.txt)"
 ./target/release/personas "${P[@]}" post -m "hello" -g demo-group          # anonymous
 ./target/release/personas "${P[@]}" gen-pseudo
 ./target/release/personas "${P[@]}" post-pseudo -m "hello" -g demo-group -i 1   # as a persona

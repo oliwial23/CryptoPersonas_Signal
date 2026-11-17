@@ -452,7 +452,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             api.clone(),
             clients_dir.join(name),
         ));
-        pc.join().expect("join failed");
+        pc.join("").expect("join failed");
         pc
     };
     // Longer than the default 30 s: a folded scan is megabytes to upload.

@@ -153,6 +153,11 @@ impl PersonaClient {
         self.fetch_pk("api/interaction/badge/request/proving_key")
     }
 
+    /// Registering (`join_pred`).
+    pub fn join_pk(&self) -> PK {
+        self.fetch_pk("api/user/join/proving_key")
+    }
+
     /// Scanning a single callback.
     pub fn scan_pk(&self) -> PK {
         self.fetch_pk("api/interaction/scan/proving_key")

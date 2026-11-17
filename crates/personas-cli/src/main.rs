@@ -88,6 +88,17 @@ pub(crate) async fn show(res: reqwest::Response) -> Result<()> {
     Ok(())
 }
 
+/// `invite-gen`: print `count` fresh one-time invite codes (128 random bits each, as hex).
+fn invite_gen(count: usize) {
+    use rand::RngCore;
+    let mut rng = rand::rngs::OsRng;
+    for _ in 0..count {
+        let mut code = [0u8; 16];
+        rng.fill_bytes(&mut code);
+        println!("{}", code.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+}
+
 /// `admin-keygen`: write a fresh group admin secret key to `out` (owner-only) and print the
 /// public key. Refuses to overwrite an existing file, so a key in use is never lost.
 fn admin_keygen(out: &std::path::Path) -> Result<()> {

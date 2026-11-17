@@ -75,6 +75,7 @@ pub fn router(state: ServerLock) -> Router {
         .route("/api/user/pubkey", get(params::user_pubkey))
         .route("/api/user/bulletin", get(params::user_bulletin))
         .route("/api/user/join", post_route(interact::join))
+        .route("/api/user/join/proving_key", get(params::join_pred))
         .route(
             "/api/callbacks/membership_pubkey",
             get(params::membership_pubkey),

@@ -42,6 +42,10 @@ proving_key!(
     badge_request => badge_request_proving_key
 );
 proving_key!(
+    /// Registering: the committed object is fresh and derives the public key (`join_pred`).
+    join_pred => join_pred_proving_key
+);
+proving_key!(
     /// Scanning one callback.
     scan => scan_proving_key
 );

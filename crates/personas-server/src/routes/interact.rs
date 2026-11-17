@@ -39,18 +39,56 @@ use crate::state::ServerLock;
 
 type PubScan = PubScanArgs<F, MsgUser, F, personas_core::ArgsVar, Cr, CStore, NUM_SCANS_PER_FOLD>;
 
-/// A new member: append their committed object to the bulletin.
+/// A new member registers (`Register` in the paper): the payload is the committed object,
+/// the account it is bound to (a hash of the member's invite code), its public key
+/// `pk = H(sk, tag)`, and a `join_pred` proof that the commitment opens to a fresh object
+/// whose secret key derives `pk`, in the current epoch.
 ///
-/// There is nothing to verify. A join commits to a fresh object with zero reputation and no
-/// badges; what stops a banned member from rejoining under a new key is that they would be
-/// starting over with none of the standing they had, which is the same thing that stops
-/// anyone from doing it. (A real deployment gates this on an invite — that is workstream b's
-/// Privacy Pass ticket, and it is why tickets are a service-mode feature.)
+/// The server admits the join only if the proof verifies, `pk` has never registered (so no
+/// secret key backs two objects, and a banned member's key cannot be re-registered by a
+/// colluder), and `AllowedToRegister` admits the account: an unused invite, when an invites
+/// file is configured (`PERSONAS_INVITES_FILE`), or any account otherwise.
 pub async fn join(State(state): State<ServerLock>, body: Bytes) -> AppResult<StatusCode> {
     let mut reader = decode(Kind::Join, &body)?;
     let object: Com<F> = reader.pull()?;
+    let account: F = reader.pull()?;
+    let pk: F = reader.pull()?;
+    let proof: <Snark as SNARK<F>>::Proof = reader.pull()?;
+    if !reader.is_empty() {
+        return Err(AppError::BadRequest("the join has trailing data".into()));
+    }
 
     let mut server = state.write().await;
+    let current = epoch(&server.db);
+
+    let verified = Snark::verify(
+        &server.keys.join_pred_verifying_key,
+        &[object, account, pk, current],
+        &proof,
+    )
+    .unwrap_or(false);
+    if !verified {
+        return Err(AppError::Rejected(
+            "the registration proof does not verify (is the client in the current epoch?)".into(),
+        ));
+    }
+
+    let account_hex = personas_core::persona::f_hex(&account);
+    let pk_hex = personas_core::persona::f_hex(&pk);
+    let reg = &server.registration;
+    if let Some(invites) = &reg.invites {
+        if !invites.contains(&account_hex) {
+            return Err(AppError::Rejected("that invite code is not valid".into()));
+        }
+        if reg.used_accounts.contains(&account_hex) {
+            return Err(AppError::Rejected("that invite code has already been used".into()));
+        }
+    }
+    if reg.used_pks.contains(&pk_hex) {
+        return Err(AppError::Rejected(
+            "this public key is already registered: a secret key can back only one object".into(),
+        ));
+    }
 
     <SigObjStore<F, GrumpkinSchnorr> as JoinableBulletin<F, MsgUser>>::join_bul(
         &mut server.db.obj_bul,
@@ -59,7 +97,12 @@ pub async fn join(State(state): State<ServerLock>, body: Bytes) -> AppResult<Sta
     )
     .map_err(|e| AppError::Rejected(format!("the bulletin refused the join: {e:?}")))?;
 
-    tracing::info!("a new member joined");
+    server.registration.used_pks.mark_spent(pk_hex)?;
+    if server.registration.invites.is_some() {
+        server.registration.used_accounts.mark_spent(account_hex)?;
+    }
+
+    tracing::info!("a new member registered");
     Ok(StatusCode::OK)
 }
 

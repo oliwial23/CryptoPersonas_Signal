@@ -89,6 +89,11 @@ pub struct ServerConfig {
     /// (`personas_core::moderation`); with none configured the server refuses every ban.
     /// `PERSONAS_ADMIN_PK`.
     pub admin_pk: Option<String>,
+    /// A file of one-time invite codes, one per line (`personas invite-gen` makes them).
+    /// Each code admits one registration (`AllowedToRegister`); with none configured, the
+    /// server admits any join that carries a valid registration proof and a fresh public
+    /// key. `PERSONAS_INVITES_FILE`.
+    pub invites_file: Option<PathBuf>,
 }
 
 /// The default epoch length: a day, as the analyzed protocol uses.
@@ -122,6 +127,7 @@ impl Default for ServerConfig {
             epoch_start: None,
             epoch_secs: DEFAULT_EPOCH_SECS,
             admin_pk: None,
+            invites_file: None,
         }
     }
 }
@@ -305,6 +311,9 @@ impl Config {
         }
         if let Some(v) = env_opt("PERSONAS_ADMIN_PK") {
             self.server.admin_pk = Some(v);
+        }
+        if let Some(v) = env_opt("PERSONAS_INVITES_FILE") {
+            self.server.invites_file = Some(PathBuf::from(v));
         }
         if env_opt("PERSONAS_TRANSPORT").as_deref() == Some("mock") {
             self.transport.force_mock = true;

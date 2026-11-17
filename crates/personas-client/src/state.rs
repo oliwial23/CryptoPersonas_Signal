@@ -5,8 +5,8 @@ use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use ark_std::UniformRand;
 use personas_core::{
-    F, H,
-    circuits::MsgUser,
+    F, H, Snark,
+    circuits::{JoinArgs, JoinArgsVar, MsgUser, join_pred},
     persona::{self, petname_from_str},
 };
 use rand::rngs::OsRng;
@@ -64,9 +64,11 @@ impl PersonaClient {
             .map_err(|e| anyhow!("user state at {} is corrupt: {e}", path.display()))
     }
 
-    /// Register a fresh member: mint a secret key, commit to it, post the commitment to
-    /// the bulletin, and reset all local state derived from any previous identity.
-    pub fn join(&self) -> Result<()> {
+    /// Register a fresh member: mint a secret key, commit to it, prove that the commitment
+    /// opens to a fresh object whose key derives the member's public key, bound to the
+    /// account of `invite` (an invite code; any string if the server needs none), post the
+    /// registration, and reset all local state derived from any previous identity.
+    pub fn join(&self, invite: &str) -> Result<()> {
         let mut rng = OsRng;
 
         // A fresh object starts in the server's current epoch.
@@ -86,10 +88,21 @@ impl PersonaClient {
             &mut rng,
         );
 
-        let commit: Com<F> = user.commit::<H>();
+        let account = persona::invite_account(invite);
+        let pk = persona::member_pk(&user.data.sk);
+        let proved = user
+            .prove_statement::<H, JoinArgs<F>, JoinArgsVar<F>, (), (), Snark>(
+                &mut rng,
+                join_pred,
+                &self.join_pk(),
+                JoinArgs { account, pk, epoch: ep },
+                (),
+            )
+            .map_err(|e| anyhow!("could not prove the registration: {e}"))?;
+        let commit: Com<F> = proved.object;
         self.bul
-            .join_bul(commit)
-            .map_err(|e| anyhow!("bulletin rejected the join: {e}"))?;
+            .join_bul(commit, account, pk, &proved.proof)
+            .map_err(|e| anyhow!("the server refused the join: {e}"))?;
 
         self.save_user(&user)?;
 

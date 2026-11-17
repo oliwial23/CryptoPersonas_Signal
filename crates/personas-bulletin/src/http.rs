@@ -72,13 +72,27 @@ impl BulNet {
             .unwrap_or_else(|e| panic!("bulletin GET {route} returned undecodable data: {e}"))
     }
 
-    pub fn join_bul(&self, object: Com<F>) -> Result<(), String> {
+    /// Register: the committed object, the account it is bound to, the member's public
+    /// key, and the `join_pred` proof tying them together (`personas-server`'s `join`).
+    pub fn join_bul(
+        &self,
+        object: Com<F>,
+        account: F,
+        pk: F,
+        proof: &<personas_core::Snark as SNARK<F>>::Proof,
+    ) -> Result<(), String> {
         let url = self.api.join("api/user/join").map_err(|e| e.to_string())?;
 
-        // A join is a record — the member's committed object — so it travels in the same
-        // versioned envelope as everything else they will later post.
-        let bytes = personas_wire::encode_one(personas_wire::Kind::Join, &object)
+        // A join is a record, so it travels in the same versioned envelope as everything
+        // else the member will later post.
+        let mut payload = personas_wire::Payload::new(personas_wire::Kind::Join);
+        payload
+            .push(&object)
+            .and_then(|p| p.push(&account))
+            .and_then(|p| p.push(&pk))
+            .and_then(|p| p.push(proof))
             .map_err(|e| e.to_string())?;
+        let bytes = personas_wire::encode(payload).map_err(|e| e.to_string())?;
 
         let res = self
             .client
@@ -91,7 +105,9 @@ impl BulNet {
         if res.status().is_success() {
             Ok(())
         } else {
-            Err(format!("Join failed with status {}", res.status()))
+            let status = res.status();
+            let body = res.text().unwrap_or_default();
+            Err(format!("Join failed with status {status}: {body}"))
         }
     }
 

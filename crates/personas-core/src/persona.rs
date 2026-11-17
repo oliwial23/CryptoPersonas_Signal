@@ -95,6 +95,21 @@ pub fn member_pk(sk: &F) -> F {
     H::hash(&[*sk, tag, tag])
 }
 
+/// The account a server-backed join is bound to: a hash of the member's one-time invite code.
+/// The join proof (`join_pred`) takes it as a public input, so a proof made for one invite
+/// cannot be replayed with another, and the server admits each invite once
+/// (`AllowedToRegister`). With no invites configured, the server admits any account.
+pub fn invite_account(code: &str) -> F {
+    crate::circuits::string_hash_to_f::<F>(&format!("personas invite/v1:{}", code.trim()))
+}
+
+/// A field element as lowercase hex of its canonical little-endian bytes: how the server's
+/// registration ledgers key accounts and public keys.
+pub fn f_hex(x: &F) -> String {
+    let bytes = x.into_bigint().to_bytes_le();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The human-readable name for a pseudonym: two petname words, seeded by `claimed`.
 ///
 /// Deterministic in `claimed` alone — the client and the server derive the same name

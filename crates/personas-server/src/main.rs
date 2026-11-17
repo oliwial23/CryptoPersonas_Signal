@@ -117,6 +117,30 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Registration: each invite code admits one member; with no invites file, any join
+    // with a valid registration proof and a fresh public key is admitted.
+    let invites = match cfg.server.invites_file.as_deref() {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                anyhow::anyhow!("PERSONAS_INVITES_FILE {}: {e}", path.display())
+            })?;
+            let accounts: std::collections::HashSet<String> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|code| personas_core::persona::f_hex(&personas_core::persona::invite_account(code)))
+                .collect();
+            info!("registration needs one of {} invite codes", accounts.len());
+            Some(accounts)
+        }
+        None => {
+            tracing::warn!(
+                "no PERSONAS_INVITES_FILE: registration is open to anyone with a valid proof (development only)"
+            );
+            None
+        }
+    };
+
     let state = Arc::new(RwLock::new(ServerState::new(
         &data_dir,
         db,
@@ -128,6 +152,7 @@ async fn main() -> Result<()> {
         slack,
         privpass_issuer,
         privpass_keys,
+        invites,
     )?));
 
     // The rotation log must explain the key on disk before anyone is served it; then bring

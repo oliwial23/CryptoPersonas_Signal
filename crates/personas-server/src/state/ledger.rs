@@ -496,6 +496,10 @@ impl SpentTicketLog {
 
     /// Marks `key` spent. Returns `false` (and does not write) if it already was — the
     /// caller's cue to reject the redemption as a replay.
+    pub fn contains(&self, key: &str) -> bool {
+        self.spent.contains(key)
+    }
+
     pub fn mark_spent(&mut self, key: String) -> Result<bool> {
         if !self.spent.insert(key) {
             return Ok(false);

@@ -77,7 +77,19 @@ pub enum Command {
     Messenger(MessengerCmd),
 
     /// Join as a cryptographic-personas user (mint the callback object, first pseudonym).
-    Join,
+    Join {
+        /// The one-time invite code the group admin gave you (`invite-gen`). A server
+        /// without an invites file accepts any code, including none.
+        #[arg(long, default_value = "")]
+        invite: String,
+    },
+
+    /// Make one-time invite codes, one per line, for the server's `PERSONAS_INVITES_FILE`.
+    /// Each code admits one registration; give one to each member.
+    InviteGen {
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
 
     /// Post a message anonymously with a callback.
     Post {
