@@ -15,6 +15,7 @@
 
 mod bench;
 mod bulletin;
+mod epoch;
 mod error;
 mod routes;
 mod state;
@@ -85,6 +86,13 @@ async fn main() -> Result<()> {
     )?;
     span.exit();
 
+    // The epoch turns on a public schedule (`epoch.rs`), never on request.
+    let schedule = epoch::resolve_schedule(
+        cfg.server.epoch_start_unix()?,
+        cfg.server.epoch_secs,
+        &data_dir,
+    )?;
+
     let signal = signal_transport(&cfg);
     let slack = slack_transport(&cfg);
     info!(
@@ -96,6 +104,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(RwLock::new(ServerState::new(
         &data_dir,
         db,
+        schedule,
         artifacts.keys,
         artifacts.folding,
         signal,
@@ -103,6 +112,20 @@ async fn main() -> Result<()> {
         privpass_issuer,
         privpass_keys,
     )?));
+
+    // The rotation log must explain the key on disk before anyone is served it; then bring
+    // the bulletin (which starts at epoch 0 on every start, A1) up to the schedule, and
+    // keep it there.
+    {
+        let mut st = state.write().await;
+        check_rotation_log(&mut st)?;
+        let turned = epoch::catch_up(&mut st).map_err(|e| anyhow::anyhow!("{e}"))?;
+        info!(
+            "at epoch {} of the schedule (caught up {turned} turns)",
+            epoch::bulletin_epoch(&st)
+        );
+    }
+    epoch::spawn(state.clone());
 
     // Slack's socket-mode listener, and with it the 👍/👎 rating buttons and reaction events.
     // A transport with nothing to listen for says so, and that is not an error.
@@ -124,6 +147,36 @@ async fn main() -> Result<()> {
         })
         .await?;
 
+    Ok(())
+}
+
+/// Make sure the issuer key on disk is the one the rotation log ends with.
+///
+/// A first start logs the key it generated as the genesis entry. A key the log does not
+/// end with means the server stopped between replacing the key file and logging the
+/// rotation; serving that key would make every client refuse it, so this refuses to start
+/// instead and says which files disagree.
+fn check_rotation_log(st: &mut ServerState) -> Result<()> {
+    let current = routes::privpass::pubkey_hex(&st.privpass.issuer)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    match st.privpass.rotations.last() {
+        None => {
+            let epoch = st.schedule.current();
+            st.privpass.rotations.append(
+                epoch,
+                personas_core::schedule::RotationReason::Genesis,
+                None,
+                current,
+            )?;
+            info!("logged the ticket issuer key as the rotation log's genesis (epoch {epoch})");
+        }
+        Some(last) if last.pubkey != current => anyhow::bail!(
+            "the ticket issuer key in {} is not the last key in privpass_rotations.jsonl \
+             (the server stopped mid-rotation?); clients would refuse it",
+            st.privpass.data_dir.display()
+        ),
+        Some(_) => {}
+    }
     Ok(())
 }
 

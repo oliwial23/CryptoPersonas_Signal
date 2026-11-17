@@ -80,6 +80,34 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     /// Where the store seed, params cache, and ledger live. `PERSONAS_DATA_DIR`.
     pub data_dir: PathBuf,
+    /// When epoch 0 begins: unix seconds, or an RFC 3339 time. `PERSONAS_EPOCH_START`.
+    /// `None` means the server's first start, which it persists in its data dir.
+    pub epoch_start: Option<String>,
+    /// Seconds per epoch; a day by default. `PERSONAS_EPOCH_SECS`.
+    pub epoch_secs: u64,
+}
+
+/// The default epoch length: a day, as the analyzed protocol uses.
+pub const DEFAULT_EPOCH_SECS: u64 = 24 * 60 * 60;
+
+impl ServerConfig {
+    /// [`epoch_start`](Self::epoch_start) as unix seconds, or `None` if it is unset.
+    pub fn epoch_start_unix(&self) -> Result<Option<u64>, ConfigError> {
+        let Some(text) = self.epoch_start.as_deref().map(str::trim) else {
+            return Ok(None);
+        };
+        if let Ok(secs) = text.parse::<u64>() {
+            return Ok(Some(secs));
+        }
+        let time = chrono::DateTime::parse_from_rfc3339(text).map_err(|e| {
+            ConfigError::Invalid(format!(
+                "epoch_start {text:?} is neither unix seconds nor an RFC 3339 time ({e})"
+            ))
+        })?;
+        u64::try_from(time.timestamp())
+            .map(Some)
+            .map_err(|_| ConfigError::Invalid(format!("epoch_start {text:?} is before 1970")))
+    }
 }
 
 impl Default for ServerConfig {
@@ -87,6 +115,8 @@ impl Default for ServerConfig {
         Self {
             bind: DEFAULT_BIND.parse().expect("the default bind is valid"),
             data_dir: PathBuf::from(DEFAULT_SERVER_DATA_DIR),
+            epoch_start: None,
+            epoch_secs: DEFAULT_EPOCH_SECS,
         }
     }
 }
@@ -262,6 +292,12 @@ impl Config {
             self.server.data_dir = PathBuf::from(&v);
             self.client.data_dir = Some(PathBuf::from(&v));
         }
+        if let Some(v) = env_opt("PERSONAS_EPOCH_START") {
+            self.server.epoch_start = Some(v);
+        }
+        if let Some(v) = env_opt("PERSONAS_EPOCH_SECS") {
+            self.server.epoch_secs = parse_env("PERSONAS_EPOCH_SECS", &v)?;
+        }
         if env_opt("PERSONAS_TRANSPORT").as_deref() == Some("mock") {
             self.transport.force_mock = true;
         }
@@ -286,6 +322,10 @@ impl Config {
     /// Reject configurations the code cannot honor yet. Serverless mode (workstream d) has no
     /// implementation, so it is refused rather than silently downgraded.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.server.epoch_secs == 0 {
+            return Err(ConfigError::Invalid("epoch_secs must be at least 1".into()));
+        }
+        self.server.epoch_start_unix()?;
         if self.mode == Mode::Serverless {
             return Err(ConfigError::Invalid(
                 "mode=serverless is not implemented yet (workstream d); use mode=service".into(),
@@ -386,6 +426,19 @@ mod tests {
         assert!(!cfg.transport.force_mock);
         assert_eq!(cfg.signal_backend(), SignalBackend::Mock);
         assert_eq!(cfg.slack_backend(), SlackBackend::Mock);
+    }
+
+    #[test]
+    fn the_epoch_start_reads_unix_seconds_or_rfc3339() {
+        let mut server = ServerConfig::default();
+        assert_eq!(server.epoch_secs, 86_400);
+        assert_eq!(server.epoch_start_unix().unwrap(), None);
+        server.epoch_start = Some("1700000000".into());
+        assert_eq!(server.epoch_start_unix().unwrap(), Some(1_700_000_000));
+        server.epoch_start = Some("2023-11-14T22:13:20Z".into());
+        assert_eq!(server.epoch_start_unix().unwrap(), Some(1_700_000_000));
+        server.epoch_start = Some("yesterday".into());
+        assert!(server.epoch_start_unix().is_err());
     }
 
     #[test]

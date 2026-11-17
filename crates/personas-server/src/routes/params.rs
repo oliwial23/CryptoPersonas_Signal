@@ -104,13 +104,21 @@ pub async fn callback_nmemb_bulletin(State(state): State<ServerLock>) -> AppResu
 pub struct EpochResponse {
     /// Little-endian hex. The client parses it straight back into a field element.
     epoch: String,
+    /// The published schedule the epoch turns on: unix seconds at which epoch 0 begins…
+    start: u64,
+    /// …and seconds per epoch. `epoch = floor((now - start) / length)`, so a client or an
+    /// auditor can compute it without asking, and check the server agrees.
+    length: u64,
 }
 
-/// The epoch a scan must prove against.
+/// The epoch a scan must prove against, and the schedule it follows.
 pub async fn get_epoch(State(state): State<ServerLock>) -> Json<EpochResponse> {
-    let current: F = epoch(&state.read().await.db);
+    let st = state.read().await;
+    let current: F = epoch(&st.db);
 
     Json(EpochResponse {
         epoch: hex::encode(current.into_bigint().to_bytes_le()),
+        start: st.schedule.start,
+        length: st.schedule.length,
     })
 }

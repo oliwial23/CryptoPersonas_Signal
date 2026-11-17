@@ -1,4 +1,4 @@
-//! The four JSONL-backed stores, and the in-memory one.
+//! The JSONL-backed stores, and the in-memory one.
 //!
 //! Each keeps its rows in memory and rewrites its file when they change. That is the same
 //! durability the old code had — a rewritten file, no fsync, no atomic rename — but it
@@ -13,6 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use personas_core::schedule::{BanRef, RotationEntry, RotationReason};
 use serde::{Deserialize, Serialize};
 use transport_api::MessageId;
 
@@ -502,6 +503,83 @@ impl SpentTicketLog {
         let rows: Vec<&String> = self.spent.iter().collect();
         write_jsonl(&self.path, &rows)?;
         Ok(true)
+    }
+}
+
+/// Every Privacy Pass issuer-key rotation, in order (`personas_core::schedule`).
+///
+/// Append-only, on disk as well as in memory: a rotation adds one line and nothing ever
+/// rewrites one, so a client that saw entry `n` can trust entries `0..n` are unchanged. It
+/// is served whole at `/api/privpass/rotations`; every member fetches the same log, which is
+/// what makes a key served to only some of them detectable.
+pub struct RotationLog {
+    path: PathBuf,
+    entries: Vec<RotationEntry>,
+}
+
+impl RotationLog {
+    /// Unlike the other stores, an unreadable or out-of-order row is an error, not a skip: a
+    /// gap in this log is exactly what a client refuses a key over.
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let mut entries = Vec::new();
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for (n, line) in content.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+                let entry: RotationEntry = serde_json::from_str(line)
+                    .with_context(|| format!("{} row {n} is unreadable", path.display()))?;
+                if entry.seq != n as u64 {
+                    bail!("{} row {n} has seq {}", path.display(), entry.seq);
+                }
+                entries.push(entry);
+            }
+        }
+        Ok(Self { path, entries })
+    }
+
+    pub fn entries(&self) -> &[RotationEntry] {
+        &self.entries
+    }
+
+    pub fn last(&self) -> Option<&RotationEntry> {
+        self.entries.last()
+    }
+
+    /// The latest epoch a key was made for at an epoch boundary (or at genesis).
+    pub fn last_turn(&self) -> Option<u64> {
+        self.entries
+            .iter()
+            .filter(|e| e.reason != RotationReason::Ban)
+            .map(|e| e.epoch)
+            .max()
+    }
+
+    /// Append one rotation and sync it to disk before returning.
+    pub fn append(
+        &mut self,
+        epoch: u64,
+        reason: RotationReason,
+        ban: Option<BanRef>,
+        pubkey: String,
+    ) -> Result<()> {
+        let entry = RotationEntry {
+            seq: self.entries.len() as u64,
+            epoch,
+            reason,
+            ban,
+            pubkey,
+        };
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("could not open {}", self.path.display()))?;
+        writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+        file.sync_all()?;
+        self.entries.push(entry);
+        Ok(())
     }
 }
 

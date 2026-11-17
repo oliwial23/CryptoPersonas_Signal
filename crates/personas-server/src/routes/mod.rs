@@ -3,7 +3,8 @@
 //! **Every path here is load-bearing and none may be renamed.** The `bench/*.py` harness
 //! drives the client, the client hardcodes these paths, and the two are how the paper's
 //! numbers were produced. The handlers behind them have been rewritten; the paths have not
-//! moved.
+//! moved. One path was removed on purpose: `GET /api/epoch` turned the epoch for anyone
+//! who asked, and the epoch now turns on its public schedule (`crate::epoch`).
 //!
 //! They are grouped by what they do rather than by which messenger they belong to, because
 //! the messenger turned out not to be a real distinction — `/api/x` and `/api/slack/x` differ
@@ -107,6 +108,7 @@ pub fn router(state: ServerLock) -> Router {
             post_route(privpass::redeem_pseudo_post_slack),
         )
         .route("/api/privpass/pubkey", get(privpass::issuer_pubkey))
+        .route("/api/privpass/rotations", get(privpass::rotations))
         .route("/api/scan_cap", get(scan_cap))
         .route(
             "/api/privpass/batch_proving_key",
@@ -185,7 +187,6 @@ pub fn router(state: ServerLock) -> Router {
             post_route(moderation::slack_reputation),
         )
         .route("/api/approve/badge", post_route(moderation::approve_badge))
-        .route("/api/epoch", get(moderation::update_epoch))
         .route("/api/cb", post_route(moderation::callback_for))
         .route("/api/slack_cb", post_route(moderation::slack_callback_for))
         .route("/api/cb/signal/all", get(moderation::pending_signal))

@@ -7,6 +7,7 @@ pub mod fold;
 pub mod params;
 pub mod persona;
 pub mod privpass;
+pub mod schedule;
 pub mod timing;
 pub mod types;
 pub mod verify;

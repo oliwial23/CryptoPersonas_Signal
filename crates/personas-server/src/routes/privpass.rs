@@ -7,8 +7,10 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use personas_core::privpass::{
     clone_exec_meth, decode_post_redemption, decode_ticket_request, encode_validated_tickets,
-    issue_tickets, redemption_key, rotate_issuer_keys, ticket_pseudonym, verify_redemption,
+    IssuerKeys, issue_tickets, redemption_key, rotate_issuer_keys, ticket_pseudonym,
+    verify_redemption,
 };
+use personas_core::schedule::{BanRef, RotationReason};
 use personas_core::{F, persona};
 use transport_api::{ConversationId, MessageId, Outgoing};
 
@@ -17,15 +19,42 @@ use crate::bulletin::{bulk, callback_hex, verify_and_append_blind};
 use crate::error::{AppError, AppResult, ok};
 use crate::state::{Namespace, ServerLock, ServerState};
 
+/// Why the ticket key is rotating. Every rotation is logged with its cause, and a client
+/// accepts the new key only if the cause checks out against public state.
+pub(crate) enum RotationCause {
+    /// The epoch turned to this epoch (`crate::epoch`).
+    Epoch(u64),
+    /// A member was banned; this is the ban's entry in the callback bulletin.
+    Ban(BanRef),
+}
+
+/// The issuer public key as hex of exactly the bytes `/api/privpass/pubkey` serves.
+pub(crate) fn pubkey_hex(keys: &IssuerKeys) -> AppResult<String> {
+    Ok(hex::encode(bulk(&keys.pubkey)?))
+}
+
 /// Rotate the ticket issuer key, expiring every unredeemed ticket (`construction`, "Key
-/// rotation"). Called at each epoch boundary and on each ban: a ticket's statement was
-/// proven at issuance, so without this a member could post with tickets issued before a
-/// ban. Clients fetch the new public key with their next request.
-pub(crate) fn rotate_ticket_key(st: &mut ServerState) -> AppResult<()> {
+/// rotation"), and append the rotation to the public log. Called at each epoch boundary
+/// and on each ban: a ticket's statement was proven at issuance, so without this a member
+/// could post with tickets issued before a ban. Clients fetch the new public key with
+/// their next request, and check it against the log.
+pub(crate) fn rotate_ticket_key(st: &mut ServerState, cause: RotationCause) -> AppResult<()> {
     let keys = rotate_issuer_keys(&mut rand::thread_rng(), &st.privpass.data_dir)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("could not rotate the ticket key: {e}")))?;
+    let pubkey = pubkey_hex(&keys)?;
     st.privpass.issuer = keys;
-    tracing::info!("ticket issuer key rotated; unredeemed tickets expired");
+    let (epoch, reason, ban) = match cause {
+        RotationCause::Epoch(epoch) => (epoch, RotationReason::Epoch, None),
+        RotationCause::Ban(ban) => (crate::epoch::bulletin_epoch(st), RotationReason::Ban, Some(ban)),
+    };
+    // The key file is already replaced, so a failure here leaves a key the log does not
+    // explain; the server refuses to start in that state rather than serve it
+    // (`main::check_rotation_log`).
+    st.privpass
+        .rotations
+        .append(epoch, reason, ban, pubkey)
+        .map_err(|e| AppError::Internal(e.context("could not log the ticket key rotation")))?;
+    tracing::info!("ticket issuer key rotated ({reason:?}, epoch {epoch}); unredeemed tickets expired");
     Ok(())
 }
 
@@ -202,4 +231,13 @@ pub async fn redeem_pseudo_post_slack(
 /// (`store_validated_tickets`).
 pub async fn issuer_pubkey(State(state): State<ServerLock>) -> AppResult<Bytes> {
     bulk(&state.read().await.privpass.issuer.pubkey)
+}
+
+/// Every issuer-key rotation so far, oldest first: the whole append-only log, as JSON. A
+/// client that is served a key it has not seen before checks it against this
+/// (`personas_client`'s rotation check).
+pub async fn rotations(
+    State(state): State<ServerLock>,
+) -> axum::Json<Vec<personas_core::schedule::RotationEntry>> {
+    axum::Json(state.read().await.privpass.rotations.entries().to_vec())
 }

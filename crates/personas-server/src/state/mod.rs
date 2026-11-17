@@ -21,7 +21,7 @@
 mod ledger;
 
 pub use ledger::{
-    BadgeLog, Ballot, ContextLog, PollEntry, PollLog, RecordLog, SlackPoll, SpentTicketLog,
+    BadgeLog, Ballot, ContextLog, PollEntry, PollLog, RecordLog, RotationLog, SlackPoll, SpentTicketLog,
     StoredBadge, ThreadContext, VoteState, badge_name, emoji_for, emoji_name,
 };
 
@@ -32,6 +32,7 @@ use anyhow::Result;
 use personas_core::Store;
 use personas_core::params::{FoldingParams, ServerKeys};
 use personas_core::privpass::{IssuerKeys, TicketKeys};
+use personas_core::schedule::EpochSchedule;
 
 use transport_api::Transport;
 
@@ -43,6 +44,8 @@ pub struct PrivPassState {
     /// The ticket interaction and blind-issuance keys, for `TICKET_BATCH_SIZE` tickets.
     pub keys: TicketKeys,
     pub spent: SpentTicketLog,
+    /// Every rotation of `issuer`, served to clients so they can check each new key.
+    pub rotations: RotationLog,
     /// Where the issuer key lives, so a rotation can replace it.
     pub data_dir: std::path::PathBuf,
 }
@@ -66,6 +69,8 @@ pub struct Channel {
 pub struct ServerState {
     /// The protocol's state. Proofs are verified against this and nothing else.
     pub db: Store,
+    /// The public schedule the epoch turns on (`crate::epoch`).
+    pub schedule: EpochSchedule,
     pub keys: ServerKeys,
     pub folding_keys: FoldingParams,
 
@@ -113,6 +118,7 @@ impl ServerState {
     pub fn new(
         data_dir: &Path,
         db: Store,
+        schedule: EpochSchedule,
         keys: ServerKeys,
         folding_keys: FoldingParams,
         signal: Arc<dyn Transport>,
@@ -124,6 +130,7 @@ impl ServerState {
 
         Ok(Self {
             db,
+            schedule,
             keys,
             folding_keys,
             signal: Channel {
@@ -143,6 +150,7 @@ impl ServerState {
                 issuer: privpass_issuer,
                 keys: privpass_keys,
                 spent: SpentTicketLog::open(data_dir.join("privpass_spent.jsonl"))?,
+                rotations: RotationLog::open(data_dir.join("privpass_rotations.jsonl"))?,
                 data_dir: data_dir.to_path_buf(),
             },
         })

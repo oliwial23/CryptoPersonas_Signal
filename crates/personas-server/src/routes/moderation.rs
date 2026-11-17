@@ -1,4 +1,4 @@
-//! Invoking callbacks: banning, applying reputation, granting badges, turning the epoch.
+//! Invoking callbacks: banning, applying reputation, granting badges.
 //!
 //! This is the only place a member's object is changed by anyone other than the member. It is
 //! not a back door — it is the mechanism the paper is about. When a member posts, they hand
@@ -11,10 +11,12 @@
 //! So a ban is not the server reaching into a member's object. It is the server redeeming a
 //! token the member gave it when they posted.
 
+use ark_serialize::{CanonicalSerialize, Compress};
 use axum::body::Bytes;
 use axum::extract::{Json, State};
 use axum::response::Response;
 use personas_core::circuits::{BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, arg_rep};
+use personas_core::schedule::BanRef;
 use personas_core::{CStore, Cr, F};
 use personas_wire::raw;
 use serde::Deserialize;
@@ -27,6 +29,7 @@ use zk_callbacks::impls::centralized::crypto::{FakeSigPrivkey, PlainTikCrypto};
 use crate::bench;
 use crate::bulletin::epoch;
 use crate::error::{AppError, AppResult, ok};
+use crate::routes::privpass::RotationCause;
 use crate::state::{Namespace, ServerLock, ServerState};
 
 pub(crate) type Callback = CallbackCom<F, F, PlainTikCrypto<F>>;
@@ -83,8 +86,11 @@ pub async fn ban(State(state): State<ServerLock>, body: Bytes) -> AppResult<Resp
 
     let mut st = state.write().await;
     call(&mut st, cb, F::from(BAN_FLAG))?;
-    // A ban must also stop tickets the member already holds.
-    crate::routes::privpass::rotate_ticket_key(&mut st)?;
+    // A ban must also stop tickets the member already holds. The rotation names the ban's
+    // entry in the public callback bulletin — `call` has just appended it — so a client can
+    // check this rotation was caused by a ban it can see.
+    let ban = ban_ref(&st)?;
+    crate::routes::privpass::rotate_ticket_key(&mut st, RotationCause::Ban(ban))?;
 
     tracing::info!("a member has been banned");
     Ok(ok())
@@ -148,22 +154,24 @@ pub async fn approve_badge(State(state): State<ServerLock>, body: Bytes) -> AppR
     Ok(ok())
 }
 
-/// Turn the epoch.
-///
-/// An epoch bounds how long a callback ticket is good for. Turning it is what stops a service
-/// from sitting on a ticket indefinitely and redeeming it long after the post that produced
-/// it — and it is why a scan proves against a *specific* epoch.
-pub async fn update_epoch(State(state): State<ServerLock>) -> AppResult<Response> {
-    let mut st = state.write().await;
-    let mut rng = rand::thread_rng();
-
-    let (_, start, millis) = bench::time(|| st.db.callback_bul.update_epoch(&mut rng));
-    bench::epoch_updated(start, millis);
-    crate::routes::privpass::rotate_ticket_key(&mut st)?;
-
-    tracing::info!("epoch updated");
-    Ok(ok())
+/// The callback bulletin's newest entry, as a [`BanRef`]: what a ban's key rotation cites.
+fn ban_ref(st: &ServerState) -> AppResult<BanRef> {
+    let called = &st.db.callback_bul.memb_called_cbs;
+    let (ticket, _, _) = called.last().ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!("the ban left no entry in the callback bulletin"))
+    })?;
+    let mut bytes = Vec::new();
+    ticket
+        .serialize_with_mode(&mut bytes, Compress::No)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("could not encode the ticket: {e}")))?;
+    Ok(BanRef {
+        index: (called.len() - 1) as u64,
+        ticket: hex::encode(bytes),
+    })
 }
+
+// The epoch is not turned here. It used to be, by `GET /api/epoch`, which anyone could
+// call; it now turns on its public schedule and only there (`crate::epoch`).
 
 // ---------------------------------------------------------------------------------------
 // Looking callbacks up
