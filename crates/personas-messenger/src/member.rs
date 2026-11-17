@@ -859,7 +859,9 @@ impl Member {
     /// last brought up to date in an earlier one (every interaction proves `ep = t`).
     pub fn epoch_scan_needed(&self, epoch: u64) -> bool {
         use ark_ff::PrimeField;
-        self.user.data.ep.into_bigint() < F::from(epoch).into_bigint()
+        // Mid-sweep, the sweep's own next scan is what is needed, and finishing it sets
+        // `ep`; a fresh epoch scan cannot start until it ends.
+        !self.user.is_scanning() && self.user.data.ep.into_bigint() < F::from(epoch).into_bigint()
     }
 
     /// Whether this member has used up its interactions between sweeps. Its next post could

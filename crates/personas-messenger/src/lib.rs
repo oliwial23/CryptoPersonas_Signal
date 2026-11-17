@@ -100,6 +100,9 @@ struct PendingScan {
     /// replica's current roots still equal these.
     memb_root: F,
     nmemb_root: F,
+    /// The epoch the proof names: past it, the scan is stale even if no call moved the
+    /// roots.
+    epoch: u64,
 }
 
 /// How far into a barrier the barrier before it counts as settled. Records stamped just
@@ -875,6 +878,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
             before,
             memb_root,
             nmemb_root,
+            epoch: self.replica.current_epoch(),
         });
         Ok(eh)
     }
@@ -884,7 +888,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
     pub fn scan_still_valid(&self) -> bool {
         self.pending_scan.as_ref().is_some_and(|p| {
             let cbs = self.replica.callback_store();
-            p.memb_root == cbs.memb_root() && p.nmemb_root == cbs.nmemb_root()
+            p.memb_root == cbs.memb_root()
+                && p.nmemb_root == cbs.nmemb_root()
+                && p.epoch == self.replica.current_epoch()
         })
     }
 

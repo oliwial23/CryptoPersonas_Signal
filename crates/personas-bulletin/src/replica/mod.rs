@@ -1031,6 +1031,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 target.context(),
                 claimed.0,
                 record::rating_payload(*target, *delta),
+                epoch_f,
                 obj_root.0,
                 &proof.0,
             ),
@@ -1865,6 +1866,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     context,
                     claimed.0,
                     record::rating_payload(*target, *delta),
+                    epoch_f,
                     obj_root.0,
                     &proof.0,
                 );
@@ -1999,7 +2001,12 @@ fn is_applicable(record: &Record, produced: &HashSet<[u8; 32]>, derived: &Derive
         Record::BadgeApprove { target, .. } => derived.outstanding.contains_key(target),
         // Likewise a ban: it names a post whose ticket the replica holds.
         Record::Ban { target } => derived.outstanding.contains_key(target),
-        Record::Rate { obj_root, .. } => holds(obj_root.0),
+        // Like a ban, a rating names a post whose ticket the replica must already hold:
+        // applied before its target (same barrier, smaller eh) it would be counted against
+        // nothing and lost.
+        Record::Rate {
+            obj_root, target, ..
+        } => holds(obj_root.0) && derived.outstanding.contains_key(target),
         Record::Scan { obj_root, .. } => holds(obj_root.0),
         Record::Vote { poll, obj_root, .. } => {
             holds(obj_root.0) && derived.polls.contains_key(poll)
@@ -2432,13 +2439,14 @@ fn memo_predicate(
     context: F,
     claimed: F,
     payload: F,
+    epoch: F,
     obj_root: F,
     proof: &<Snark as SNARK<F>>::Proof,
 ) -> bool {
     if let Some(&v) = cache.get(&eh) {
         return v;
     }
-    let inputs = vec![context, claimed, payload, obj_root];
+    let inputs = vec![context, claimed, payload, epoch, obj_root];
     let v = vk.verify(&inputs, proof);
     cache.insert(eh, v);
     v

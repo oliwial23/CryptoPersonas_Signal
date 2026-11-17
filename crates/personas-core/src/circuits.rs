@@ -351,6 +351,9 @@ pub fn pseudonym_pred(
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
     bind_public_input(&pub_args.payload)?;
+    // A rating or authorship proof touches no object, so the epoch is not checked against
+    // `ep`; it is bound so that a relay cannot change it.
+    bind_public_input(&pub_args.epoch)?;
     let context = pub_args.context;
     let claimed = pub_args.claimed;
     let derived = pseudonym_zk(&tu.data.sk, &context)?;

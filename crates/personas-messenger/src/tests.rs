@@ -278,7 +278,7 @@ mod e2e {
     fn config() -> Config {
         Config {
             root_window: 256,
-            barriers_per_epoch: 5,
+            barriers_per_epoch: 20,
             poll_close_barriers: 3,
         }
     }
@@ -316,6 +316,18 @@ mod e2e {
                 break;
             }
             cross_settle_lag(ms);
+        }
+    }
+
+    /// Cross barriers until the next epoch begins, without scanning. A call made in an
+    /// epoch reaches scans at the next one (the callback set is re-pinned at its first
+    /// barrier), so a test that wants a member to absorb a ban crosses here, then scans.
+    fn to_next_epoch(ms: &mut [&mut Msg]) {
+        let target = ms[0].replica().current_epoch() + 1;
+        for m in ms {
+            while m.replica().current_epoch() < target {
+                m.barrier();
+            }
         }
     }
 
@@ -483,9 +495,10 @@ mod e2e {
             "the banned persona's post is flagged: {rendered:?}"
         );
 
-        // (7) The poster's honest post-ban scan absorbs the ban (banned = 1). It is
-        //     produced against the replica's current-barrier callback set and
-        //     accepted everywhere.
+        // (7) The poster's honest post-ban scan absorbs the ban (banned = 1). The ban
+        //     reaches scans at the next epoch, when the callback set is re-pinned; the
+        //     poster's epoch scan there is accepted everywhere.
+        to_next_epoch(&mut [&mut poster, &mut v1, &mut v2]);
         let scan = poster.emit_scan(&mut rng).unwrap();
         for m in [&mut poster, &mut v1, &mut v2] {
             assert_eq!(deliver(m, &scan).unwrap().unwrap(), Status::Applied);
@@ -498,8 +511,8 @@ mod e2e {
     }
 
     /// An admin's PERMANENT BAN is one record, not a poll: one barrier later the post's
-    /// ticket is invoked with BAN_FLAG, the author's posts are flagged, and the author's
-    /// next scan bans them. Nothing anyone votes can undo it.
+    /// ticket is invoked with BAN_FLAG and the author's posts are flagged, and the author's
+    /// scan at the next epoch bans them. Nothing anyone votes can undo it.
     #[test]
     #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
     fn e2e_an_admin_ban_takes_effect_at_the_next_barrier_with_no_poll() {
@@ -551,6 +564,8 @@ mod e2e {
             "the banned persona's post is flagged"
         );
 
+        // The ban reaches the poster's object at its scan in the next epoch.
+        to_next_epoch(&mut [&mut poster, &mut admin]);
         let scan = poster.emit_scan(&mut rng).unwrap();
         assert_eq!(
             deliver(&mut admin, &scan).unwrap().unwrap(),
@@ -876,14 +891,15 @@ mod e2e {
         );
         assert!(off.take_relays().is_empty() && !off.view_report().diverged());
 
-        // From here on, `c`'s claims agree with everyone's.
+        // From here on, `c`'s claims agree with everyone's. (Still inside epoch 0, which
+        // ends at 20 s: past it, `c` would first make its epoch scan.)
         for m in [&mut a, &mut b, &mut c] {
-            m.tick(20_500);
+            m.tick(16_500);
         }
         let later = c.emit_post_anon(&mut rng, "caught up").unwrap();
         for m in [&mut a, &mut b, &mut c] {
-            deliver_at(m, &later, 20_600);
-            m.tick(23_500);
+            deliver_at(m, &later, 16_600);
+            m.tick(19_500);
             let report = m.view_report();
             assert!(!report.diverged(), "{report:?}");
             assert_eq!(report.agreeing, 1);
@@ -941,17 +957,6 @@ mod e2e {
             deliver(m, &post);
         }
         settle(&mut [&mut poster, &mut v1, &mut v2]);
-        // Fork the poster's member to build the stale scan without consuming the
-        // object it will later scan for real.
-        let mut stale_member = poster.member().unwrap().clone();
-        let stale = stale_member
-            .scan(
-                &mut rng,
-                poster.replica().proving_store().unwrap(),
-                &CbT::new(),
-            )
-            .expect("stale scan proof");
-        let (stale_bytes, _) = record::encode(&stale).unwrap();
 
         // Ban the post and cross the barrier on v1.
         let poll = v1
@@ -975,8 +980,23 @@ mod e2e {
         }
         close_poll(&mut [&mut v1]);
 
-        // The stale scan, delivered to the barrier-crossed replica, is rejected: it
-        // names a superseded (pre-ban) callback barrier.
+        // At the next epoch v1 re-pins the callback set, ban included. A scan the poster
+        // makes in that epoch against the pre-ban (empty) set is stale. The poster's
+        // member is forked so the real object is untouched.
+        to_next_epoch(&mut [&mut v1, &mut poster]);
+        let mut stale_member = poster.member().unwrap().clone();
+        stale_member.set_epoch(v1.replica().current_epoch());
+        let stale = stale_member
+            .scan(
+                &mut rng,
+                poster.replica().proving_store().unwrap(),
+                &CbT::new(),
+            )
+            .expect("stale scan proof");
+        let (stale_bytes, _) = record::encode(&stale).unwrap();
+
+        // The stale scan, delivered to v1, is rejected: it names a superseded (pre-ban)
+        // callback set.
         let stale_incoming = Incoming::Message {
             id: MessageId("stale".into()),
             conversation: v1.conversation().clone(),
@@ -1136,23 +1156,7 @@ mod e2e {
         }
         settle(&mut [&mut poster, &mut v1, &mut v2]);
 
-        let before = poster.export_member_state().unwrap().unwrap();
-        poster.prepare_scan(&mut rng, false).expect("prepare");
-        assert!(poster.scan_still_valid());
-        assert!(
-            matches!(
-                poster.emit_post_anon(&mut rng, "x"),
-                Err(SendError::ScanPending)
-            ),
-            "nothing else may be produced while a scan is pending"
-        );
-        assert_eq!(
-            poster.export_member_state().unwrap().unwrap(),
-            before,
-            "a prepared scan revealed nothing, so the saved state is the pre-scan one"
-        );
-
-        // A ban settles on every replica: the callback roots move, the prepared scan is stale.
+        // A ban settles in this epoch; it reaches scans at the next one.
         let poll = v1
             .emit_poll(
                 "ban?",
@@ -1173,11 +1177,30 @@ mod e2e {
             }
         }
         close_poll(&mut [&mut poster, &mut v1, &mut v2]);
+        to_next_epoch(&mut [&mut poster, &mut v1, &mut v2]);
+
+        let before = poster.export_member_state().unwrap().unwrap();
+        poster.prepare_scan(&mut rng, false).expect("prepare");
+        assert!(poster.scan_still_valid());
         assert!(
-            !poster.scan_still_valid(),
-            "the settlement made the scan stale"
+            matches!(
+                poster.emit_post_anon(&mut rng, "x"),
+                Err(SendError::ScanPending)
+            ),
+            "nothing else may be produced while a scan is pending"
+        );
+        assert_eq!(
+            poster.export_member_state().unwrap().unwrap(),
+            before,
+            "a prepared scan revealed nothing, so the saved state is the pre-scan one"
         );
 
+        // The epoch turns before it is released: the scan names an epoch that is over.
+        to_next_epoch(&mut [&mut poster, &mut v1, &mut v2]);
+        assert!(
+            !poster.scan_still_valid(),
+            "a new epoch made the scan stale"
+        );
         poster.discard_scan().unwrap();
         assert_eq!(
             poster.export_member_state().unwrap().unwrap(),
@@ -1621,6 +1644,10 @@ mod e2e {
         tick([&mut alice, &mut admin]);
         // The approval is used up.
         let mut alice3 = new_member(&mut rng);
+        // A newcomer is in the group's epoch before it joins (a join names it).
+        while alice3.replica().current_barrier() < admin.replica().current_barrier() {
+            alice3.barrier();
+        }
         let third = alice3.emit_join(&mut rng, alice_acct).unwrap();
         assert_eq!(
             status(&mut admin, &third),
@@ -1819,12 +1846,16 @@ mod e2e {
         };
         assert!(flagged(&admin, &old.eh), "the old post is flagged at once");
 
+        // Two epochs have passed: alice makes her epoch scan before anything else.
+        settle(&mut [&mut admin, &mut alice]);
         let new = alice.emit_post_pseudo(&mut rng, "new", context).unwrap();
         assert_eq!(status_of(&mut admin, &new), Status::Applied);
         assert!(flagged(&admin, &new.eh), "and so is the next one");
         settle(&mut [&mut admin, &mut alice]);
         assert!(settled(&admin, &new.eh), "called at once, with the ban");
 
+        // The call reaches alice's object at her scan in the next epoch.
+        to_next_epoch(&mut [&mut admin, &mut alice]);
         while alice.scan_needed() {
             alice.prepare_scan(&mut rng, false).unwrap();
             let scan = alice.commit_scan().unwrap();
@@ -1834,8 +1865,9 @@ mod e2e {
         assert_eq!(alice.member().unwrap().user.data.banned, F::from(1));
     }
 
-    /// A ticket waits for a ban poll opened in time, so the clock cannot run out on it,
-    /// and a poll that closes takes no more ballots.
+    /// A ticket waits for a ban poll on it rather than settling with no ban, and a poll
+    /// that closes takes no more ballots. A poll must close within the ticket's window: past
+    /// its expiry a call could no longer reach the member, so the hold ends there too.
     #[test]
     #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
     fn e2e_a_ban_poll_holds_its_ticket_and_closes() {
@@ -1844,11 +1876,10 @@ mod e2e {
         let (mut admin, mut alice, _) = joined_pair(&mut rng, &keys, "hold");
         let post = alice.emit_post_anon(&mut rng, "text").unwrap();
         assert_eq!(status_of(&mut admin, &post), Status::Applied);
-        for m in [&mut admin, &mut alice] {
-            for _ in 0..settle_barriers() - 1 {
-                m.barrier();
-            }
-        }
+        // Into the ticket's last epoch (it expires at the end of the next one), where
+        // both members make their epoch scans.
+        to_next_epoch(&mut [&mut admin, &mut alice]);
+        settle(&mut [&mut admin, &mut alice]);
         let poll = admin
             .emit_poll(
                 "ban?",
@@ -1860,12 +1891,9 @@ mod e2e {
         status_of(&mut alice, &poll);
         let ballot = admin.emit_vote(&mut rng, poll.eh, BAN_OPTION).unwrap();
         status_of(&mut alice, &ballot);
-        settle(&mut [&mut admin, &mut alice]);
         let ticket = |m: &Msg| m.replica().derived().outstanding[&post.eh].clone();
-        assert!(!ticket(&admin).settled, "past its window, and still held");
-        for m in [&mut admin, &mut alice] {
-            m.barrier();
-        }
+        assert!(!ticket(&admin).settled, "held while the poll is open");
+        close_poll(&mut [&mut admin, &mut alice]);
         assert!(ticket(&admin).banned && ticket(&admin).settled, "the ban landed");
         assert_eq!(fingerprint(&alice), fingerprint(&admin));
 
