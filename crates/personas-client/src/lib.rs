@@ -9,6 +9,7 @@
 //! - [`params`] — proving keys, fetched from the server
 //! - [`flows`] — the proving flows (post, scan, fold, vote, authorship, badge)
 //! - [`badges`] — the three badge slots and their claimed pseudonyms
+//! - [`rotation`] — checking the epoch schedule and each issuer-key rotation
 
 pub mod badges;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod params;
 pub mod privpass;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod rotation;
 pub mod state;
 
 pub use config::{ClientConfig, Namespace};

@@ -138,6 +138,17 @@ impl ClientConfig {
     pub fn privpass_stash(&self) -> PathBuf {
         self.data_dir.join("privpass_stash.bin")
     }
+
+    /// The last Privacy Pass issuer key this client accepted, as hex. A different key is
+    /// accepted only if the server's rotation log explains it (`rotation`).
+    pub fn privpass_issuer_key(&self) -> PathBuf {
+        self.data_dir.join("privpass_issuer_key.hex")
+    }
+
+    /// The server's epoch schedule, pinned the first time this client saw it.
+    pub fn epoch_schedule(&self) -> PathBuf {
+        self.data_dir.join("epoch_schedule.json")
+    }
 }
 
 /// `Url::join` resolves relative to the base's *directory*, so a base without a

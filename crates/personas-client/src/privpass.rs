@@ -101,7 +101,7 @@ impl PersonaClient {
         let validated = decode_validated_tickets(&resp.bytes()?)
             .map_err(|e| anyhow!("server returned an undecodable ticket: {e}"))?;
 
-        let issuer_pubkey = self.privpass_issuer_pubkey();
+        let issuer_pubkey = self.privpass_issuer_pubkey()?;
         let start = SystemTime::now();
         batch_user
             .store_validated_tickets::<personas_core::H, personas_core::Args, personas_core::Cr, { privpass::TICKET_BATCH_SIZE }>(

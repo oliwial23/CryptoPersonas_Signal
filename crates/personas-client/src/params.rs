@@ -9,10 +9,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use ark_serialize::{CanonicalDeserialize, Compress, Validate};
-use personas_core::{PK, circuits::NP};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+use personas_core::circuits::BAN_FLAG;
+use personas_core::schedule::{BanRef, RotationEntry, now_unix};
+use personas_core::{Args, CStore, Cr, F, PK, circuits::NP};
+use zk_callbacks::generic::bulletin::PublicCallbackBul;
+use zk_callbacks::generic::object::Time;
+use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
-use crate::PersonaClient;
+use crate::{PersonaClient, rotation};
 
 /// Parameter bytes already fetched by this process, by URL. They are fixed for a server's
 /// lifetime and a key is megabytes: fetching one for every proof goes unnoticed on
@@ -193,16 +198,95 @@ impl PersonaClient {
     }
 
     /// Privacy Pass: the issuer's VOPRF public key, needed to unblind a validated batch.
-    pub fn privpass_issuer_pubkey(&self) -> ark_grumpkin::Projective {
-        // Fetched fresh every time, unlike the proving keys: the server rotates it at each
-        // epoch boundary and on each ban.
+    ///
+    /// Fetched fresh every time, unlike the proving keys: the server rotates it at each
+    /// epoch boundary and on each ban. A key different from the last one this client
+    /// accepted is checked against the server's public rotation log first
+    /// (`rotation::check_rotations`), and refused if the log does not explain it.
+    pub fn privpass_issuer_pubkey(&self) -> anyhow::Result<ark_grumpkin::Projective> {
+        use anyhow::Context;
+
         let route = "api/privpass/pubkey";
+        let url = self.cfg.url(route)?;
+        let bytes = self.download(&url, route);
+        let served = hex::encode(&bytes);
+
+        let path = self.cfg.privpass_issuer_key();
+        let accepted = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text.trim().to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+        if accepted.as_deref() != Some(served.as_str()) {
+            let log: Vec<RotationEntry> = self
+                .bul
+                .client
+                .get(self.cfg.url("api/privpass/rotations")?)
+                .timeout(FETCH_TIMEOUT)
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .context("failed to fetch the issuer key rotation log")?
+                .json()
+                .context("server returned a malformed key rotation log")?;
+            let schedule = self.epoch_schedule()?;
+            let mut bulletin = None;
+            rotation::check_rotations(
+                accepted.as_deref(),
+                &served,
+                &log,
+                &schedule,
+                now_unix(),
+                |ban, epoch| {
+                    let bulletin = bulletin.get_or_insert_with(|| self.callback_bulletin());
+                    Ok(is_ban_in(bulletin, ban, epoch))
+                },
+            )
+            .context("refusing the server's ticket issuer key")?;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, &served)
+                .with_context(|| format!("could not write {}", path.display()))?;
+        }
+
+        ark_grumpkin::Projective::deserialize_with_mode(bytes.as_slice(), Compress::No, Validate::No)
+            .with_context(|| format!("server returned an undecodable parameter for {route}"))
+    }
+
+    /// The public callback bulletin: every callback invoked so far, with its argument and
+    /// the epoch it was invoked in.
+    fn callback_bulletin(&self) -> CallbackBulletin {
+        let route = "api/callbacks/bulletin";
         let url = self
             .cfg
             .url(route)
             .unwrap_or_else(|e| panic!("bad parameter route: {e}"));
         let bytes = self.download(&url, route);
-        ark_grumpkin::Projective::deserialize_with_mode(bytes.as_slice(), Compress::No, Validate::No)
+        CallbackBulletin::deserialize_with_mode(bytes.as_slice(), Compress::No, Validate::Yes)
             .unwrap_or_else(|e| panic!("server returned an undecodable parameter for {route}: {e}"))
     }
+}
+
+/// The callback bulletin, as served: `(ticket, argument, epoch, membership witness)`.
+type CallbackBulletin = Vec<(
+    FakeSigPubkey<F>,
+    Args,
+    Time<F>,
+    <CStore as PublicCallbackBul<F, Args, Cr>>::MembershipWitness,
+)>;
+
+/// Whether `ban` names a ban in `bulletin`: the entry it cites holds the ticket it names,
+/// was invoked with the ban argument, and in `epoch`.
+fn is_ban_in(bulletin: &CallbackBulletin, ban: &BanRef, epoch: u64) -> bool {
+    let Some((ticket, arg, time, _)) = usize::try_from(ban.index)
+        .ok()
+        .and_then(|i| bulletin.get(i))
+    else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if ticket.serialize_with_mode(&mut bytes, Compress::No).is_err() {
+        return false;
+    }
+    hex::encode(bytes) == ban.ticket && *arg == F::from(BAN_FLAG) && *time == F::from(epoch)
 }

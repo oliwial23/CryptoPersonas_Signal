@@ -41,7 +41,9 @@ use zk_callbacks::{
     impls::centralized::crypto::PlainTikCrypto,
 };
 
-use crate::{BulNet, PersonaClient};
+use personas_core::schedule::{EpochSchedule, now_unix};
+
+use crate::{BulNet, PersonaClient, rotation};
 
 /// The Nova instance folding `NUM_SCANS_PER_FOLD` callback scans per step, with the
 /// personas sweep rules (see `personas_core::fold`).
@@ -83,6 +85,10 @@ impl MessageId {
 #[derive(Deserialize)]
 struct EpochResponse {
     epoch: String,
+    /// The published schedule: when epoch 0 began (unix seconds)…
+    start: u64,
+    /// …and how long an epoch lasts, in seconds.
+    length: u64,
 }
 
 /// Upstream `User` panics (`assert!(self.scan_index.is_none())`) if any non-scan
@@ -102,9 +108,8 @@ fn ensure_not_scanning(user: &User<F, MsgUser>) -> Result<()> {
 }
 
 impl PersonaClient {
-    /// The current epoch. Scans and pseudonymous posts are bound to it, so a callback
-    /// can only be answered inside the window it was issued in.
-    pub fn epoch(&self) -> Result<F> {
+    /// The server's epoch and its published schedule, fetched together.
+    fn fetch_epoch(&self) -> Result<(F, EpochSchedule)> {
         let url = self.cfg.url("api/get_epoch")?;
         let res: EpochResponse = self
             .bul
@@ -113,10 +118,80 @@ impl PersonaClient {
             .send()
             .context("failed to fetch the current epoch")?
             .json()
-            .context("server returned a malformed epoch")?;
+            .context("server returned a malformed epoch (or publishes no epoch schedule)")?;
 
+        if res.length == 0 {
+            return Err(anyhow!("server publishes a zero-length epoch"));
+        }
         let bytes = hex::decode(&res.epoch).context("epoch is not valid hex")?;
-        Ok(F::from_le_bytes_mod_order(&bytes))
+        Ok((
+            F::from_le_bytes_mod_order(&bytes),
+            EpochSchedule::new(res.start, res.length),
+        ))
+    }
+
+    /// The server's published epoch schedule, checked against the one this client pinned
+    /// the first time it asked (`rotation::pin_schedule`).
+    pub fn epoch_schedule(&self) -> Result<EpochSchedule> {
+        let (_, schedule) = self.fetch_epoch()?;
+        rotation::pin_schedule(&self.cfg.epoch_schedule(), schedule)?;
+        Ok(schedule)
+    }
+
+    /// The current epoch. Scans and pseudonymous posts are bound to it, so a callback
+    /// can only be answered inside the window it was issued in.
+    ///
+    /// The server's word is not taken for it: the epoch must be the one the server's
+    /// published schedule gives for this client's clock (within
+    /// [`rotation::CLOCK_SKEW_SECS`] of a boundary), and the schedule must be the one
+    /// this client pinned.
+    pub fn epoch(&self) -> Result<F> {
+        let (epoch, schedule) = self.fetch_epoch()?;
+        rotation::pin_schedule(&self.cfg.epoch_schedule(), schedule)?;
+        let number = epoch.into_bigint();
+        if number.as_ref()[1..].iter().any(|&limb| limb != 0) {
+            return Err(anyhow!("server returned an epoch that is not a small integer"));
+        }
+        rotation::check_epoch(&schedule, number.as_ref()[0], now_unix())?;
+        Ok(epoch)
+    }
+
+    /// Block until the server's next scheduled epoch boundary has passed and the server
+    /// reports the new epoch; returns it. Nothing can turn the epoch on request — it turns
+    /// on the server's public schedule — so this is what a harness that used to turn it
+    /// does instead. Fails at once if the boundary is more than `max_wait` away.
+    pub fn wait_for_next_epoch(&self, max_wait: std::time::Duration) -> Result<u64> {
+        use std::time::{Duration, Instant, UNIX_EPOCH};
+
+        let schedule = self.epoch_schedule()?;
+        let target = schedule.current() + 1;
+        let at = UNIX_EPOCH + Duration::from_secs(schedule.boundary(target));
+        let wait = at.duration_since(SystemTime::now()).unwrap_or_default();
+        if wait > max_wait {
+            return Err(anyhow!(
+                "epoch {target} begins in {:.0} s (epochs last {} s); the epoch turns only \
+                 on the server's schedule, so there is nothing to do but wait",
+                wait.as_secs_f64(),
+                schedule.length
+            ));
+        }
+        std::thread::sleep(wait);
+        // The server's clock task turns the epoch at the boundary; give it a moment.
+        let start = Instant::now();
+        loop {
+            let (epoch, _) = self.fetch_epoch()?;
+            let number = epoch.into_bigint().as_ref()[0];
+            if number >= target {
+                self.epoch()?;
+                return Ok(number);
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                return Err(anyhow!(
+                    "the server had not reached epoch {target} a minute after its boundary"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// The member's current reputation, as recorded in their local user object.
