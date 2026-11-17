@@ -412,6 +412,12 @@ export function recordSenderProblem(
   if (claim.kind === 'join' && accountOf(senderServiceId) !== claim.account) {
     return 'a join for another account than its sender';
   }
+  // A badge request asks an admin to vouch for a person, so it is attributable like a
+  // join: the replica checks the request's key is this account's, and this checks the
+  // account is really the sender.
+  if (claim.kind === 'badge-request' && accountOf(senderServiceId) !== claim.account) {
+    return 'a badge request for another account than its sender';
+  }
   if (
     claim.kind === 'rejoin-approve' &&
     !(senderServiceId && conversation.isAdmin(senderServiceId as never))

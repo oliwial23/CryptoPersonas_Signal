@@ -133,7 +133,10 @@ export class Engine {
   /** For a join or re-join approval: which, and the account it names (hex). */
   recordAccountClaim(
     record: Buffer
-  ): { kind: 'join' | 'rejoin-approve' | 'ban' | 'badge-approve'; account: string } | null;
+  ): {
+    kind: 'join' | 'rejoin-approve' | 'ban' | 'badge-approve' | 'badge-request';
+    account: string;
+  } | null;
   /**
    * The kind of a record ("Post", "Join", ...), decoded only: nothing verified or
    * applied. For a record the replica is holding, so a post can keep its timeline place.
@@ -220,7 +223,7 @@ export class Engine {
   emitPostRepAtLeast(body: string, context: number, threshold: number): Emitted;
   emitPostShowBadge(body: string, context: number, badge: string): Emitted;
   /** Request a badge: 1=Faculty, 2=Student, 3=Industry. Files a ticket to approve. */
-  emitBadgeRequest(slot: number): JsEmitted;
+  emitBadgeRequest(slot: number, account: string): JsEmitted;
   /** Approve a badge request by its envelope hash. */
   emitBadgeApprove(request: string, slot: number): JsEmitted;
   /** Badge requests not yet approved, for an admin to act on. */

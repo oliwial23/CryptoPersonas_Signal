@@ -303,6 +303,7 @@ pub fn generate_merkle_circuit_keys<S: SNARK<F>>(
     let dummy_badge_request = BadgesArgs {
         i: F::from(0),
         claimed: F::from(0),
+        pk: F::from(0),
     };
     let (badge_request_proving_key, badge_request_verifying_key) = get_badge_request_interaction()
         .generate_keys::<H, S, Cr, MerkleOStore>(

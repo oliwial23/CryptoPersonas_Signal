@@ -53,27 +53,17 @@ export const PERSONAS_TOPIC_MARKER = 'PZT2:';
 // Legacy standalone authorship carriage. New claims travel as post records.
 export const PERSONAS_AUTHORSHIP_MARKER = 'PZU2:';
 
-// A BADGE REQUEST. Its own marker, distinct from the attributable PZR2, for one reason:
-// it rides the SHARED PHANTOM, so the requester is unlinkable on the wire. An APPROVAL
-// goes under the admin's own account instead (PZR2): an approval only means something
-// coming from an admin, and every member checks that (recordSenderProblem).
+// A BADGE REQUEST. Attributable, like a join: it goes under the requester's own account,
+// so an admin vouches for a person ("Bob asks for Faculty"), not for an anonymous request.
+// The request proves the member's key, the replica accepts it only if that key is the one
+// the named account joined with, and every member checks the account is the sender
+// (recordSenderProblem). Without that, a member could have someone else's account vouch
+// for a badge that lands in its own object. An APPROVAL also goes under the admin's own
+// account (PZR2), and every member checks it comes from an admin.
 //
-// That is a change of mind, and the reasoning matters. These started out attributable on
-// the theory that "a request asks a human to vouch for you, which cannot be done
-// anonymously". That turned out to be false about this protocol: the grant does not flow
-// through identity at all. A request FILES A CALLBACK; the approval names that callback
-// by its envelope hash; the replica marks the ticket and invokes it at the barrier; the
-// requester absorbs it at their next scan because they alone hold the secret to do so.
-// Identity appears nowhere in that chain, so attributing the Signal envelope was leaking
-// something the protocol never needed.
-//
-// WHAT IT COSTS, stated plainly because it is a real trade: an admin now approves "a
-// request for Faculty", not "Bob's request for Faculty". They cannot vouch for a person
-// they recognise, because they cannot see who asked. If the research design needs
-// person-specific vouching, this is the decision to revisit — not the UI label.
-//
-// `obj_root` in the record does NOT undo this. It is the root of the shared object tree,
-// the same value for every member, which is why ordinary anonymous POSTS carry it too.
+// (Requests used to ride the shared phantom, on the theory that the grant never needs the
+// requester's identity. That let an admin approve only "a request for Faculty", and it
+// contradicted the paper, which makes requests non-anonymous.)
 export const PERSONAS_BADGE_MARKER = 'PZB2:';
 
 // Legacy standalone badge carriage. New badge proofs travel as post records.
@@ -94,7 +84,6 @@ const PHANTOM_MARKERS = [
   PERSONAS_VOTE_MARKER,
   PERSONAS_RATE_MARKER,
   PERSONAS_SCAN_MARKER,
-  PERSONAS_BADGE_MARKER,
   PERSONAS_AUTHORSHIP_MARKER,
   PERSONAS_BADGE_PROOF_MARKER,
 ] as const;

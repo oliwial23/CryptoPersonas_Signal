@@ -264,6 +264,7 @@ pub fn generate_server_keys(rng: &mut (impl CryptoRng + RngCore), db: &Store) ->
     let dummy_pub_badge_request = BadgesArgs {
         i: F::from(0),
         claimed: F::from(0),
+        pk: F::from(0),
     };
     let (badge_request_proving_key, badge_request_verifying_key) = badge_request_interaction
         .generate_keys::<H, Snark, Cr, OStore>(

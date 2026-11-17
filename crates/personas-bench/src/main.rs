@@ -359,6 +359,15 @@ impl Group {
         group
     }
 
+    /// Alice's account: the first one `new` hands out. Badge requests are attributable and
+    /// must name the account that joined with the member's key.
+    fn alice_account() -> F {
+        let mut aci = [0u8; 16];
+        aci[0] = 1;
+        aci[15] = 0xbe;
+        personas_core::account_field(&aci)
+    }
+
     fn account(&mut self) -> F {
         let mut aci = [0u8; 16];
         aci[0] = self.next_account;
@@ -652,7 +661,7 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
             "badge_request",
             &mut |g, i| {
                 g.alice
-                    .emit_badge_request(&mut g.rng, (i % 3 + 1) as u8)
+                    .emit_badge_request(&mut g.rng, (i % 3 + 1) as u8, Group::alice_account())
                     .expect("badge request")
             },
             &mut scans,
@@ -726,7 +735,7 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
         let (slot, _) = personas_core::badge_value("Faculty").expect("badge");
         let req = g
             .alice
-            .emit_badge_request(&mut g.rng, slot as u8)
+            .emit_badge_request(&mut g.rng, slot as u8, Group::alice_account())
             .expect("request");
         g.deliver_all_but(Who::Alice, &req);
         let approve = g

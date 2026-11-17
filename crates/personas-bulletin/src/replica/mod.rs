@@ -943,6 +943,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 exec,
                 slot,
                 obj_root,
+                pk,
+                ..
             } => {
                 let exec = &exec.0;
                 memo_interaction::<OH, _, 1>(
@@ -954,6 +956,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                     BadgesArgs {
                         i: F::from(u64::from(*slot)),
                         claimed: F::from(0),
+                        pk: pk.0,
                     },
                     exec.cb_com_list,
                     &exec.proof,
@@ -1543,6 +1546,8 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 exec,
                 slot,
                 obj_root,
+                account,
+                pk,
             } => {
                 // Reject an out-of-range slot BEFORE anything else: the slot indexes
                 // the badge selector in-circuit, and an unknown value could otherwise
@@ -1569,9 +1574,17 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 // `claimed` is zero on a REQUEST because the badge's value is supplied
                 // by the circuit when the approval flag is absorbed; the request only
                 // names the slot.
+                // ATTRIBUTABLE: the proof shows the requester holds `pk`, and `pk` must be
+                // the key `account` registered at join (the client checks that `account`
+                // sent the request). Without this a member could have another account vouch
+                // for a badge that lands in its own object.
+                if derived.account_pk.get(&f_key(account.0)) != Some(&f_key(pk.0)) {
+                    return Status::Rejected("badge request key is not the requesting account's");
+                }
                 let pub_args = BadgesArgs {
                     i: F::from(*slot as u64),
                     claimed: F::from(0),
+                    pk: pk.0,
                 };
                 let ok = memo_interaction::<OH, _, 1>(
                     &mut self.verify_cache,

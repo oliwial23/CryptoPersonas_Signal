@@ -685,15 +685,18 @@ impl Engine {
     /// lands in your object only after an approval is invoked at a settlement barrier
     /// and you then scan.
     #[napi]
-    pub fn emit_badge_request(&mut self, slot: u32) -> napi::Result<JsEmitted> {
+    pub fn emit_badge_request(&mut self, slot: u32, account: String) -> napi::Result<JsEmitted> {
         self.guard_not_scanning("emit_badge_request")?;
+        // The requesting account (its ACI hex), like a join's: requests are attributable
+        // and must come from the account that registered the member's key.
+        let account = account_from_hex(&account)?;
         if !(1..=3).contains(&slot) {
             return napi::Result::Err(napi::Error::from_reason(
                 "emit_badge_request: slot must be 1 (Faculty), 2 (Student) or 3 (Industry)",
             ));
         }
         {
-            let r = self.inner.emit_badge_request(&mut self.rng, slot as u8);
+            let r = self.inner.emit_badge_request(&mut self.rng, slot as u8, account);
             self.emit(r)
         }
     }
@@ -977,6 +980,10 @@ impl Engine {
             personas_bulletin::replica::record::Record::Join { account, .. } => ("join", account.0),
             personas_bulletin::replica::record::Record::RejoinApprove { account, .. } => {
                 ("rejoin-approve", account.0)
+            }
+            // Attributable like a join: the request must come from the account it names.
+            personas_bulletin::replica::record::Record::BadgeRequest { account, .. } => {
+                ("badge-request", account.0)
             }
             // These name no account, but like a re-join approval they must come from an
             // admin.

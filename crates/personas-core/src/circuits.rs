@@ -239,12 +239,17 @@ pub struct PseudonymArgsRateVar<F: PrimeField> {
 pub struct BadgesArgs<F: PrimeField> {
     pub i: F,
     pub claimed: F,
+    /// The requester's member public key, `PRF_sk(tag_pk)`. The validation logic accepts a
+    /// request only from the account that registered this key at join, so a member cannot
+    /// have someone else's account vouch for a badge that lands in its own object.
+    pub pk: F,
 }
 
 #[derive(Clone)]
 pub struct BadgesArgsVar<F: PrimeField> {
     pub i: FpVar<F>,
     pub claimed: FpVar<F>,
+    pub pk: FpVar<F>,
 }
 
 impl<F: PrimeField> AllocVar<PseudonymArgs<F>, F> for PseudonymArgsVar<F> {
@@ -327,17 +332,18 @@ impl<F: PrimeField> AllocVar<BadgesArgs<F>, F> for BadgesArgsVar<F> {
         let ns = cs.into();
         let cs = ns.cs(); // ConstraintSystemRef<F>
 
-        let BadgesArgs { i, claimed } = *f()?.borrow();
+        let BadgesArgs { i, claimed, pk } = *f()?.borrow();
         Ok(Self {
             i: FpVar::new_variable(cs.clone(), || Ok(i), mode)?,
-            claimed: FpVar::new_variable(cs, || Ok(claimed), mode)?,
+            claimed: FpVar::new_variable(cs.clone(), || Ok(claimed), mode)?,
+            pk: FpVar::new_variable(cs, || Ok(pk), mode)?,
         })
     }
 }
 
 impl<F: PrimeField> ToConstraintField<F> for BadgesArgs<F> {
     fn to_field_elements(&self) -> Option<Vec<F>> {
-        Some(vec![self.i, self.claimed])
+        Some(vec![self.i, self.claimed, self.pk])
     }
 }
 
@@ -366,6 +372,12 @@ pub fn pseudonym_tag() -> F {
 /// Domain tag for rate-limited pseudonyms, `H(sk, tag, context, i)`.
 pub fn rate_pseudonym_tag() -> F {
     string_hash_to_f::<F>("personas prf rate-limited pseudonym")
+}
+
+/// The member public key in-circuit; must match [`crate::persona::member_pk`].
+fn member_pk_zk(sk: &FpVar<F>) -> ArkResult<FpVar<F>> {
+    let tag = FpVar::Constant(member_pk_tag());
+    Poseidon::<2>::hash_in_zk(&[sk.clone(), tag.clone(), tag])
 }
 
 /// `PRF_sk(context)` in-circuit; must match [`crate::persona::pseudonym`].
@@ -478,8 +490,7 @@ pub fn join_pred(
     _priv_args: (),
 ) -> ArkResult<Boolean<F>> {
     bind_public_input(&pub_args.account)?;
-    let tag = FpVar::Constant(member_pk_tag());
-    let pk = Poseidon::<2>::hash_in_zk(&[tu.data.sk.clone(), tag.clone(), tag])?;
+    let pk = member_pk_zk(&tu.data.sk)?;
     let zero = FpVar::Constant(F::from(0u64));
     let committed = User::<F, MsgUser>::commit_in_zk::<Poseidon<2>>(tu.clone())?;
 
@@ -703,6 +714,9 @@ fn standard_badge_request_predicate<'a>(
 
     let index = pub_args.i;
     let claimed = pub_args.claimed;
+    // The request names its requester's public key, which the validation logic ties to the
+    // sending account; see `BadgesArgs::pk`.
+    let owns_pk = member_pk_zk(&tu_new.data.sk)?.is_eq(&pub_args.pk)?;
 
     let is_one = index.is_eq(&FpVar::Constant(F::from(1)))?;
     let is_two = index.is_eq(&FpVar::Constant(F::from(2)))?;
@@ -748,6 +762,7 @@ fn standard_badge_request_predicate<'a>(
         & x8
         & x9
         & tu_old.zk_fields.is_ingest_over.clone()
+        & owns_pk
         & faculty_request_ok
         & student_request_ok
         & industry_request_ok;

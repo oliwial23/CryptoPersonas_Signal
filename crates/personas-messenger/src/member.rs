@@ -408,9 +408,11 @@ impl Member {
         rng: &mut (impl CryptoRng + RngCore),
         obj: &MerkleObjStore<F, OH>,
         slot: u8,
+        account: F,
     ) -> Result<Record, MemberError> {
         self.require_allowance(obj)?;
         let root = obj.root();
+        let pk = personas_core::persona::member_pk(&self.user.data.sk);
         let exec = self
             .user
             .exec_method_create_cb::<H, BadgesArgs<F>, BadgesArgsVar<F>, (), (), Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 1>(
@@ -427,6 +429,7 @@ impl Member {
                     // when the approval's flag is absorbed, so there is nothing
                     // meaningful to claim here.
                     claimed: F::from(0),
+                    pk,
                 },
                 (),
             )?;
@@ -434,6 +437,8 @@ impl Member {
             exec: Ark(exec),
             slot,
             obj_root: Ark(root),
+            account: Ark(account),
+            pk: Ark(pk),
         })
     }
 

@@ -172,16 +172,18 @@ impl PersonaClient {
         let epoch = self.epoch()?;
 
         let i_f = F::from(index);
+        let member_pk = personas_core::persona::member_pk(&user.data.sk);
         let args = BadgesArgs {
             i: i_f,
             claimed: badge,
+            pk: member_pk,
         };
 
         let exec =
             exec_badge_request_standint(&mut user, &mut rng, &self.bul, &pk, epoch, args, ())
                 .map_err(synthesis)?;
 
-        let payload = encode_record_with_inputs(Kind::BadgeRequest, &exec, vec![i_f, badge])?;
+        let payload = encode_record_with_inputs(Kind::BadgeRequest, &exec, vec![i_f, badge, member_pk])?;
 
         self.save_user(&user)?;
         Ok(payload)

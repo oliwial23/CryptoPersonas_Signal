@@ -318,6 +318,12 @@ pub enum Record {
         exec: Ark<PostExec>,
         slot: u8,
         obj_root: Ark<F>,
+        /// The requesting account, like a join's. Requests are attributable: an admin
+        /// vouches for a person, so the client accepts one only from this account.
+        account: Ark<F>,
+        /// The requester's member public key, proved in-circuit; must be the key `account`
+        /// registered at join.
+        pk: Ark<F>,
     },
 
     /// An approval of a badge request, naming the request's envelope hash.
@@ -416,6 +422,7 @@ impl Record {
         !matches!(
             self,
             Record::Join { .. }
+                | Record::BadgeRequest { .. }
                 | Record::RejoinApprove { .. }
                 | Record::Ban { .. }
                 | Record::BadgeApprove { .. }
@@ -589,6 +596,8 @@ pub fn identity(record: &Record) -> Result<Eh, CodecError> {
             exec,
             slot,
             obj_root,
+            account,
+            pk,
         } => {
             h.update([*slot]);
             hash_fields(
@@ -598,6 +607,8 @@ pub fn identity(record: &Record) -> Result<Eh, CodecError> {
                     exec.0.old_nullifier,
                     exec.0.cb_com_list[0],
                     obj_root.0,
+                    account.0,
+                    pk.0,
                 ],
             );
         }

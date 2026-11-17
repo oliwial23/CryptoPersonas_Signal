@@ -787,8 +787,9 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         &mut self,
         rng: &mut (impl CryptoRng + RngCore),
         slot: u8,
+        account: F,
     ) -> Result<Emitted, SendError> {
-        self.emit_spending(|_, settled, member| member.badge_request(rng, settled, slot))
+        self.emit_spending(|_, settled, member| member.badge_request(rng, settled, slot, account))
     }
 
     /// Emit an APPROVAL of a badge request, naming the request's envelope hash.

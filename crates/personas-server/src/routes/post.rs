@@ -564,15 +564,17 @@ pub async fn slack_request_badge(
 
         let mut reader = decode(Kind::BadgeRequest, &input.proof)?;
         let exec: ExecutedMethod<F, Snark, Args, Cr, 1> = reader.pull()?;
-        let inputs = pub_inputs(&mut reader, 2)?;
-        let (index, claimed) = (inputs[0], inputs[1]);
+        let inputs = pub_inputs(&mut reader, 3)?;
+        // `pk` is proved to be the requester's member key. Server-backed joins do not yet
+        // register a key per account, so it is not checked against the requester here.
+        let (index, claimed, pk) = (inputs[0], inputs[1], inputs[2]);
 
         let current = epoch(&st.db);
         let callbacks = verify_and_store(
             &mut st.db,
             &vk,
             exec,
-            BadgesArgs { i: index, claimed },
+            BadgesArgs { i: index, claimed, pk },
             current,
             INTERACTION,
         )

@@ -72,6 +72,7 @@ import {
   ingestTimestampFor,
   startBarrierTicker,
 } from './personasBarrier.preload.ts';
+import { itemStorage } from '../textsecure/Storage.preload.ts';
 
 export {
   PERSONAS_MARKER,
@@ -970,7 +971,15 @@ export function composeBadgeRequest(
   // `encodeBadgeBody`, not the default attributable encoding `emitAndSelfIngest`
   // applies. The marker is the only thing the send splice looks at, so the choice of
   // encoder here IS the choice of whether the requester is named on the wire.
-  return emitBadgeRecord(groupId, engine => engine.emitBadgeRequest(slot));
+  // Sent under our own account, which the request names: an admin vouches for a person.
+  // Same form as personasMembership's ourPersonasAccount (not imported: that module
+  // imports this one).
+  const account = itemStorage.user.getAci()?.replaceAll('-', '').toLowerCase();
+  if (!account) {
+    log.error('composeBadgeRequest: no ACI yet; cannot request a badge');
+    return undefined;
+  }
+  return emitBadgeRecord(groupId, engine => engine.emitBadgeRequest(slot, account));
 }
 
 /** Approve a badge request by its envelope hash (admin action). Phantom-routed. */

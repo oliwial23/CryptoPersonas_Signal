@@ -1282,6 +1282,60 @@ mod e2e {
         assert!(group.replica().log().iter().all(|e| e.eh != eh), "nothing is shown");
     }
 
+    /// A badge request is attributable: it proves the requester's member key, and the
+    /// replica accepts it only when that key is the one the named account joined with. A
+    /// member naming another member's account (to have that account vouch for a badge that
+    /// lands in its own object) is rejected.
+    #[test]
+    #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
+    fn e2e_a_badge_request_must_name_the_requesters_own_account() {
+        use personas_core::circuits::{BadgesArgs, get_badge_request_interaction};
+        let mut rng = StdRng::seed_from_u64(61);
+        let mut keys = keygen(&mut rng);
+        let (req_pk, req_vk): (PK, VK) = get_badge_request_interaction()
+            .generate_keys::<H, Snark, Cr, ObjT>(&mut rng, None, BadgesArgs::default(), false);
+        keys.member.badge_request = req_pk;
+        keys.replica.badge_request = req_vk;
+
+        let transport: Arc<dyn Transport> = Arc::new(MockTransport::new());
+        let conv = ConversationId("badges".into());
+        let mut alice = Msg::new(
+            transport.clone(),
+            conv.clone(),
+            keys.replica.clone(),
+            config(),
+            Some(Member::create(keys.member.clone(), &mut rng)),
+        );
+        let mut bob = Msg::new(
+            transport,
+            conv,
+            keys.replica.clone(),
+            config(),
+            Some(Member::create(keys.member.clone(), &mut rng)),
+        );
+        let (alice_acct, bob_acct) = (acct(), acct());
+        let ja = alice.emit_join(&mut rng, alice_acct).unwrap();
+        deliver(&mut bob, &ja);
+        let jb = bob.emit_join(&mut rng, bob_acct).unwrap();
+        deliver(&mut alice, &jb);
+        settle(&mut [&mut alice, &mut bob]);
+
+        // Alice names Bob's account: the proof is valid, but her key is not Bob's.
+        let forged = alice.emit_badge_request(&mut rng, 1, bob_acct).unwrap();
+        let status = deliver(&mut bob, &forged).unwrap().unwrap();
+        assert!(
+            matches!(status, Status::Rejected(r) if r.contains("not the requesting account")),
+            "a request naming another account is rejected, got {status:?}"
+        );
+        settle(&mut [&mut alice, &mut bob]);
+
+        // Her own account: accepted.
+        let honest = alice.emit_badge_request(&mut rng, 1, alice_acct).unwrap();
+        deliver(&mut bob, &honest);
+        settle(&mut [&mut alice, &mut bob]);
+        assert_eq!(bob.replica().status(&honest.eh), Some(Status::Applied));
+    }
+
     /// Proven joins, one per account, and the admin-approved re-join a reset needs.
     #[test]
     fn e2e_a_late_joiner_catches_up_then_sends_and_receives() {
