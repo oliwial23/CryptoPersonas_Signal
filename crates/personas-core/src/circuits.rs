@@ -284,7 +284,7 @@ pub fn pseudonym_pred(
     bind_public_input(&pub_args.payload)?;
     let context = pub_args.context;
     let claimed = pub_args.claimed;
-    let derived = Poseidon::<2>::hash_in_zk(&[tu.data.sk.clone(), context.clone()])?;
+    let derived = pseudonym_zk(&tu.data.sk, &context)?;
     derived.is_eq(&claimed)
 }
 
@@ -354,6 +354,33 @@ fn bind_public_input(value: &FpVar<F>) -> ArkResult<()> {
 /// or `(sk, context, i)` with `i` below [`MAX_PSEUDO`].
 pub fn member_pk_tag() -> F {
     string_hash_to_f::<F>("personas member public key")
+}
+
+/// Domain tag for persona pseudonyms, `PRF_sk(context) = H(sk, tag, context)`. Every use of
+/// the PRF has its own tag, so a pseudonym can never equal a member's public key or a
+/// rate-limited pseudonym, whatever context an attacker picks.
+pub fn pseudonym_tag() -> F {
+    string_hash_to_f::<F>("personas prf pseudonym")
+}
+
+/// Domain tag for rate-limited pseudonyms, `H(sk, tag, context, i)`.
+pub fn rate_pseudonym_tag() -> F {
+    string_hash_to_f::<F>("personas prf rate-limited pseudonym")
+}
+
+/// `PRF_sk(context)` in-circuit; must match [`crate::persona::pseudonym`].
+fn pseudonym_zk(sk: &FpVar<F>, context: &FpVar<F>) -> ArkResult<FpVar<F>> {
+    Poseidon::<2>::hash_in_zk(&[sk.clone(), FpVar::Constant(pseudonym_tag()), context.clone()])
+}
+
+/// The `i`-th rate-limited pseudonym in-circuit; must match [`crate::persona::pseudonym_rate`].
+fn rate_pseudonym_zk(sk: &FpVar<F>, context: &FpVar<F>, i: &FpVar<F>) -> ArkResult<FpVar<F>> {
+    Poseidon::<2>::hash_in_zk(&[
+        sk.clone(),
+        FpVar::Constant(rate_pseudonym_tag()),
+        context.clone(),
+        i.clone(),
+    ])
 }
 
 /// What a join proves it is for, both public inputs: the joining ACCOUNT and the member's
@@ -598,7 +625,7 @@ fn standard_pseudo_predicate<'a>(
     bind_public_input(&pub_args.payload)?;
     let context = pub_args.context;
     let claimed = pub_args.claimed;
-    let derived = Poseidon::<2>::hash_in_zk(&[tu_new.data.sk.clone(), context.clone()])?;
+    let derived = pseudonym_zk(&tu_new.data.sk, &context)?;
     let x9 = derived.is_eq(&claimed)?;
     let x10 = tu_old.zk_fields.is_ingest_over.clone();
 
@@ -644,7 +671,7 @@ fn standard_pseudo_rate_predicate<'a>(
     }
     let x9 = vanishing.is_zero()?;
 
-    let derived = Poseidon::<2>::hash_in_zk(&[tu_new.data.sk.clone(), context, i])?;
+    let derived = rate_pseudonym_zk(&tu_new.data.sk, &context, &i)?;
     let x10 = derived.is_eq(&claimed)?;
     let x11 = tu_old.zk_fields.is_ingest_over.clone();
 
@@ -1068,7 +1095,7 @@ fn persona_post_checks(
     post: &PseudonymArgsVar<F>,
 ) -> ArkResult<Boolean<F>> {
     bind_public_input(&post.payload)?;
-    let derived = Poseidon::<2>::hash_in_zk(&[tu_new.data.sk.clone(), post.context.clone()])?;
+    let derived = pseudonym_zk(&tu_new.data.sk, &post.context)?;
     Boolean::kary_and(&[
         tu_new.data.num_interactions_since_last_scan.is_eq(
             &(tu_old.data.num_interactions_since_last_scan.clone() + FpVar::Constant(F::from(1))),
@@ -1146,7 +1173,7 @@ fn merge_personas_predicate<'a>(
     _priv: (),
 ) -> ArkResult<Boolean<F>> {
     let base = persona_post_checks(tu_old, tu_new, &args.post)?;
-    let derived = Poseidon::<2>::hash_in_zk(&[tu_new.data.sk.clone(), args.a.clone()])?;
+    let derived = pseudonym_zk(&tu_new.data.sk, &args.a)?;
     Ok(base & derived.is_eq(&args.b)?)
 }
 
@@ -1741,7 +1768,7 @@ mod rate_limit_circuit_tests {
         let mut new = old.clone();
         new.data.num_interactions_since_last_scan += F::from(1u64);
         let context = F::from(4242u64);
-        let claimed = <Poseidon<2>>::hash(&[old.data.sk, context, F::from(i)]);
+        let claimed = crate::persona::pseudonym_rate(&old.data.sk, &context, &F::from(i));
 
         let cs = ConstraintSystem::<F>::new_ref();
         let old_var = UserVar::new_witness(cs.clone(), || Ok(old)).unwrap();

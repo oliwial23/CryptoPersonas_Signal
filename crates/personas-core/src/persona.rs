@@ -1,6 +1,6 @@
 //! Persona derivation and rendering.
 //!
-//! A *pseudonym* is a field element `claimed = H(sk, context)` (see
+//! A *pseudonym* is a field element `claimed = H(sk, tag, context)` (see
 //! [`circuits::pseudonym_pred`](crate::circuits::pseudonym_pred)). Everything a human
 //! sees — the two-word petname on a message — is derived deterministically from that
 //! field element here, so client and server always agree on what to call a persona
@@ -17,19 +17,21 @@ use crate::{F, H};
 /// Shown when a pseudonym cannot be rendered (an empty petname word list).
 pub const ANONYMOUS: &str = "anonymous user";
 
-/// The pseudonym for `context` under secret key `sk`: `H(sk, context)`.
+/// The pseudonym for `context` under secret key `sk`: `PRF_sk(context) = H(sk, tag, context)`,
+/// with the pseudonym domain tag ([`pseudonym_tag`](crate::circuits::pseudonym_tag)).
 ///
-/// This is the same hash the `pseudonym_pred` circuit enforces, so a persona derived
-/// here is exactly the one a proof will bind to.
+/// This is the same hash the circuits enforce, so a persona derived here is exactly the one a
+/// proof will bind to.
 pub fn pseudonym(sk: &F, context: &F) -> F {
-    H::hash(&[*sk, *context])
+    H::hash(&[*sk, crate::circuits::pseudonym_tag(), *context])
 }
 
-/// The `i`-th rate-limited pseudonym for `context` under secret key `sk`: `H(sk, context, i)`.
+/// The `i`-th rate-limited pseudonym for `context` under secret key `sk`:
+/// `H(sk, tag, context, i)`, with its own domain tag.
 ///
 /// Matches `standard_pseudo_rate_predicate`; the replica allows `i < RATE_LIMITED_PERSONAS_PER_CONTEXT` (3).
 pub fn pseudonym_rate(sk: &F, context: &F, i: &F) -> F {
-    H::hash(&[*sk, *context, *i])
+    H::hash(&[*sk, crate::circuits::rate_pseudonym_tag(), *context, *i])
 }
 
 /// Bind the transport and ballot choice to a server-backed vote proof.
