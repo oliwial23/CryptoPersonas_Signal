@@ -161,16 +161,24 @@ async fn redeem_post(
         ));
     }
     let key = hex::encode(redemption_key(&request.redemption));
-    if !st.privpass.spent.mark_spent(key)? {
+    if st.privpass.spent.contains(&key) {
         return Err(AppError::Rejected(
             "this ticket has already been redeemed".into(),
         ));
     }
+    // The check, as for a proved post: the cryptography and the double-spend lookup. The
+    // durable write that follows is the server's storage, timed in the round trip.
     let millis = start
         .elapsed()
         .map(|d| d.as_secs_f64() * 1e3)
         .unwrap_or_default();
     bench::verified("pp_redeem", start, millis);
+    // Still under the write lock, so no concurrent redemption of the same ticket slips in.
+    if !st.privpass.spent.mark_spent(key)? {
+        return Err(AppError::Rejected(
+            "this ticket has already been redeemed".into(),
+        ));
+    }
     drop(st);
 
     let mut msg = Outgoing::new(ConversationId(request.channel), request.message);

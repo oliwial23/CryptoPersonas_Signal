@@ -43,10 +43,13 @@ pub struct RecordLog {
 impl RecordLog {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        Ok(Self {
-            rows: read_jsonl(&path)?,
-            path,
-        })
+        let rows: Vec<Record> = read_jsonl(&path)?;
+        // Rewrite once at start-up, so a line torn by a crash mid-append is dropped and the
+        // next append starts on a fresh line (`append_jsonl`).
+        if path.exists() {
+            write_jsonl(&path, &rows)?;
+        }
+        Ok(Self { rows, path })
     }
 
     /// File the callback a poster committed to under the id their message was given.
@@ -58,13 +61,20 @@ impl RecordLog {
     /// its own — silently attributing one member's callback to another member's message. And
     /// a concurrent post could interleave between the append and the rewrite. Recording only
     /// once the id exists makes both impossible.
+    ///
+    /// Appended, not rewritten, and not forced to disk before the post is acknowledged: a
+    /// forced write here doubled the cost of a ticketed post. The cost is that a crash in
+    /// the moment after a post can lose its row, and with it the means to moderate that one
+    /// post; the operating system writes it out within seconds.
     pub fn record(&mut self, id: &MessageId, cb_hex: String) -> Result<()> {
-        self.rows.push(Record {
+        let row = Record {
             id: id.0.clone(),
             cb: cb_hex,
             reputation: 0,
-        });
-        self.flush()
+        };
+        append_jsonl(&self.path, &row, false)?;
+        self.rows.push(row);
+        Ok(())
     }
 
     /// Rate a message. Ratings clamp at zero: reputation is a field element compared against
@@ -488,6 +498,11 @@ impl SpentTicketLog {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         let rows: Vec<String> = read_jsonl(&path)?;
+        // Rewrite once at start-up, so a line torn by a crash mid-append is dropped and the
+        // next append starts on a fresh line (`append_jsonl`).
+        if path.exists() {
+            write_jsonl(&path, &rows)?;
+        }
         Ok(Self {
             spent: rows.into_iter().collect(),
             path,
@@ -500,12 +515,16 @@ impl SpentTicketLog {
         self.spent.contains(key)
     }
 
+    ///
+    /// Durable: the line is on disk before this returns, so a ticket redeemed just before a
+    /// crash cannot be redeemed again after it. One appended line, not a rewrite, since the
+    /// set grows with every ticket ever redeemed.
     pub fn mark_spent(&mut self, key: String) -> Result<bool> {
-        if !self.spent.insert(key) {
+        if self.spent.contains(&key) {
             return Ok(false);
         }
-        let rows: Vec<&String> = self.spent.iter().collect();
-        write_jsonl(&self.path, &rows)?;
+        append_jsonl(&self.path, &key, true)?;
+        self.spent.insert(key);
         Ok(true)
     }
 }
@@ -587,6 +606,25 @@ impl RotationLog {
     }
 }
 
+/// Append one row to a JSON-lines file, forcing it to disk first if `durable`. The file
+/// must end with a newline, which `write_jsonl` and every append leave it with (each
+/// ledger rewrites itself once at start-up to drop a line torn by a crash).
+fn append_jsonl<T: Serialize>(path: &Path, row: &T, durable: bool) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("could not append to {}", path.display()))?;
+    file.write_all(format!("{}\n", serde_json::to_string(row)?).as_bytes())?;
+    if durable {
+        file.sync_data()?;
+    }
+    Ok(())
+}
+
 fn write_jsonl<T: Serialize>(path: &Path, rows: &[T]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -621,6 +659,40 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn spent_tickets_survive_a_restart_and_a_torn_line() {
+        let path = temp_dir().join("spent.jsonl");
+        let mut log = SpentTicketLog::open(&path).unwrap();
+        assert!(log.mark_spent("a".into()).unwrap());
+        assert!(!log.mark_spent("a".into()).unwrap(), "a replay is refused");
+        assert!(log.mark_spent("b".into()).unwrap());
+
+        // A crash mid-append leaves a torn last line.
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap()
+            .write_all(b"\"tor").unwrap();
+        let mut log = SpentTicketLog::open(&path).unwrap();
+        assert!(log.contains("a") && log.contains("b"), "both survive the restart");
+        assert!(!log.mark_spent("b".into()).unwrap());
+        // The next append is not swallowed by the torn line.
+        assert!(log.mark_spent("c".into()).unwrap());
+        let log = SpentTicketLog::open(&path).unwrap();
+        assert!(log.contains("c"));
+    }
+
+    #[test]
+    fn appended_records_survive_a_restart() {
+        let path = temp_dir().join("records-append.jsonl");
+        let mut log = RecordLog::open(&path).unwrap();
+        log.record(&MessageId::from(1u64), "cb1".into()).unwrap();
+        log.record(&MessageId::from(2u64), "cb2".into()).unwrap();
+        log.rate(&MessageId::from(1u64), 1).unwrap();
+        log.record(&MessageId::from(3u64), "cb3".into()).unwrap();
+        let log = RecordLog::open(&path).unwrap();
+        assert_eq!(log.rows.len(), 3);
+        assert_eq!(log.rows[0].reputation, 1);
+        assert_eq!(log.rows[2].cb, "cb3");
     }
 
     #[test]
