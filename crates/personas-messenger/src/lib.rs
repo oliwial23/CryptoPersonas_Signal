@@ -342,13 +342,16 @@ impl<const OH: usize, const MH: usize, const NH: usize> Messenger<OH, MH, NH> {
         })
     }
 
-    /// Whether a scan would absorb anything now ([`Member::scan_needed`]).
+    /// Whether a scan can and should be made now: the epoch's scan is due, or a sweep is
+    /// under way and must be finished.
+    ///
+    /// Nothing else: a sweep may start only once per epoch, at its start (the scan proves
+    /// `ep < t`), so an invoked callback or a member near its cap waits for the next
+    /// epoch's scan. ([`Member::scan_needed`] is the pre-epoch rule, which asked for a scan
+    /// in those cases too; mid-epoch that scan cannot be proved.)
     pub fn scan_needed(&self) -> bool {
         self.epoch_scan_needed()
-            || self
-                .member
-                .as_ref()
-                .is_some_and(|m| m.scan_needed(self.replica.callback_store()))
+            || self.member.as_ref().is_some_and(|m| m.user.is_scanning())
     }
 
     /// Scans left in the sweep in progress ([`Member::sweep_remaining`]).

@@ -671,8 +671,12 @@ export async function ensureReadyForPersonaAction(
   if (!(await ensureReadyForUnprovenRecord(conversation))) {
     return false;
   }
+  // A sweep under way must finish, and so must the epoch's scan if a new epoch began
+  // before the scheduler made it: every proof names the epoch, and the engine refuses to
+  // prove anything until the object is brought up to it.
+  const engine = getPersonasEngine(groupIdOf(conversation));
   if (
-    getPersonasEngine(groupIdOf(conversation))?.isScanning() &&
+    (engine?.isScanning() || engine?.epochScanNeeded?.()) &&
     !(await drainPersonaScans(conversation))
   ) {
     return false;

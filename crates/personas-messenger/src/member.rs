@@ -76,6 +76,10 @@ pub enum MemberError {
     SweepUnderway,
     #[error("this member has used its interactions and must finish a scan first")]
     ScanRequired,
+    /// A new epoch has begun and this member has not made its epoch scan yet. Every
+    /// interaction proves `ep = t`, so nothing else can be proved until it does.
+    #[error("a new epoch has begun: this member must make its epoch scan first")]
+    EpochScanDue,
     /// Groth16 proving failed.
     #[error("proof generation failed: {0}")]
     Proof(#[from] SynthesisError),
@@ -884,6 +888,9 @@ impl Member {
         obj: &MerkleObjStore<F, OH>,
     ) -> Result<(), MemberError> {
         self.require_member(obj)?;
+        if self.epoch_scan_needed(self.epoch) {
+            return Err(MemberError::EpochScanDue);
+        }
         if self.scan_required() {
             return Err(MemberError::ScanRequired);
         }
