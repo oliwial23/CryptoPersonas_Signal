@@ -7,9 +7,9 @@
 //! other state, and accepts a different key only if the server's public, append-only
 //! rotation log explains every rotation since: at most one per epoch boundary, none ahead
 //! of the published schedule, and each ban rotation tied to its own call in the public
-//! callback bulletin, made in that epoch. (The bulletin holds each call's argument
-//! encrypted to the ticket's owner, so a client sees that a call was made, not that it
-//! was a ban.) Every member fetches the same log, so a key served to only some of them is
+//! callback bulletin, made in that epoch, and signed by the group admin. (The bulletin
+//! holds each call's argument encrypted to the ticket's owner, so it shows that a call was
+//! made, not that it was a ban; the admin's signature is what shows it was.) Every member fetches the same log, so a key served to only some of them is
 //! one the log cannot explain to the rest.
 //!
 //! The epoch itself is checked the same way: the server publishes its schedule with the
@@ -19,6 +19,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use personas_core::moderation::{AdminPk, verify_ban};
 use personas_core::schedule::{BanRef, EpochSchedule, RotationEntry, RotationReason};
 
 /// How far apart the client's clock and the server's may be, in seconds. Near a boundary
@@ -94,7 +95,8 @@ pub fn pin_schedule(path: &Path, served: EpochSchedule) -> Result<()> {
 /// - The log must be well formed: consecutive `seq` from 0, a genesis entry first and only
 ///   there, at most one epoch rotation per epoch and in increasing order, none ahead of
 ///   the schedule (by this client's clock, allowing skew), and every ban rotation in the
-///   epoch of the turn before it, each citing a different bulletin entry.
+///   epoch of the turn before it, each citing a different bulletin entry and carrying the
+///   group admin's signature on a ban of that ticket in that epoch (`admin_pk`).
 /// - Every rotation after `last_accepted` that is a ban must cite a call `ban_is_public`
 ///   finds in the public callback bulletin (its arguments: the reference and the
 ///   rotation's epoch).
@@ -107,6 +109,7 @@ pub fn check_rotations(
     served: &str,
     log: &[RotationEntry],
     schedule: &EpochSchedule,
+    admin_pk: Option<&AdminPk>,
     now: u64,
     mut ban_is_public: impl FnMut(&BanRef, u64) -> Result<bool>,
 ) -> Result<()> {
@@ -167,6 +170,16 @@ pub fn check_rotations(
                 if !cited.insert(ban.index) {
                     bail!("ban rotation {n} cites a ban an earlier rotation already cited");
                 }
+                // The admin must have signed a ban of this ticket in this epoch; the server
+                // cannot make that signature, so it cannot invent a ban to rotate on.
+                let admin_pk = admin_pk.ok_or_else(|| {
+                    anyhow!(
+                        "rotation {n} is a ban, but this client knows no group admin key to \
+                         check it against (set PERSONAS_ADMIN_PK)"
+                    )
+                })?;
+                verify_ban(admin_pk, &ban.ticket, entry.epoch, &ban.signature)
+                    .map_err(|e| anyhow!("ban rotation {n}: {e}"))?;
             }
         }
     }
@@ -205,6 +218,13 @@ pub fn check_rotations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use personas_core::moderation::{parse_admin_pk, parse_admin_sk, sign_ban};
+
+    const ADMIN_SK: &str = "0707070707070707070707070707070707070707070707070707070707070707";
+
+    fn admin() -> AdminPk {
+        parse_admin_sk(ADMIN_SK).unwrap().verifying_key()
+    }
 
     const SCHEDULE: EpochSchedule = EpochSchedule { start: 1_000, length: 100 };
     /// Epoch 5, well inside it.
@@ -214,6 +234,7 @@ mod tests {
         let ban = (reason == RotationReason::Ban).then(|| BanRef {
             index: seq,
             ticket: format!("t{seq}"),
+            signature: sign_ban(&parse_admin_sk(ADMIN_SK).unwrap(), &format!("t{seq}"), epoch),
         });
         RotationEntry { seq, epoch, reason, ban, pubkey: key.into() }
     }
@@ -238,7 +259,7 @@ mod tests {
     fn accepts_a_valid_sequence() {
         let log = valid_log();
         let mut checked = Vec::new();
-        check_rotations(Some("k0"), "k4", &log, &SCHEDULE, NOW, |ban, epoch| {
+        check_rotations(Some("k0"), "k4", &log, &SCHEDULE, Some(&admin()), NOW, |ban, epoch| {
             checked.push((ban.index, epoch));
             Ok(true)
         })
@@ -246,15 +267,15 @@ mod tests {
         // Both bans since k0 were checked against public state, in their epochs.
         assert_eq!(checked, vec![(1, 2), (4, 5)]);
         // First use, and an unchanged key, need no ban lookups.
-        check_rotations(None, "k4", &log, &SCHEDULE, NOW, |_, _| unreachable!()).unwrap();
-        check_rotations(Some("k4"), "k4", &log, &SCHEDULE, NOW, |_, _| unreachable!()).unwrap();
+        check_rotations(None, "k4", &log, &SCHEDULE, Some(&admin()), NOW, |_, _| unreachable!()).unwrap();
+        check_rotations(Some("k4"), "k4", &log, &SCHEDULE, Some(&admin()), NOW, |_, _| unreachable!()).unwrap();
     }
 
     #[test]
     fn rejects_an_unexplained_extra_rotation() {
         // A ban rotation whose ban is not in the public bulletin.
         let log = valid_log();
-        let err = check_rotations(Some("k2"), "k4", &log, &SCHEDULE, NOW, |ban, _| {
+        let err = check_rotations(Some("k2"), "k4", &log, &SCHEDULE, Some(&admin()), NOW, |ban, _| {
             Ok(ban.index != 4)
         })
         .unwrap_err();
@@ -263,34 +284,62 @@ mod tests {
         // A rotation that claims to be a ban but cites nothing.
         let mut log = valid_log();
         log[4].ban = None;
-        assert!(check_rotations(Some("k2"), "k4", &log, &SCHEDULE, NOW, all_bans_public).is_err());
+        assert!(check_rotations(Some("k2"), "k4", &log, &SCHEDULE, Some(&admin()), NOW, all_bans_public).is_err());
 
         // An epoch rotation ahead of the schedule.
         let mut log = valid_log();
         log.push(entry(5, 6, RotationReason::Epoch, "k5"));
         let err =
-            check_rotations(Some("k4"), "k5", &log, &SCHEDULE, NOW, all_bans_public).unwrap_err();
+            check_rotations(Some("k4"), "k5", &log, &SCHEDULE, Some(&admin()), NOW, all_bans_public).unwrap_err();
         assert!(err.to_string().contains("ahead of the schedule"), "{err}");
 
         // A second genesis.
         let mut log = valid_log();
         log.push(entry(5, 5, RotationReason::Genesis, "k5"));
-        assert!(check_rotations(Some("k4"), "k5", &log, &SCHEDULE, NOW, all_bans_public).is_err());
+        assert!(check_rotations(Some("k4"), "k5", &log, &SCHEDULE, Some(&admin()), NOW, all_bans_public).is_err());
 
         // A log rewritten so the key this client accepted is gone.
         assert!(
-            check_rotations(Some("kX"), "k4", &valid_log(), &SCHEDULE, NOW, all_bans_public)
+            check_rotations(Some("kX"), "k4", &valid_log(), &SCHEDULE, Some(&admin()), NOW, all_bans_public)
                 .is_err()
         );
     }
 
     #[test]
+    fn rejects_a_ban_the_admin_did_not_sign() {
+        // Signed by someone else.
+        let mut log = valid_log();
+        let other = parse_admin_sk(&"08".repeat(32)).unwrap();
+        log[4].ban.as_mut().unwrap().signature = sign_ban(&other, "t4", 5);
+        let err = check_rotations(Some("k2"), "k4", &log, &SCHEDULE, Some(&admin()), NOW, all_bans_public)
+            .unwrap_err();
+        assert!(err.to_string().contains("not signed by the group admin"), "{err}");
+
+        // The admin's signature on this ticket, but for another epoch: no replay.
+        let mut log = valid_log();
+        log[4].ban.as_mut().unwrap().signature =
+            sign_ban(&parse_admin_sk(ADMIN_SK).unwrap(), "t4", 4);
+        assert!(check_rotations(Some("k2"), "k4", &log, &SCHEDULE, Some(&admin()), NOW, all_bans_public).is_err());
+
+        // The admin's signature on another ticket.
+        let mut log = valid_log();
+        log[4].ban.as_mut().unwrap().signature = log[1].ban.as_ref().unwrap().signature.clone();
+        assert!(check_rotations(Some("k2"), "k4", &log, &SCHEDULE, Some(&admin()), NOW, all_bans_public).is_err());
+
+        // No admin key known: a log with bans is refused, even on first use.
+        let err = check_rotations(None, "k4", &valid_log(), &SCHEDULE, None, NOW, all_bans_public)
+            .unwrap_err();
+        assert!(err.to_string().contains("no group admin key"), "{err}");
+        let _ = parse_admin_pk;
+    }
+
+    #[test]
     fn rejects_a_key_that_is_not_the_logs_last_entry() {
-        let err = check_rotations(Some("k0"), "k3", &valid_log(), &SCHEDULE, NOW, all_bans_public)
+        let err = check_rotations(Some("k0"), "k3", &valid_log(), &SCHEDULE, Some(&admin()), NOW, all_bans_public)
             .unwrap_err();
         assert!(err.to_string().contains("not the last key"), "{err}");
         // Even on first use.
-        assert!(check_rotations(None, "kX", &valid_log(), &SCHEDULE, NOW, all_bans_public).is_err());
+        assert!(check_rotations(None, "kX", &valid_log(), &SCHEDULE, Some(&admin()), NOW, all_bans_public).is_err());
     }
 
     #[test]
@@ -298,7 +347,7 @@ mod tests {
         let mut log = valid_log();
         log.push(entry(5, 5, RotationReason::Epoch, "k5"));
         let err =
-            check_rotations(Some("k4"), "k5", &log, &SCHEDULE, NOW, all_bans_public).unwrap_err();
+            check_rotations(Some("k4"), "k5", &log, &SCHEDULE, Some(&admin()), NOW, all_bans_public).unwrap_err();
         assert!(err.to_string().contains("at most one epoch rotation"), "{err}");
     }
 

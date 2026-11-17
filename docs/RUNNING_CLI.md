@@ -102,7 +102,8 @@ posting to the server, and persists updated state (`user.bin`, logs) to
 ./target/release/personas "${P[@]}" count-votes -g "C123" --vote-id <id>            # [both]  tally a poll
 
 ./target/release/personas "${P[@]}" ban-poll -g "1" -t <message-timestamp>          # [both]  open a ban poll against a message
-./target/release/personas "${P[@]}" ban -t <message-timestamp>                      # [both]  invoke the ban callback the poster committed to (after the poll passes)
+./target/release/personas admin-keygen --out <admin-key-file>                         # [both]  make the group admin key pair; give the server PERSONAS_ADMIN_PK=<printed key>
+PERSONAS_ADMIN_KEY_FILE=<admin-key-file> ./target/release/personas "${P[@]}" ban -t <message-timestamp>   # [both]  admin only: invoke the ban callback the poster committed to (signed; after the poll passes)
 ```
 
 #### Reputation

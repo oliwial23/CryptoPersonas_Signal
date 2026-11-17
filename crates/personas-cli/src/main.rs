@@ -87,3 +87,27 @@ pub(crate) async fn show(res: reqwest::Response) -> Result<()> {
     println!("Server responded: {}", res.text().await?);
     Ok(())
 }
+
+/// `admin-keygen`: write a fresh group admin secret key to `out` (owner-only) and print the
+/// public key. Refuses to overwrite an existing file, so a key in use is never lost.
+fn admin_keygen(out: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let (secret, public) = personas_core::moderation::generate_admin_key();
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(out)
+        .with_context(|| format!("could not create {} (it must not exist yet)", out.display()))?;
+    writeln!(file, "{secret}")?;
+    println!("wrote the admin secret key to {}", out.display());
+    println!("admin public key: {public}");
+    println!("server:       PERSONAS_ADMIN_PK={public}");
+    println!("admin client: PERSONAS_ADMIN_KEY_FILE={}", out.display());
+    Ok(())
+}

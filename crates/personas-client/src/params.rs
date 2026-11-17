@@ -10,6 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+use personas_core::moderation::AdminPk;
 use personas_core::schedule::{BanRef, RotationEntry, now_unix};
 use personas_core::{Args, CStore, Cr, F, PK, circuits::NP};
 use zk_callbacks::generic::bulletin::PublicCallbackBul;
@@ -228,12 +229,14 @@ impl PersonaClient {
                 .json()
                 .context("server returned a malformed key rotation log")?;
             let schedule = self.epoch_schedule()?;
+            let admin_pk = self.admin_pk()?;
             let mut bulletin = None;
             rotation::check_rotations(
                 accepted.as_deref(),
                 &served,
                 &log,
                 &schedule,
+                admin_pk.as_ref(),
                 now_unix(),
                 |ban, epoch| {
                     let bulletin = bulletin.get_or_insert_with(|| self.callback_bulletin());
@@ -250,6 +253,66 @@ impl PersonaClient {
 
         ark_grumpkin::Projective::deserialize_with_mode(bytes.as_slice(), Compress::No, Validate::No)
             .with_context(|| format!("server returned an undecodable parameter for {route}"))
+    }
+
+    /// The group admin's public key, which every ban must be signed with.
+    ///
+    /// `PERSONAS_ADMIN_PK`, if set, is the key, configured out of band, and a server that
+    /// publishes a different one is refused. Otherwise the key the server publishes
+    /// (`/api/admin_key`) is pinned the first time this client sees one, and a server that
+    /// later publishes a different key is refused. `None` if neither names a key.
+    pub fn admin_pk(&self) -> anyhow::Result<Option<AdminPk>> {
+        use anyhow::{Context, anyhow, bail};
+
+        #[derive(serde::Deserialize)]
+        struct AdminKeyResponse {
+            admin_pk: Option<String>,
+        }
+        let served = self
+            .bul
+            .client
+            .get(self.cfg.url("api/admin_key")?)
+            .timeout(FETCH_TIMEOUT)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .context("failed to fetch the group admin key")?
+            .json::<AdminKeyResponse>()
+            .context("server returned a malformed admin key")?
+            .admin_pk
+            .map(|k| k.trim().to_lowercase());
+
+        let configured = std::env::var("PERSONAS_ADMIN_PK")
+            .ok()
+            .map(|k| k.trim().to_lowercase())
+            .filter(|k| !k.is_empty());
+        let path = self.cfg.admin_key();
+        let pinned = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text.trim().to_lowercase()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+
+        let trusted = configured.or(pinned.clone());
+        let key = match (&trusted, &served) {
+            (Some(t), Some(s)) if t != s => bail!(
+                "the server's group admin key ({s}) is not the one this client trusts ({t}); \
+                 refusing it. If the admin key really changed, remove {}",
+                path.display()
+            ),
+            (Some(t), _) => t.clone(),
+            (None, Some(s)) => s.clone(),
+            (None, None) => return Ok(None),
+        };
+        if pinned.is_none() {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&path, &key)
+                .with_context(|| format!("could not write {}", path.display()))?;
+        }
+        personas_core::moderation::parse_admin_pk(&key)
+            .map(Some)
+            .map_err(|e| anyhow!("{e}"))
     }
 
     /// The public callback bulletin: every callback invoked so far, with its (encrypted)

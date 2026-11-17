@@ -101,10 +101,27 @@ async fn main() -> Result<()> {
         slack.name()
     );
 
+    // Bans must be signed by the group admin; with no admin key every ban is refused.
+    let admin_pk = match cfg.server.admin_pk.as_deref() {
+        Some(pk) => {
+            let pk = personas_core::moderation::parse_admin_pk(pk)
+                .map_err(|e| anyhow::anyhow!("PERSONAS_ADMIN_PK: {e}"))?;
+            info!("bans need the admin key {}", hex::encode(pk.to_bytes()));
+            Some(pk)
+        }
+        None => {
+            tracing::warn!(
+                "no PERSONAS_ADMIN_PK: bans are disabled (each must be signed by the group admin)"
+            );
+            None
+        }
+    };
+
     let state = Arc::new(RwLock::new(ServerState::new(
         &data_dir,
         db,
         schedule,
+        admin_pk,
         artifacts.keys,
         artifacts.folding,
         signal,

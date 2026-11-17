@@ -353,6 +353,8 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
             sync_badges(personas);
         }
 
+        Command::AdminKeygen { out } => crate::admin_keygen(&out)?,
+
         Command::UpdateEpoch => {
             let pc = personas.clone();
             let epoch = spawn_blocking(move || {

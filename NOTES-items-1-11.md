@@ -192,15 +192,25 @@ issues, both fixed in the last commit:
 
 ## Open questions for the maintainer
 
-1. **Ban references cannot prove "this was a ban".** The callback bulletin stores each
-   call's argument encrypted to the ticket's owner (`Cr = NoSigOTP`). A client can verify
-   that a ban rotation cites a real call on the named ticket, made in that epoch, and not
-   cited before. It cannot verify the call was a ban rather than, say, a reputation call. So
-   the server can rotate at most once per public callback invocation, not "only on bans".
-   Possible fixes:
-   - Publish bans in a separate public list (say so in the paper).
-   - Have the ban route take a public ban-poll result and cite it.
-   - Accept the bound as is.
+1. **Ban references cannot prove "this was a ban".** *Resolved after review: bans are now
+   signed by the group admin.* The callback bulletin stores each call's argument encrypted
+   to the ticket's owner, so a bulletin entry alone could not show a call was a ban; the
+   server could have rotated once per public callback invocation (ratings included). Now:
+   - The admin makes an Ed25519 key pair (`personas admin-keygen --out <file>`). The server
+     gets the public key (`PERSONAS_ADMIN_PK`) and publishes it at `/api/admin_key`; the
+     admin's client signs with the secret (`PERSONAS_ADMIN_KEY_FILE`).
+   - `/api/ban` refuses a request without the admin's signature over
+     `("personas/ban/v1", epoch, ticket)` (`personas_core::moderation`). Before this the
+     route had no authentication at all: anyone could fetch a message's callback from
+     `/api/cb` and ban its author.
+   - The ban rotation's `BanRef` carries the signature. Clients pin the admin key
+     (`PERSONAS_ADMIN_PK` if set, else the first one the server publishes) and check every
+     ban rotation in the log against it: right ticket, right epoch, admin's key.
+   - So the issuer key rotates only on the published schedule or on a ban the admin
+     signed; the server alone cannot add a rotation.
+   - Checked live: an unsigned ban and a ban signed with another key got 403, the admin's
+     ban went through, a member accepted the post-ban key after checking the signature,
+     and a client trusting a different admin key refused the server.
 2. **Restarts and old bans.** The bulletin is not persisted (A1), but the rotation log is.
    A client whose last accepted key predates a restart, with a ban rotation in between,
    will find that ban's entry gone and refuse the key. Its object is gone too (A1), so it

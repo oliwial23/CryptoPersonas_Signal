@@ -85,6 +85,10 @@ pub struct ServerConfig {
     pub epoch_start: Option<String>,
     /// Seconds per epoch; a day by default. `PERSONAS_EPOCH_SECS`.
     pub epoch_secs: u64,
+    /// The group admin's Ed25519 public key, as hex. Bans must carry its signature
+    /// (`personas_core::moderation`); with none configured the server refuses every ban.
+    /// `PERSONAS_ADMIN_PK`.
+    pub admin_pk: Option<String>,
 }
 
 /// The default epoch length: a day, as the analyzed protocol uses.
@@ -117,6 +121,7 @@ impl Default for ServerConfig {
             data_dir: PathBuf::from(DEFAULT_SERVER_DATA_DIR),
             epoch_start: None,
             epoch_secs: DEFAULT_EPOCH_SECS,
+            admin_pk: None,
         }
     }
 }
@@ -298,6 +303,9 @@ impl Config {
         if let Some(v) = env_opt("PERSONAS_EPOCH_SECS") {
             self.server.epoch_secs = parse_env("PERSONAS_EPOCH_SECS", &v)?;
         }
+        if let Some(v) = env_opt("PERSONAS_ADMIN_PK") {
+            self.server.admin_pk = Some(v);
+        }
         if env_opt("PERSONAS_TRANSPORT").as_deref() == Some("mock") {
             self.transport.force_mock = true;
         }
@@ -326,6 +334,13 @@ impl Config {
             return Err(ConfigError::Invalid("epoch_secs must be at least 1".into()));
         }
         self.server.epoch_start_unix()?;
+        if let Some(pk) = &self.server.admin_pk
+            && (pk.trim().len() != 64 || !pk.trim().bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(ConfigError::Invalid(
+                "admin_pk must be 32 bytes of hex (an Ed25519 public key)".into(),
+            ));
+        }
         if self.mode == Mode::Serverless {
             return Err(ConfigError::Invalid(
                 "mode=serverless is not implemented yet (workstream d); use mode=service".into(),

@@ -29,6 +29,10 @@ pub enum AppError {
     #[error("{0}")]
     NotFound(String),
 
+    /// The caller may not do this: a ban without the group admin's signature.
+    #[error("{0}")]
+    Forbidden(String),
+
     /// The messenger refused or was unreachable. The proof was fine and the bulletin has
     /// already been appended to; what failed is delivery.
     #[error("could not deliver the message: {0}")]
@@ -44,6 +48,7 @@ impl AppError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Rejected(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Transport(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

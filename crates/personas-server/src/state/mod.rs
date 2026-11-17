@@ -32,6 +32,7 @@ use anyhow::Result;
 use personas_core::Store;
 use personas_core::params::{FoldingParams, ServerKeys};
 use personas_core::privpass::{IssuerKeys, TicketKeys};
+use personas_core::moderation::AdminPk;
 use personas_core::schedule::EpochSchedule;
 
 use transport_api::Transport;
@@ -71,6 +72,9 @@ pub struct ServerState {
     pub db: Store,
     /// The public schedule the epoch turns on (`crate::epoch`).
     pub schedule: EpochSchedule,
+    /// The group admin's key: every ban must carry its signature
+    /// (`personas_core::moderation`). `None` refuses every ban.
+    pub admin_pk: Option<AdminPk>,
     pub keys: ServerKeys,
     pub folding_keys: FoldingParams,
 
@@ -119,6 +123,7 @@ impl ServerState {
         data_dir: &Path,
         db: Store,
         schedule: EpochSchedule,
+        admin_pk: Option<AdminPk>,
         keys: ServerKeys,
         folding_keys: FoldingParams,
         signal: Arc<dyn Transport>,
@@ -131,6 +136,7 @@ impl ServerState {
         Ok(Self {
             db,
             schedule,
+            admin_pk,
             keys,
             folding_keys,
             signal: Channel {

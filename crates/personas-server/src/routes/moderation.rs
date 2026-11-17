@@ -11,11 +11,12 @@
 //! So a ban is not the server reaching into a member's object. It is the server redeeming a
 //! token the member gave it when they posted.
 
-use ark_serialize::{CanonicalSerialize, Compress};
 use axum::body::Bytes;
 use axum::extract::{Json, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use personas_core::circuits::{BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, arg_rep};
+use personas_core::moderation;
 use personas_core::schedule::BanRef;
 use personas_core::{CStore, Cr, F};
 use personas_wire::raw;
@@ -81,19 +82,60 @@ fn parse_callback(bytes: &[u8]) -> AppResult<(Callback, String)> {
 /// Global and permanent: the next scan the member performs absorbs it, and from then on every
 /// proof they try to make fails the `not banned` predicate. They cannot decline to scan
 /// forever — an unscanned member runs out of interactions and cannot post either.
-pub async fn ban(State(state): State<ServerLock>, body: Bytes) -> AppResult<Response> {
+pub async fn ban(
+    State(state): State<ServerLock>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Response> {
     let (cb, _hex) = parse_callback(&body)?;
+    let signature = headers
+        .get(BAN_SIGNATURE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            AppError::Forbidden(format!(
+                "a ban must carry the group admin's signature ({BAN_SIGNATURE_HEADER})"
+            ))
+        })?
+        .to_string();
 
     let mut st = state.write().await;
+    // Only the group admin may ban: the signature covers this ticket and this epoch, so it
+    // cannot be replayed against another member or in a later epoch.
+    let admin_pk = st.admin_pk.ok_or_else(|| {
+        AppError::Forbidden("this server has no admin key (PERSONAS_ADMIN_PK); bans are disabled".into())
+    })?;
+    let ticket = moderation::ticket_hex(&cb.cb_entry.tik).map_err(|e| AppError::BadRequest(e))?;
+    let epoch = crate::epoch::bulletin_epoch(&st);
+    moderation::verify_ban(&admin_pk, &ticket, epoch, &signature)
+        .map_err(|e| AppError::Forbidden(format!("{e} (for this ticket in epoch {epoch})")))?;
+
     call(&mut st, cb, F::from(BAN_FLAG))?;
     // A ban must also stop tickets the member already holds. The rotation names the ban's
-    // entry in the public callback bulletin — `call` has just appended it — so a client can
-    // check this rotation was caused by a ban it can see.
-    let ban = ban_ref(&st)?;
+    // entry in the public callback bulletin — `call` has just appended it — and carries the
+    // admin's signature, so a client can check this rotation was caused by a real ban.
+    let ban = ban_ref(&st, signature)?;
     crate::routes::privpass::rotate_ticket_key(&mut st, RotationCause::Ban(ban))?;
 
     tracing::info!("a member has been banned");
     Ok(ok())
+}
+
+/// The header a ban request carries the admin's signature in (hex).
+pub const BAN_SIGNATURE_HEADER: &str = "x-personas-ban-signature";
+
+/// The group admin's public key, which bans are signed with. Members pin it the first time
+/// they see it, and check every ban rotation of the ticket key against it.
+pub async fn admin_key(State(state): State<ServerLock>) -> Json<AdminKeyResponse> {
+    let st = state.read().await;
+    Json(AdminKeyResponse {
+        admin_pk: st.admin_pk.map(|pk| hex::encode(pk.to_bytes())),
+    })
+}
+
+#[derive(serde::Serialize)]
+pub struct AdminKeyResponse {
+    /// Hex, or `None` if this server has no admin key (and so allows no bans).
+    admin_pk: Option<String>,
 }
 
 /// Apply the ratings a message accumulated, then zero them so they cannot be applied twice.
@@ -155,18 +197,15 @@ pub async fn approve_badge(State(state): State<ServerLock>, body: Bytes) -> AppR
 }
 
 /// The callback bulletin's newest entry, as a [`BanRef`]: what a ban's key rotation cites.
-fn ban_ref(st: &ServerState) -> AppResult<BanRef> {
+fn ban_ref(st: &ServerState, signature: String) -> AppResult<BanRef> {
     let called = &st.db.callback_bul.memb_called_cbs;
     let (ticket, _, _) = called.last().ok_or_else(|| {
         AppError::Internal(anyhow::anyhow!("the ban left no entry in the callback bulletin"))
     })?;
-    let mut bytes = Vec::new();
-    ticket
-        .serialize_with_mode(&mut bytes, Compress::No)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("could not encode the ticket: {e}")))?;
     Ok(BanRef {
         index: (called.len() - 1) as u64,
-        ticket: hex::encode(bytes),
+        ticket: moderation::ticket_hex(ticket).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?,
+        signature,
     })
 }
 

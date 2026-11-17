@@ -181,6 +181,7 @@ pub fn router(state: ServerLock) -> Router {
         .route("/api/slack/vote", post_route(polls::slack_vote))
         // -- invoking callbacks --------------------------------------------------------
         .route("/api/ban", post_route(moderation::ban))
+        .route("/api/admin_key", get(moderation::admin_key))
         .route("/api/reputation", post_route(moderation::reputation))
         .route(
             "/api/slack/reputation",

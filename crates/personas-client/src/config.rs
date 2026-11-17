@@ -145,6 +145,12 @@ impl ClientConfig {
         self.data_dir.join("privpass_issuer_key.hex")
     }
 
+    /// The group admin's public key (hex), pinned the first time this client saw it. Ban
+    /// rotations of the ticket key must be signed with it.
+    pub fn admin_key(&self) -> PathBuf {
+        self.data_dir.join("admin_key.hex")
+    }
+
     /// The server's epoch schedule, pinned the first time this client saw it.
     pub fn epoch_schedule(&self) -> PathBuf {
         self.data_dir.join("epoch_schedule.json")

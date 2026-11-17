@@ -41,6 +41,7 @@ use zk_callbacks::{
     impls::centralized::crypto::PlainTikCrypto,
 };
 
+use personas_core::moderation;
 use personas_core::schedule::{EpochSchedule, now_unix};
 
 use crate::{BulNet, PersonaClient, rotation};
@@ -572,9 +573,8 @@ impl PersonaClient {
         )
     }
 
-    /// Fetch the callback the server minted for `msg` and hand it back to `endpoint`,
-    /// which is how the group invokes it (ban, reputation, badge approval).
-    pub fn send_callback_to_endpoint(&self, msg: &MessageId, endpoint: &str) -> Result<()> {
+    /// The callback the server minted for `msg`.
+    fn fetch_callback(&self, msg: &MessageId) -> Result<CallbackCom<F, Args, PlainTikCrypto<F>>> {
         let cb_url = self.cfg.url(msg.callback_route())?;
         let resp = self
             .bul
@@ -592,10 +592,14 @@ impl PersonaClient {
             ));
         }
 
-        let cb: CallbackCom<F, Args, PlainTikCrypto<F>> =
-            CanonicalDeserialize::deserialize_compressed(&*resp.bytes()?)
-                .map_err(|e| anyhow!("server returned an undecodable callback: {e}"))?;
+        CanonicalDeserialize::deserialize_compressed(&*resp.bytes()?)
+            .map_err(|e| anyhow!("server returned an undecodable callback: {e}"))
+    }
 
+    /// Fetch the callback the server minted for `msg` and hand it back to `endpoint`,
+    /// which is how the group invokes it (reputation, badge approval).
+    pub fn send_callback_to_endpoint(&self, msg: &MessageId, endpoint: &str) -> Result<()> {
+        let cb = self.fetch_callback(msg)?;
         self.bul
             .client
             .post(self.cfg.url(endpoint)?)
@@ -606,9 +610,39 @@ impl PersonaClient {
         Ok(())
     }
 
-    /// Invoke a message's callback to ban its author.
+    /// Invoke a message's callback to ban its author. Only the group admin can: the request
+    /// carries the admin's signature on this ticket and this epoch
+    /// (`personas_core::moderation`), made with the secret key in the file
+    /// `PERSONAS_ADMIN_KEY_FILE` names.
     pub fn ban(&self, msg: &MessageId) -> Result<()> {
-        self.send_callback_to_endpoint(msg, "api/ban")
+        let path = std::env::var_os("PERSONAS_ADMIN_KEY_FILE").ok_or_else(|| {
+            anyhow!("banning needs the group admin's key: set PERSONAS_ADMIN_KEY_FILE")
+        })?;
+        let secret = std::fs::read_to_string(&path)
+            .with_context(|| format!("could not read the admin key file {path:?}"))?;
+        let sk = moderation::parse_admin_sk(&secret).map_err(|e| anyhow!("{e}"))?;
+
+        let cb = self.fetch_callback(msg)?;
+        let ticket = moderation::ticket_hex(&cb.cb_entry.tik).map_err(|e| anyhow!("{e}"))?;
+        let epoch = self.epoch()?.into_bigint().as_ref()[0];
+        let signature = moderation::sign_ban(&sk, &ticket, epoch);
+
+        let resp = self
+            .bul
+            .client
+            .post(self.cfg.url("api/ban")?)
+            .header("x-personas-ban-signature", signature)
+            .body(callback_bytes(&cb)?)
+            .send()
+            .context("failed to send the ban")?;
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "the server refused the ban ({}): {}",
+                resp.status(),
+                resp.text().unwrap_or_default()
+            ));
+        }
+        Ok(())
     }
 
     /// Invoke a message's callback to apply its accrued reputation.

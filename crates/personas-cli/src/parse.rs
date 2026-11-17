@@ -220,7 +220,16 @@ pub enum Command {
         vote_id: Option<String>,
     },
 
-    /// Invoke the ban callback the message's poster committed to.
+    /// Make the group admin's key pair. The secret goes to `--out` (readable only by you);
+    /// the public key is printed. Give the server `PERSONAS_ADMIN_PK=<public key>`, and the
+    /// admin's client `PERSONAS_ADMIN_KEY_FILE=<out>`, which `ban` signs with.
+    AdminKeygen {
+        #[arg(long)]
+        out: PathBuf,
+    },
+
+    /// Invoke the ban callback the message's poster committed to. Needs the group admin's
+    /// key: `PERSONAS_ADMIN_KEY_FILE` names the file `admin-keygen` wrote.
     Ban {
         /// Timestamp of the message to ban.
         #[arg(long, short = 't')]

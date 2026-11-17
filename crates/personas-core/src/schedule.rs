@@ -68,15 +68,23 @@ pub enum RotationReason {
 }
 
 /// What a ban rotation points at: the ban's entry in the public callback bulletin
-/// (`/api/callbacks/bulletin`). A client checks that the entry exists, holds this ticket,
-/// and was called in the rotation's epoch. It cannot check the call was a ban: the
-/// bulletin holds the argument encrypted to the ticket's owner.
+/// (`/api/callbacks/bulletin`), and the group admin's signature on the ban.
+///
+/// The bulletin alone cannot show a call was a ban (it holds the argument encrypted to the
+/// ticket's owner), so a server could otherwise pass off any callback invocation, a rating
+/// included, as a reason to rotate. The signature closes that: a client checks the entry
+/// exists, holds this ticket and was called in the rotation's epoch, *and* that the admin
+/// signed a ban of this ticket in this epoch (`crate::moderation`). The server cannot make
+/// that signature, so it cannot rotate the key except on the schedule or on a real ban.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BanRef {
     /// The entry's position in the callback bulletin.
     pub index: u64,
     /// The called ticket, as hex of its canonical uncompressed bytes.
     pub ticket: String,
+    /// The admin's Ed25519 signature over [`crate::moderation::ban_message`] for this ticket
+    /// and the rotation's epoch, as hex.
+    pub signature: String,
 }
 
 /// One line of the rotation log.
@@ -115,7 +123,7 @@ mod tests {
             seq: 3,
             epoch: 7,
             reason: RotationReason::Ban,
-            ban: Some(BanRef { index: 2, ticket: "ab".into() }),
+            ban: Some(BanRef { index: 2, ticket: "ab".into(), signature: "ef".into() }),
             pubkey: "cd".into(),
         };
         let text = serde_json::to_string(&e).unwrap();

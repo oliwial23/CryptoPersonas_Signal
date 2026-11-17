@@ -71,6 +71,7 @@ base64 = "0.22"
 blake2 = "0.10"
 chrono = "0.4"
 hex = "0.4"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 lazy_static = "1.4"
 rand = "0.8.5"
 rand_chacha = "0.3"

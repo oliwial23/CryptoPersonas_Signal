@@ -4,6 +4,7 @@
 
 pub mod circuits;
 pub mod fold;
+pub mod moderation;
 pub mod params;
 pub mod persona;
 pub mod privpass;
