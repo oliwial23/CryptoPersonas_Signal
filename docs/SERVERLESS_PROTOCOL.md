@@ -132,7 +132,7 @@ eventual, and correctness does not depend on everyone being at the same point at
 | `RecordLog` — message id → callback commitment, and its accrued rating | derived from the log: the `Post` record carries both |
 | `PollLog` / `VoteState` — tallies | derived from the log: `PollOpen` + `Vote` records (§8) |
 | `ContextLog` — thread → context field element | derived: a context is a hash of the record that opened it (§8) |
-| `/api/epoch` — an admin turns the epoch to force absorption | **barriers** — a settlement heartbeat, clocked by `serverReceivedTimestamp`, or a ban (§5.2, §7) |
+| the epoch clock — the server turns the epoch on its published schedule (it used to be `/api/epoch`, which anyone could call) | **barriers** — a settlement heartbeat, clocked by `serverReceivedTimestamp`, or a ban (§5.2, §7) |
 | `/api/ban`, `/api/reputation`, `/api/approve/badge` — an admin invokes a callback | invocation is a **trigger**, not a posted leaf: derived from the log (rep, poll-ban) or authorized by a config key (`BanInvoke`, `BadgeGrant`) (§7) |
 | `/api/*/proving_key` — the server serves parameters | generated locally into the existing content-addressed cache; identical inputs, identical keys |
 | Privacy Pass tickets | **do not exist serverless** — locked decision; no VOPRF key holder exists |

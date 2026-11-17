@@ -138,7 +138,7 @@ posting to the server, and persists updated state (`user.bin`, logs) to
 #### Epoch
 
 ```sh
-./target/release/personas "${P[@]}" update-epoch                                    # [both]  turn the epoch
+./target/release/personas "${P[@]}" update-epoch                                    # [both]  wait (≤ 15 min) for the next scheduled epoch
 ```
 
 #### Privacy Pass (anonymous, unlinkable tickets — see [`FINDINGS.md`](FINDINGS.md) O7)

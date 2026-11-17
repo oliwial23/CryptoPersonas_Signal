@@ -852,7 +852,10 @@ slack-client get-rep
 
 ### `update-epoch`
 
-Update the current epoch.
+Wait for the next epoch. The server turns its epoch on a published schedule
+(`PERSONAS_EPOCH_START`, `PERSONAS_EPOCH_SECS`, a day by default) and no request can turn
+it, so this waits for the next boundary (at most 15 minutes, else it fails at once) and
+prints the new epoch.
 
 ```bash
 slack-client update-epoch
@@ -1104,7 +1107,10 @@ client single-rep -t 1715791234
 
 ### `update-epoch`
 
-Update the current epoch.
+Wait for the next epoch. The server turns its epoch on a published schedule
+(`PERSONAS_EPOCH_START`, `PERSONAS_EPOCH_SECS`, a day by default) and no request can turn
+it, so this waits for the next boundary (at most 15 minutes, else it fails at once) and
+prints the new epoch.
 
 ```bash
 client update-epoch

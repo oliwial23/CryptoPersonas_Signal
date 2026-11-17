@@ -76,10 +76,23 @@ Files, all under `PERSONAS_DATA_DIR` (default `server/data`):
 | `{signal,slack}_contexts.jsonl` | thread → context field element (+ ts, on Slack) |
 | `polls.jsonl` | Signal polls and their ballots |
 | `badge_requests.jsonl` | badges awaiting an admin |
+| `epoch_start` | when epoch 0 began (unix s), if `PERSONAS_EPOCH_START` is unset: the first start |
+| `privpass_rotations.jsonl` | the append-only log of ticket issuer-key rotations, served to clients |
 | `{signal,slack}_chat.jsonl` | the mock transport's chat log, when it is in use |
 
 **The bulletin's contents are not persisted.** A restart keeps the store's keys and the params
 cache but forgets who joined. See `docs/FINDINGS.md` (A1).
+
+## Epochs
+
+The epoch turns on a public schedule, `epoch = floor((now - start) / length)`, from
+`PERSONAS_EPOCH_START` (unix seconds or RFC 3339; default: the server's first start, kept
+in `epoch_start`) and `PERSONAS_EPOCH_SECS` (default a day). A background task turns it at
+each boundary, and at start-up catches the bulletin (which restarts at epoch 0, A1) up to
+the schedule. No route turns it. `/api/get_epoch` serves the schedule beside the epoch, and
+the client refuses an epoch its own clock does not agree with. Each turn and each ban
+rotates the Privacy Pass issuer key and appends to `/api/privpass/rotations`, which the
+client checks before accepting a new key (`personas_client::rotation`).
 
 ## The order a post happens in
 
@@ -149,7 +162,7 @@ hardcodes them.
 | post (Signal) | `/api/jsonrpc{,/pseudo,/pseudo/rate}`, `/api/reply{,/pseudo}`, `/api/react`, `/api/authorship`, `/api/badges` |
 | post (Slack) | `/api/slack/post/{anon,pseudo,pseudo/rate}`, `/api/slack/react`, `/api/slack/{request,claim}/badges`, `/api/slack/claim/authorship` |
 | polls | `/api/{poll,banpoll,vote,votecount,context}`, `/api/slack/{poll,banpoll,poll/context,poll/results,vote}` |
-| callbacks | `/api/{ban,reputation,epoch,approve/badge,cb}`, `/api/slack/reputation`, `/api/slack_cb`, `/api/cb/{signal/all,slack/all,badge/requests}` |
+| callbacks | `/api/{ban,reputation,approve/badge,cb}`, `/api/slack/reputation`, `/api/slack_cb`, `/api/cb/{signal/all,slack/all,badge/requests}` |
 | contexts | `/api/{,slack/}pseudo/{new_thread_context,get_all_contexts}` |
 
 `/api/interact/foldscan` carries its own 100 MB body limit; a folded Nova proof is megabytes.
