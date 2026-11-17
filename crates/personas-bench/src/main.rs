@@ -70,6 +70,9 @@ struct Args {
     server_dir: PathBuf,
     /// Callbacks the server-based run answers by scanning and by folding.
     callbacks: usize,
+    /// Seconds per epoch on the server started here (`PERSONAS_EPOCH_SECS`). The run waits
+    /// for epoch boundaries, and each stretch between two of them must fit in one epoch.
+    epoch_secs: u64,
     /// Drive a validation server that is already running, not one started here.
     server_url: Option<url::Url>,
     /// Load-test the server instead of measuring one operation at a time.
@@ -94,6 +97,7 @@ fn parse_args() -> Args {
         server: false,
         server_dir: server::default_work_dir(),
         callbacks: 16,
+        epoch_secs: server::DEFAULT_EPOCH_SECS,
         server_url: None,
         load: false,
         load_requests: 128,
@@ -132,6 +136,13 @@ fn parse_args() -> Args {
             "--server-dir" => args.server_dir = PathBuf::from(value()),
             "--callbacks" => {
                 args.callbacks = value().parse().unwrap_or_else(|_| usage("bad --callbacks"))
+            }
+            "--epoch-secs" => {
+                args.epoch_secs = value()
+                    .parse()
+                    .ok()
+                    .filter(|&s| s > 0)
+                    .unwrap_or_else(|| usage("bad --epoch-secs"))
             }
             "--server-url" => {
                 args.server_url = Some(
@@ -175,6 +186,7 @@ fn usage(problem: &str) -> ! {
          \x20                     (Nova-folded scans of k callbacks, N per fold step)\n\
          \x20      personas-bench --server [--history N] [--callbacks K] [--iters N]\n\
          \x20                     [--server-dir DIR] [--server-url URL] [--out FILE]\n\
+         \x20                     [--epoch-secs S]  (the local server's epoch length)\n\
          \x20                     (server-based: proved posts, Privacy Pass, scan vs fold;\n\
          \x20                     with --server-url, against that server, not a local one)\n\
          \x20      personas-bench --server --load [--load-requests N]\n\

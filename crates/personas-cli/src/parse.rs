@@ -242,7 +242,9 @@ pub enum Command {
     /// Approve every outstanding badge request (Slack only).
     ApproveBadge,
 
-    /// Turn the epoch.
+    /// Wait for the next epoch. The epoch turns only on the server's published schedule
+    /// (no request can turn it), so this waits for the next boundary — at most 15 minutes —
+    /// and prints the new epoch. Kept under its old name for the harness scripts.
     UpdateEpoch,
 
     /// React to a message (rate it). Emojis: 👍 up, 👎 down, 🤬 hate, ❌ ban, ✅ not-ban.

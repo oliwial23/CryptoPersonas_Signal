@@ -165,10 +165,25 @@ fn try_post_json(
     Ok(us)
 }
 
-/// End the current epoch on the server (the bench's stand-in for the epoch clock).
-fn turn_epoch(http: &reqwest::blocking::Client, api: &Url) {
-    let res = http.get(api.join("api/epoch").unwrap()).send().expect("epoch request failed");
-    assert!(res.status().is_success(), "epoch turn rejected: {}", res.status());
+/// The epoch length (seconds) of the server this bench starts, unless `--epoch-secs` says
+/// otherwise. Long enough for the longest stretch the run has to finish inside one epoch
+/// (a sweep and the folding member's posts; the folded scan), short enough that waiting
+/// for a boundary costs little.
+pub const DEFAULT_EPOCH_SECS: u64 = 120;
+
+/// The longest the bench waits for a boundary on a server it did not start. A deployed
+/// server's epochs last a day; run it with a short `PERSONAS_EPOCH_SECS` to bench it.
+const MAX_REMOTE_EPOCH: u64 = 15 * 60;
+
+/// Wait for the server's next epoch boundary. Nothing can turn the epoch on request any
+/// more: it turns on the server's public schedule (`personas_core::schedule`), so this is
+/// the bench's stand-in for the old turn. Returns once the server reports the new epoch,
+/// so the next proof is made against it.
+fn next_epoch(clock: &PersonaClient) {
+    let epoch = clock
+        .wait_for_next_epoch(Duration::from_secs(MAX_REMOTE_EPOCH))
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    eprintln!("epoch {epoch}");
 }
 
 fn post_bytes(http: &reqwest::blocking::Client, url: Url, body: Vec<u8>) -> u64 {
@@ -197,7 +212,7 @@ fn logged(label: &str, file: &str, skip: usize) -> Vec<u64> {
         .collect()
 }
 
-fn start_server(repo: &Path, work: &Path, port: u16) -> Server {
+fn start_server(repo: &Path, work: &Path, port: u16, epoch_secs: u64) -> Server {
     let data = work.join("server-data");
     // A fresh bulletin each run; keep only the (slow to generate) parameter cache.
     if let Ok(entries) = std::fs::read_dir(&data) {
@@ -221,6 +236,12 @@ fn start_server(repo: &Path, work: &Path, port: u16) -> Server {
         .env("PERSONAS_CONFIG", repo.join("deploy/profiles/local.toml"))
         .env("PERSONAS_BIND", format!("127.0.0.1:{port}"))
         .env("PERSONAS_DATA_DIR", &data)
+        // Epoch 0 starts now, and epochs are short, so the run can wait for boundaries.
+        .env(
+            "PERSONAS_EPOCH_START",
+            personas_core::schedule::now_unix().to_string(),
+        )
+        .env("PERSONAS_EPOCH_SECS", epoch_secs.to_string())
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log))
         .spawn()
@@ -400,7 +421,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         None => {
             let port = 3700;
             let api = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-            (api, Some(start_server(&repo, &work, port)), "local")
+            (api, Some(start_server(&repo, &work, port, args.epoch_secs)), "local")
         }
     };
     // Client and server write `json_files/` relative to their working directory.
@@ -424,6 +445,24 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         .build()
         .expect("cannot build the HTTP client");
     let jsonrpc = api.join("api/jsonrpc").unwrap();
+
+    // A member must sweep before its first interaction in each epoch, so every stretch of
+    // posting has to stay inside one epoch. Start each such stretch at a boundary.
+    // Not a member: only reads the epoch and its schedule.
+    let clock = PersonaClient::new(ClientConfig::new(
+        Namespace::Signal,
+        api.clone(),
+        clients_dir.join("clock"),
+    ));
+    let schedule = clock.epoch_schedule().expect("could not read the epoch schedule");
+    if target == "remote" && schedule.length > MAX_REMOTE_EPOCH {
+        panic!(
+            "that server's epochs last {} s, and this run waits for several epoch boundaries; \
+             run it with PERSONAS_EPOCH_SECS={DEFAULT_EPOCH_SECS} (no route can turn the epoch)",
+            schedule.length
+        );
+    }
+    next_epoch(&clock);
 
     // --- history: other members' proved posts --------------------------------------------
     if args.history > 0 {
@@ -659,6 +698,9 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     }
 
     // --- scanning K callbacks: one proof each, or one folded proof ----------------------
+    // A fresh epoch for the scanning member's posts: the members above may have used up
+    // the one they posted in.
+    next_epoch(&clock);
     let scan_url = api.join("api/interact/scan").unwrap();
     let scanner = member("scanner");
     for _ in 0..callbacks {
@@ -669,7 +711,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     }
     // A sweep may start only once the object is from an earlier epoch (one sweep per epoch),
     // so the posts' epoch has to end before the member can scan their tickets.
-    turn_epoch(&http, &api);
+    next_epoch(&clock);
     let mut rt = Vec::new();
     let mut scan_bytes = Vec::new();
     while scanner.outstanding_callbacks().unwrap() > 0 || scanner.is_scanning().unwrap() {
@@ -701,7 +743,7 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
             .expect("post failed");
         post_json(&http, jsonrpc.clone(), proof);
     }
-    turn_epoch(&http, &api);
+    next_epoch(&clock);
     let start = Instant::now();
     let proof = folder.fold().expect("fold failed");
     let client_total = micros(start);

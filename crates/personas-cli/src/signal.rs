@@ -412,8 +412,12 @@ pub async fn run(personas: &PersonaClient, http: Client, command: Command) -> Re
         }
 
         Command::UpdateEpoch => {
-            let res = http.get(url("api/epoch")?).send().await?;
-            show(res).await?;
+            let pc = personas.clone();
+            let epoch = spawn_blocking(move || {
+                pc.wait_for_next_epoch(std::time::Duration::from_secs(15 * 60))
+            })
+            .await??;
+            println!("epoch {epoch}");
         }
 
         Command::Reaction {
