@@ -119,6 +119,7 @@ On the VM, from `deploy/play`:
 
 ```bash
 docker compose --profile compare build validator
+docker compose --profile compare build bench-serverless   # serverless circuits, k_max 20
 docker compose up -d validator
 docker compose up -d --force-recreate gateway     # once, for the /validator/ route
 ./bench/vm-compare.sh quick

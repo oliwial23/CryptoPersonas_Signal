@@ -40,7 +40,7 @@ use crate::{Args, ArgsVar, CStore, Cr, H, OStore, PK, Snark};
 
 /// `k_max`: the most live tickets a member can hold, and so the number of slots a padded
 /// scan has. Set at build time with `PERSONAS_K_MAX`: 20 for the serverless deployment (the
-/// default), 60 for the server-backed one (`deploy/play/Dockerfile.validator`). A circuit
+/// default), 100 for the server-backed one (`deploy/play/Dockerfile.validator`). A circuit
 /// constant, so it changes the keys; key caches name it whenever it is not the default, and
 /// a server reports its cap at `/api/scan_cap` so clients can check theirs.
 pub const K_MAX: usize = match option_env!("PERSONAS_K_MAX") {

@@ -114,6 +114,22 @@ services:
       # Read-only: a benchmark must never be able to replace the group's proving keys.
       - keys:/shared/keys:ro
       - ./bench/results:/results
+  # The serverless benchmark needs the serverless circuits: k_max 20 and one ticket per
+  # request, the values the demo's keys (the `keys` volume) were made with. The `bench`
+  # image above is built with the server-backed k_max, so it cannot run them.
+  bench-serverless:
+    profiles: [compare]
+    image: personas-bench-serverless
+    build:
+      context: ../..
+      dockerfile: deploy/play/Dockerfile.validator
+      args:
+        PERSONAS_K_MAX: "20"
+        PERSONAS_TICKET_BATCH: "1"
+    entrypoint: ["personas-bench"]
+    volumes:
+      - keys:/shared/keys:ro
+      - ./bench/results:/results
 
 volumes:
   validator:

@@ -15,9 +15,11 @@ cd "$(dirname "$0")/.."
 DAY="$(date +%F)"
 OPS="join,anon_post,pseudo_post,vote,rating,scan,moderation"
 bench() { docker compose run --rm bench "$@"; }
+# The serverless circuits (k_max 20), matching the demo's keys; `bench` is server-backed.
+bench_serverless() { docker compose run --rm bench-serverless "$@"; }
 
 serverless() {
-  bench --keys /shared/keys --history "$1" --iters 20 --warmup 3 --only "$OPS" \
+  bench_serverless --keys /shared/keys --history "$1" --iters 20 --warmup 3 --only "$OPS" \
     --skip-constraints --label "VM, serverless" \
     --out "/results/$DAY-vm-serverless-h$1.json"
 }
