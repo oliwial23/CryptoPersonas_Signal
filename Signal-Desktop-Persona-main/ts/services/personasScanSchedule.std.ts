@@ -1,19 +1,15 @@
 // Copyright 2026 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// WHEN a member scans. A scan must not follow from anything the member just did, or its
-// timing links their scans to their anonymous posts. So time is cut into public epochs on
-// the group's shared schedule, and each member scans once per epoch at a moment drawn at
-// random, whatever they are doing then. A scan never runs because a post is about to go
-// out.
-//
-// Every member also sends the same number of scans per epoch, real ones first and dummy
-// ones to make up the count, so the number says nothing about a member's tickets. A
-// member with more tickets than the count still finishes its sweep, because posting waits
-// for that, so the count should cover a typical sweep.
+// WHEN a member scans. Time is cut into public epochs on the group's shared schedule, and
+// every interaction proves the member's object is from the current epoch. So each member
+// scans once, at the start of every epoch, before anything else, whatever it holds: the
+// scan's timing says nothing about what the member did. A scan is one proof padded to
+// k_max slots, so its size says nothing either, and no dummy scans are needed. (Members
+// used to scan at a random moment and pad the COUNT of single-ticket scans to 36.)
 
 const DEFAULT_SCAN_EPOCH_MS = 24 * 60 * 60 * 1_000;
-const DEFAULT_SCANS_PER_EPOCH = 36;
+const DEFAULT_SCANS_PER_EPOCH = 1;
 
 // The epoch length: a day, or PERSONAS_SCAN_EPOCH_MS for a demo. A ban or badge reaches
 // an honest member's object at its next slot, so this is also how long that can take.

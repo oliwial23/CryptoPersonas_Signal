@@ -287,6 +287,17 @@ export function getPersonasEngine(
         ? {
             heartbeatAnchorMs: schedule.anchorMs,
             heartbeatPeriodMs: schedule.periodMs,
+            // Epochs default to a day; a demo can shorten them (PERSONAS_SCAN_EPOCH_MS).
+            ...(Number(process.env.PERSONAS_SCAN_EPOCH_MS) > 0
+              ? {
+                  barriersPerEpoch: Math.max(
+                    1,
+                    Math.floor(
+                      Number(process.env.PERSONAS_SCAN_EPOCH_MS) / schedule.periodMs
+                    )
+                  ),
+                }
+              : {}),
           }
         : {}),
       ...(memberState ? { memberState } : {}),

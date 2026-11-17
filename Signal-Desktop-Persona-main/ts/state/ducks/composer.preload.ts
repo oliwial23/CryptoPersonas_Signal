@@ -1240,7 +1240,7 @@ function sendMultiMediaMessage(
                   toastType: ToastType.PersonaActionFailed,
                   parameters: {
                     reason:
-                      'you have reached the interaction limit — open Persona status and press Scan now',
+                      "you have used this epoch's persona interactions — they renew when the next epoch begins",
                   },
                 })
               );

@@ -275,7 +275,7 @@ export async function sendPersonaVote(
         return fail('could not join or wait for your last persona action to settle');
       }
       if (personaScanRequired(groupId)) {
-        return fail('you have reached the interaction limit — open Persona status and press Scan now');
+        return fail("you have used this epoch's persona interactions — they renew when the next epoch begins");
       }
       const vote = composePersonaVote(groupId, pollEh, optionIndex);
       if (!vote) {

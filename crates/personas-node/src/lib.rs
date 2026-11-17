@@ -512,6 +512,20 @@ impl Engine {
         self.inner.scan_required()
     }
 
+    /// Whether this member must make its scan for the current epoch before anything else
+    /// (its object is from an earlier epoch). The scheduler scans as soon as this turns
+    /// true, at the start of each epoch.
+    #[napi]
+    pub fn epoch_scan_needed(&self) -> bool {
+        self.inner.epoch_scan_needed()
+    }
+
+    /// The current epoch (public: the same for every member).
+    #[napi]
+    pub fn current_epoch(&self) -> u32 {
+        u32::try_from(self.inner.replica().current_epoch()).unwrap_or(u32::MAX)
+    }
+
     /// Whether this member could prove now: its object is in a settled root.
     #[napi]
     pub fn is_settled(&self) -> bool {

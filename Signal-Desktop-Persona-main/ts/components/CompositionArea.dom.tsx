@@ -1453,7 +1453,7 @@ export const CompositionArea = memo(function CompositionArea({
                   <AxoDropdownMenu.SubContent>
                     {heldBadges.length === 0 ? (
                       <AxoDropdownMenu.Label>
-                        No approved badges yet — request one above, then Scan now.
+                        No approved badges yet — request one above; an approval arrives at the next epoch.
                       </AxoDropdownMenu.Label>
                     ) : (
                       heldBadges.map(badge => (

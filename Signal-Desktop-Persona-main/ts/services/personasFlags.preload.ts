@@ -24,8 +24,6 @@
 // import the native ZK addon transitively.
 
 
-import { randomBytes } from 'node:crypto';
-
 import { createLogger } from '../logging/log.std.ts';
 import { toLogFormat } from '../types/errors.std.ts';
 import { drop } from '../util/drop.std.ts';
@@ -40,13 +38,7 @@ import { runScheduledScans } from './personasActions.preload.ts';
 import { decodePostText } from './personasCarriage.std.ts';
 import { verifiedContextName } from './personasTopics.preload.ts';
 import { hasOwnResetRequest } from './personasReset.preload.ts';
-import { getBarrierSchedule } from './personasBarrier.preload.ts';
-import {
-  pickScanSlot,
-  scanEpochAt,
-  scanEpochMs,
-  scansPerEpoch,
-} from './personasScanSchedule.std.ts';
+import { scanEpochMs } from './personasScanSchedule.std.ts';
 import { maybeCompletePersonasReset } from './personasReset.preload.ts';
 import { maybeContinueCatchUp } from './personasCatchUp.preload.ts';
 import { hasJoinedPersonaGroup } from './personasMembership.preload.ts';
@@ -180,28 +172,26 @@ export function startPersonaFlagLoops(): void {
   log.info(
     `startPersonaFlagLoops: refresh every ${REFRESH_INTERVAL_MS}ms, ` +
       (isAutoScanEnabled()
-        ? `${scansPerEpoch(process.env.PERSONAS_SCANS_PER_EPOCH)} scans per ` +
+        ? `one padded scan at the start of each ` +
           `${scanEpochMs(process.env.PERSONAS_SCAN_EPOCH_MS) / 60_000} min epoch`
         : 'scheduled scans OFF (PERSONAS_AUTO_SCAN=off)')
   );
 }
 
-// Each group's next scan: the epoch it belongs to and when in that epoch it runs.
-const scanSlots = new Map<string, { epoch: number; slotMs: number | null }>();
 let scanningDue = false;
 
-// Run every group's scan whose slot has come. A slot is drawn at random the first time an
-// epoch is seen, and cleared once used, so each group scans once per epoch.
+// Make each group's scan for the epoch as soon as it begins: every interaction proves the
+// object is from the current epoch, so this comes before anything else, and every member
+// makes exactly one scan, at the same public time, whatever it holds. One scan is one
+// proof padded to k_max slots, so no dummy scans are needed.
 async function runDueScans(): Promise<void> {
   if (scanningDue) {
     return;
   }
   scanningDue = true;
   try {
-    const epochMs = scanEpochMs(process.env.PERSONAS_SCAN_EPOCH_MS);
     for (const [groupId, engine] of builtPersonasEngines()) {
-      // Only a joined member has callbacks to absorb, and only then is a scan record
-      // acceptable to the other replicas.
+      // Only a joined member has an object to bring up to date.
       const conversation = window.ConversationController.get(groupId);
       if (!conversation || !hasJoinedPersonaGroup(groupId)) {
         continue;
@@ -211,31 +201,12 @@ async function runDueScans(): Promise<void> {
       if (hasOwnResetRequest(groupId)) {
         continue;
       }
-      const anchorMs = getBarrierSchedule(groupId)?.anchorMs ?? 0;
-      const now = Date.now();
-      const epoch = scanEpochAt(now, anchorMs, epochMs);
-      let slot = scanSlots.get(groupId);
-      if (slot?.epoch !== epoch) {
-        const random = randomBytes(4).readUInt32LE(0) / 2 ** 32;
-        slot = {
-          epoch,
-          // A sweep cut off by a restart blocks this member's posts until it ends.
-          slotMs: engine.isScanning()
-            ? now
-            : pickScanSlot(now, anchorMs, epochMs, random),
-        };
-        scanSlots.set(groupId, slot);
-      }
-      if (slot.slotMs == null || now < slot.slotMs) {
+      if (!engine.epochScanNeeded() && !engine.isScanning()) {
         continue;
       }
-      slot.slotMs = null;
       // oxlint-disable-next-line no-await-in-loop
-      await runScheduledScans(
-        conversation,
-        scansPerEpoch(process.env.PERSONAS_SCANS_PER_EPOCH)
-      ).catch(error =>
-        log.error(`scheduled scans failed: ${toLogFormat(error)}`)
+      await runScheduledScans(conversation, 1).catch(error =>
+        log.error(`epoch scan failed: ${toLogFormat(error)}`)
       );
     }
   } finally {

@@ -76,8 +76,8 @@ export function PersonaBadgeNotice({
           {`${notice.name} badge approved`}
         </div>
         <div className={tw('type-caption text-label-secondary')}>
-          {'The requester receives it once they scan — Persona status › ' +
-            'Scan now. Until then they cannot post under it.'}
+          {'The requester receives it with their scan at the start of the ' +
+            'next epoch. Until then they cannot post under it.'}
         </div>
       </div>
     );
@@ -106,7 +106,7 @@ export function PersonaBadgeNotice({
         <div className={tw('type-caption text-label-secondary')}>
           {isIncoming
             ? 'Already approved.'
-            : 'Approved — press Scan now in Persona status to collect it.'}
+            : 'Approved — it arrives with your scan at the start of the next epoch.'}
         </div>
       )}
 

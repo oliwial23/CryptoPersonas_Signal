@@ -224,6 +224,10 @@ export class Engine {
   emitPostRepAtLeast(body: string, context: number, threshold: number): Emitted;
   emitPostShowBadge(body: string, context: number, badge: string): Emitted;
   /** Request a badge: 1=Faculty, 2=Student, 3=Industry. Files a ticket to approve. */
+  /** Whether this member must make its scan for the current epoch before acting. */
+  epochScanNeeded(): boolean;
+  /** The current (public) epoch. */
+  currentEpoch(): number;
   emitBadgeRequest(slot: number, account: string): JsEmitted;
   /** Approve a badge request by its envelope hash. */
   emitBadgeApprove(request: string, slot: number): JsEmitted;
