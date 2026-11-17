@@ -43,9 +43,10 @@ use url::Url;
 
 use crate::{Args, Summary, machine, micros, summarize};
 
-/// Posts or ticket requests a member can make before it must scan (`NUM_INTS_BEFORE_SCAN`,
-/// minus slack). Members who would need more are replaced by fresh ones, untimed.
-const POSTS_PER_MEMBER: usize = 15;
+/// Posts or ticket requests a member can make in one epoch: `k_max / W` (this build's
+/// `NUM_INTS_BEFORE_SCAN - 1`). Members who would need more are replaced by fresh ones,
+/// untimed.
+const POSTS_PER_MEMBER: usize = personas_core::circuits::NUM_INTS_BEFORE_SCAN - 1;
 
 /// Tickets per Privacy Pass request (this build's `PERSONAS_TICKET_BATCH`).
 const TICKET_BATCH: usize = personas_core::privpass::TICKET_BATCH_SIZE;
@@ -184,6 +185,19 @@ fn next_epoch(clock: &PersonaClient) {
         .wait_for_next_epoch(Duration::from_secs(MAX_REMOTE_EPOCH))
         .unwrap_or_else(|e| panic!("{e:#}"));
     eprintln!("epoch {epoch}");
+}
+
+/// The longest one member's block of history posts can take, with room to spare on a slow
+/// machine.
+const BLOCK_SECS: u64 = 30;
+
+/// Wait for the next boundary unless at least `secs` of the current epoch are left.
+fn ensure_time_left(clock: &PersonaClient, schedule: &personas_core::schedule::EpochSchedule, secs: u64) {
+    let now = personas_core::schedule::now_unix();
+    let next = schedule.boundary(schedule.epoch_at(now) + 1);
+    if next.saturating_sub(now) < secs {
+        next_epoch(clock);
+    }
 }
 
 fn post_bytes(http: &reqwest::blocking::Client, url: Url, body: Vec<u8>) -> u64 {
@@ -455,31 +469,48 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
         clients_dir.join("clock"),
     ));
     let schedule = clock.epoch_schedule().expect("could not read the epoch schedule");
-    if target == "remote" && schedule.length > MAX_REMOTE_EPOCH {
+    // The load test posts with each member once per concurrency level and never scans, so
+    // it must stay inside one epoch: it wants long epochs, and waits for no boundary. The
+    // full run waits for several boundaries, so it wants short ones.
+    if !args.load && target == "remote" && schedule.length > MAX_REMOTE_EPOCH {
         panic!(
             "that server's epochs last {} s, and this run waits for several epoch boundaries; \
              run it with PERSONAS_EPOCH_SECS={DEFAULT_EPOCH_SECS} (no route can turn the epoch)",
             schedule.length
         );
     }
-    next_epoch(&clock);
+    if !args.load {
+        next_epoch(&clock);
+    }
 
     // --- history: other members' proved posts --------------------------------------------
+    // Each history member posts its share in one block, started only with enough of the
+    // epoch left to finish it: a member whose posts straddled a boundary would have to
+    // scan first.
     if args.history > 0 {
         let start = Instant::now();
-        let n = args.history.div_ceil(POSTS_PER_MEMBER);
-        let others: Vec<PersonaClient> = (0..n).map(|i| member(&format!("history-{i}"))).collect();
-        for i in 0..args.history {
-            let proof = others[i % n]
-                .gen_cb_for_msg(bench_post_payload())
-                .expect("history post failed");
-            post_json(&http, jsonrpc.clone(), proof);
+        let mut left = args.history;
+        let mut k = 0;
+        while left > 0 {
+            let n = left.min(POSTS_PER_MEMBER);
+            ensure_time_left(&clock, &schedule, BLOCK_SECS);
+            let m = member(&format!("history-{k}"));
+            for _ in 0..n {
+                let proof = m.gen_cb_for_msg(bench_post_payload()).expect("history post failed");
+                post_json(&http, jsonrpc.clone(), proof);
+            }
+            left -= n;
+            k += 1;
         }
         eprintln!(
             "history: {} posts in {:.1}s",
             args.history,
             start.elapsed().as_secs_f64()
         );
+        // The measured run below starts on a fresh epoch, as it does without history.
+        if !args.load {
+            next_epoch(&clock);
+        }
     }
     let _ = std::fs::remove_dir_all("json_files");
 

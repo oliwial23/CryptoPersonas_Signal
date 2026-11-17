@@ -13,12 +13,12 @@ COPY crates ./crates
 COPY batch-zkc ./batch-zkc
 # Cargo.toml [patch]es these paths; cargo wants them present.
 COPY third_party ./third_party
-# The server-backed deployment's scan cap (how many interactions before a member must
-# scan). Higher than the serverless default of 20: folding makes a large backlog cheap
-# for the server, at the cost of a banned member who refuses to scan posting longer.
-# Clients must be built with the same value (the server reports it at /api/scan_cap).
-ARG PERSONAS_SCAN_CAP=128
-ENV PERSONAS_SCAN_CAP=${PERSONAS_SCAN_CAP}
+# The server-backed deployment's k_max (the most live tickets a member holds, so k_max/W
+# interactions per epoch): 60, against the serverless default of 20. Folding makes a
+# larger backlog cheap for the server. Clients must be built with the same value (the
+# server reports its per-epoch cap at /api/scan_cap).
+ARG PERSONAS_K_MAX=60
+ENV PERSONAS_K_MAX=${PERSONAS_K_MAX}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release -p personas-server --bin server -p personas-bench --bin personas-bench \

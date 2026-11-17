@@ -68,7 +68,8 @@ impl PersonaClient {
         {
             panic!(
                 "this client was built with scan cap {ours}, but the server uses {theirs}; \
-                 rebuild the client with PERSONAS_SCAN_CAP={theirs}"
+                 rebuild the client with PERSONAS_K_MAX={}",
+                (theirs - 1) * personas_core::circuits::EPOCH_W
             );
         }
     }

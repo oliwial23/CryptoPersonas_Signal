@@ -169,8 +169,21 @@ fn parse_args() -> Args {
 /// this one and settles at the last barrier of that epoch, so wait out that many epochs and
 /// one more.
 fn settle_wait() -> usize {
-    let c = Config::fast();
+    let c = bench_config();
     ((personas_core::circuits::TICKET_LIFETIME + 1) * c.barriers_per_epoch + 1) as usize
+}
+
+/// Barriers per epoch in the benchmark group. A measured action takes `SETTLE_LAG`
+/// barriers, so an epoch holds `k_max / W` of one member's actions: about its
+/// per-epoch allowance, so a member scans about as often as it must.
+const BENCH_BPE: u64 = SETTLE_LAG * (personas_core::circuits::NUM_INTS_BEFORE_SCAN as u64 - 1);
+
+/// The replica configuration every engine in the benchmark uses.
+fn bench_config() -> Config {
+    Config {
+        barriers_per_epoch: BENCH_BPE,
+        ..Config::fast()
+    }
 }
 
 fn usage(problem: &str) -> ! {
@@ -310,6 +323,8 @@ struct Group {
     conv: ConversationId,
     transport: Arc<dyn Transport>,
     next_account: u8,
+    /// Alice's epoch scans, timed: the "scan" operation's samples.
+    scans: Samples,
 }
 
 fn incoming(conv: &ConversationId, bytes: &[u8]) -> Incoming {
@@ -346,7 +361,7 @@ impl Group {
                 transport.clone(),
                 conv.clone(),
                 replica_keys.clone(),
-                Config::fast(),
+                bench_config(),
                 Some(Member::create(member_keys.clone(), rng)),
             )
         };
@@ -363,6 +378,7 @@ impl Group {
             conv,
             transport,
             next_account: 1,
+            scans: Samples::default(),
         };
         for who in [Who::Alice, Who::Bob, Who::Carol] {
             let account = group.account();
@@ -463,6 +479,7 @@ impl Group {
             // Bob and Carol take turns, scanning now and then as real members do (a
             // member that never scans hits the protocol's interaction cap).
             let poster = if i % 2 == 0 { Who::Bob } else { Who::Carol };
+            self.ready(poster);
             let rng = &mut self.rng;
             let e = match poster {
                 Who::Bob => self.bob.emit_post_anon(rng, "history"),
@@ -471,11 +488,6 @@ impl Group {
             .expect("post");
             self.deliver_all_but(poster, &e);
             self.settle_all();
-            if i % 24 == 23 {
-                self.barrier_all(settle_wait());
-                self.drain_untimed(Who::Bob);
-                self.drain_untimed(Who::Carol);
-            }
         }
         self.barrier_all(settle_wait());
         eprintln!(
@@ -484,23 +496,48 @@ impl Group {
         );
     }
 
-    /// A member other than Alice absorbs its settled callbacks with scans, untimed. Bob
-    /// and Carol post to give Alice something to act on, and like any member they must
-    /// scan before reaching the protocol's interaction cap.
-    fn drain_untimed(&mut self, who: Who) {
-        let mut rounds = 0;
-        while self.engine(who).scan_needed() && rounds < 400 {
-            rounds += 1;
-            let rng = &mut self.rng;
-            let e = match who {
-                Who::Alice => self.alice.emit_scan(rng),
-                Who::Bob => self.bob.emit_scan(rng),
-                Who::Carol => self.carol.emit_scan(rng),
+    /// Get `who` ready to act: finish a sweep under way, make the epoch scan if a new epoch
+    /// has begun, and if the member has used its per-epoch allowance, wait for the next
+    /// epoch (and scan then). Alice's scans are timed (the "scan" samples); the others' are
+    /// not. Every interaction proves the current epoch, so a member that skipped this
+    /// would build a proof no replica accepts (the engine refuses to).
+    fn ready(&mut self, who: Who) {
+        for _ in 0..(4 * BENCH_BPE) {
+            let engine = self.engine(who);
+            if engine.member().is_some_and(|m| m.user.is_scanning()) || engine.epoch_scan_needed() {
+                let rng = &mut self.rng;
+                let e = match who {
+                    Who::Alice => self.alice.emit_scan(rng),
+                    Who::Bob => self.bob.emit_scan(rng),
+                    Who::Carol => self.carol.emit_scan(rng),
+                };
+                match e {
+                    Ok(e) if who == Who::Alice => {
+                        let mut scans = std::mem::take(&mut self.scans);
+                        self.record_emit(&mut scans);
+                        self.receive_timed(&e, &mut scans);
+                        self.scans = scans;
+                    }
+                    Ok(e) => self.deliver_all_but(who, &e),
+                    // Its last record is not settled yet: a barrier more.
+                    Err(_) => {}
+                }
+                self.settle_all();
+            } else if engine.scan_required() {
+                // Out of interactions for this epoch: the next one renews them.
+                self.barrier_all(1);
+            } else {
+                return;
             }
-            .expect("scan");
-            self.deliver_all_but(who, &e);
-            self.settle_all();
         }
+        panic!("a member could not get ready to act within {} barriers", 4 * BENCH_BPE);
+    }
+
+    /// Let every outstanding ticket settle, then let Alice make the next epoch's scan
+    /// (timed), which absorbs them.
+    fn settle_and_drain(&mut self) {
+        self.barrier_all(settle_wait());
+        self.ready(Who::Alice);
     }
 
     /// Alice posts `k` times and lets every ticket settle without scanning, so her object
@@ -530,19 +567,6 @@ impl Group {
         }
     }
 
-    /// Let every outstanding ticket settle, then have Alice absorb everything with scans
-    /// (each one a scan sample). Keeps her clear of the interaction cap between batches.
-    fn settle_and_drain(&mut self, scans: &mut Samples) {
-        self.barrier_all(settle_wait());
-        let mut rounds = 0;
-        while self.alice.scan_needed() && rounds < 400 {
-            rounds += 1;
-            let e = self.alice.emit_scan(&mut self.rng).expect("scan");
-            self.record_emit(scans);
-            self.receive_timed(&e, scans);
-            self.settle_all();
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -564,7 +588,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
     let total = args.warmup + args.iters;
     // A sample is kept only past the warm-up iterations.
     let keep = |i: usize| i >= args.warmup;
-    let mut scans = Samples::default();
 
     if wanted("join") {
         let mut s = Samples::default();
@@ -574,9 +597,14 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                 g.transport.clone(),
                 g.conv.clone(),
                 g.replica_keys.clone(),
-                Config::fast(),
+                bench_config(),
                 Some(Member::create(g.member_keys.clone(), &mut g.rng)),
             );
+            // A newcomer catches up on the group's history first (untimed), as the app's
+            // late joiners do: the join names the current epoch, which it learns there.
+            let history = g.alice.catch_up_records();
+            let at = g.alice.replica().current_barrier();
+            newcomer.import_records(history, at);
             let account = g.account();
             let e = newcomer.emit_join(&mut g.rng, account).expect("join");
             let t = newcomer.last_op_timings();
@@ -600,16 +628,11 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
         eprintln!("join: done");
     }
 
-    let post_batch = |g: &mut Group,
-                      name: &str,
-                      emit: &mut dyn FnMut(&mut Group, usize) -> Emitted,
-                      scans: &mut Samples| {
+    let post_batch = |g: &mut Group, name: &str, emit: &mut dyn FnMut(&mut Group, usize) -> Emitted| {
         let mut s = Samples::default();
         for i in 0..total {
-            // A member must finish a sweep every NUM_INTS_BEFORE_SCAN interactions.
-            if g.alice.scan_required() {
-                g.settle_and_drain(scans);
-            }
+            // Every interaction proves the current epoch: scan first when one is due.
+            g.ready(Who::Alice);
             let e = emit(g, i);
             let mut tmp = Samples::default();
             g.record_emit(&mut tmp);
@@ -625,7 +648,7 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
             // whole batch, and a member's next action waits for its last one to settle.
             g.settle_all();
         }
-        g.settle_and_drain(scans);
+        g.settle_and_drain();
         eprintln!("{name}: done");
         s
     };
@@ -639,7 +662,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                     .emit_post_anon(&mut g.rng, "benchmark post")
                     .expect("post")
             },
-            &mut scans,
         );
         results.insert("anon_post".into(), s);
     }
@@ -653,7 +675,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                     .emit_post_pseudo(&mut g.rng, "benchmark post", F::from(1_000 + i as u64))
                     .expect("pseudo post")
             },
-            &mut scans,
         );
         results.insert("pseudo_post".into(), s);
     }
@@ -671,7 +692,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                     )
                     .expect("rate-limited post")
             },
-            &mut scans,
         );
         results.insert("rate_limited_post".into(), s);
     }
@@ -684,7 +704,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                     .emit_badge_request(&mut g.rng, (i % 3 + 1) as u8, Group::alice_account())
                     .expect("badge request")
             },
-            &mut scans,
         );
         results.insert("badge_request".into(), s);
     }
@@ -706,7 +725,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                 g.deliver_all_but(Who::Bob, &poll);
                 g.alice.emit_vote(&mut g.rng, poll.eh, 0).expect("vote")
             },
-            &mut scans,
         );
         results.insert("vote".into(), s);
     }
@@ -716,15 +734,11 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
             "rating",
             // One rating per member per post: Bob posts, Alice rates it.
             &mut |g, _| {
-                if g.bob.scan_required() {
-                    g.barrier_all(settle_wait());
-                    g.drain_untimed(Who::Bob);
-                }
+                g.ready(Who::Bob);
                 let post = g.bob.emit_post_anon(&mut g.rng, "rate me").expect("post");
                 g.deliver_all_but(Who::Bob, &post);
                 g.alice.emit_rate(&mut g.rng, post.eh, 1).expect("rating")
             },
-            &mut scans,
         );
         results.insert("rating".into(), s);
     }
@@ -745,7 +759,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                     )
                     .expect("merge personas post")
             },
-            &mut scans,
         );
         results.insert("merge_personas".into(), s);
     }
@@ -753,6 +766,7 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
     if wanted("show_badge") {
         // Earn a badge first: request, admin approval, settlement, absorb.
         let (slot, _) = personas_core::badge_value("Faculty").expect("badge");
+        g.ready(Who::Alice);
         let req = g
             .alice
             .emit_badge_request(&mut g.rng, slot as u8, Group::alice_account())
@@ -764,7 +778,7 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
             .expect("approve");
         g.deliver_all_but(Who::Bob, &approve);
         g.settle_all();
-        g.settle_and_drain(&mut scans);
+        g.settle_and_drain();
         let s = post_batch(
             &mut g,
             "show_badge",
@@ -773,7 +787,6 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                     .emit_post_show_badge(&mut g.rng, "benchmark post", F::from(1_000u64), slot as u8)
                     .expect("show badge post (is the badge held?)")
             },
-            &mut scans,
         );
         results.insert("show_badge".into(), s);
     }
@@ -790,23 +803,28 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
                     .emit_post_rep_at_least(&mut g.rng, "benchmark post", F::from(1_000u64), rho)
                     .expect("rep at least post")
             },
-            &mut scans,
         );
         results.insert("rep_at_least".into(), s);
     }
 
     if wanted("scan") {
-        // Scans come from the drains above; make sure there are enough of them.
+        // A scan is Alice's one padded scan at the start of an epoch (the scans made by the
+        // operations above count too). Every scan proves SCAN_SLOTS slots, so it costs the
+        // same however many tickets it absorbs; Alice still posts between them, as members do.
         let mut rounds = 0;
-        while scans.prove.len() < total && rounds < 4 {
+        while g.scans.prove.len() < total && rounds < 4 * total {
             rounds += 1;
-            for _ in 0..(total - scans.prove.len()) {
-                let e = g.alice.emit_post_anon(&mut g.rng, "ticket").expect("post");
-                g.deliver_all_but(Who::Alice, &e);
-                g.settle_all();
+            g.ready(Who::Alice);
+            let e = g.alice.emit_post_anon(&mut g.rng, "ticket").expect("post");
+            g.deliver_all_but(Who::Alice, &e);
+            g.settle_all();
+            // On to the next epoch, whose scan `ready` makes.
+            while !g.alice.epoch_scan_needed() {
+                g.barrier_all(1);
             }
-            g.settle_and_drain(&mut scans);
+            g.ready(Who::Alice);
         }
+        let scans = std::mem::take(&mut g.scans);
         let mut s = Samples::default();
         let skip = args.warmup.min(scans.prove.len());
         s.prove = scans.prove[skip..].to_vec();
@@ -820,25 +838,40 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
 
     if wanted("moderation") {
         // An admin's permanent ban: a member posts, Bob bans the post, one barrier later
-        // the post's callback is invoked (post callback) and the epoch is updated. The
-        // offender never scans again (a scan would absorb the ban and stop its posts), so
-        // it can make only the interactions left before the cap: Carol posts until then,
-        // then Alice. Both start clear. This is the last operation, so neither is needed
-        // after it.
-        g.barrier_all(settle_wait());
-        g.drain_untimed(Who::Carol);
-        g.drain_untimed(Who::Alice);
+        // the post's callback is invoked (post callback); the epoch update is the re-pin at
+        // the next epoch's first barrier. The offender's next epoch scan absorbs the ban,
+        // after which it cannot post, so each offender serves for one epoch only: Carol,
+        // then Alice, then Bob. This is the last operation, so none is needed after it.
+        let offenders = [Who::Carol, Who::Alice, Who::Bob];
+        let mut current = 0;
+        // Start at an epoch boundary, so Carol has a whole epoch's allowance.
+        while !g.carol.epoch_scan_needed() {
+            g.barrier_all(1);
+        }
+        g.ready(Who::Carol);
         let mut s = Samples::default();
         for i in 0..total {
-            let offender = if g.carol.scan_required() {
-                Who::Alice
-            } else {
-                Who::Carol
+            let can_post = |g: &mut Group, who: Who| {
+                let e = g.engine(who);
+                !e.epoch_scan_needed()
+                    && !e.scan_required()
+                    && !e.member().is_some_and(|m| m.user.is_scanning())
             };
+            if !can_post(&mut g, offenders[current]) {
+                current += 1;
+                assert!(
+                    current < offenders.len(),
+                    "moderation ran out of offenders: at most {} iterations",
+                    offenders.len() * (personas_core::circuits::NUM_INTS_BEFORE_SCAN - 1)
+                );
+                g.ready(offenders[current]);
+            }
+            let offender = offenders[current];
             let rng = &mut g.rng;
             let post = match offender {
                 Who::Alice => g.alice.emit_post_anon(rng, "offending"),
-                _ => g.carol.emit_post_anon(rng, "offending"),
+                Who::Bob => g.bob.emit_post_anon(rng, "offending"),
+                Who::Carol => g.carol.emit_post_anon(rng, "offending"),
             }
             .expect("post");
             g.deliver_all_but(offender, &post);
@@ -855,9 +888,22 @@ fn run_ops(args: &Args, keys_dir: &std::path::Path) -> BTreeMap<String, OpResult
             {
                 s.invoke_per_callback
                     .push(t.invoke_us / u64::from(t.invoked));
-                s.epoch_update.push(t.epoch_update_us);
+                if t.epoch_update_us > 0 {
+                    s.epoch_update.push(t.epoch_update_us);
+                }
             }
-            g.barrier_all(SETTLE_LAG as usize - 1);
+            // The epoch update happens at an epoch's first barrier, after invocations; it
+            // is sampled whenever this iteration's remaining barriers cross one.
+            for _ in 1..SETTLE_LAG {
+                let before = g.bob.replica().last_settle_timings();
+                g.barrier_all(1);
+                if let Some((_, t)) = g.bob.replica().last_settle_timings().filter(|a| Some(*a) != before)
+                    && keep(i)
+                    && t.epoch_update_us > 0
+                {
+                    s.epoch_update.push(t.epoch_update_us);
+                }
+            }
         }
         results.insert("moderation".into(), s);
         eprintln!("moderation: done");

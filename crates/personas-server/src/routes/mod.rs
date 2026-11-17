@@ -213,8 +213,8 @@ pub fn router(state: ServerLock) -> Router {
         .with_state(state)
 }
 
-/// The scan cap this server's circuits were built with (`PERSONAS_SCAN_CAP`), as decimal
-/// text. A client built with a different cap synthesizes different circuits, so its
+/// The per-epoch interaction cap this server's circuits were built with (from
+/// `PERSONAS_K_MAX`), as decimal text. A client built with a different cap synthesizes different circuits, so its
 /// proofs would not verify against this server's keys; it checks this first.
 async fn scan_cap() -> String {
     personas_core::circuits::NUM_INTS_BEFORE_SCAN.to_string()
