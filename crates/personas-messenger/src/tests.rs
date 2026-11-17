@@ -159,7 +159,7 @@ mod e2e {
     use personas_bulletin::replica::{Config, ReplicaKeys, Status};
 
     use personas_core::circuits::{
-        MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsVar, ScanInt,
+        MsgUser, SCAN_SLOTS, PseudonymArgs, PseudonymArgsVar, ScanInt,
         get_scan_interaction, get_standard_interaction, get_standard_pseudo_interaction,
         pseudonym_pred,
     };
@@ -199,9 +199,9 @@ mod e2e {
         let dummy_pseudo = PseudonymArgs::default();
         let (pseudo_pk, pseudo_vk): (PK, VK) = get_standard_pseudo_interaction()
             .generate_keys::<H, Snark, Cr, ObjT>(rng, None, dummy_pseudo.clone(), false);
-        let si: ScanInt<CbT> = get_scan_interaction();
+        let si: ScanInt<CbT, SCAN_SLOTS> = get_scan_interaction();
         let dummy_scan =
-            merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(&CbT::new(), Time::from(0));
+            merkle_scan_pubdata::<MH, NH, SCAN_SLOTS>(&CbT::new(), Time::from(0));
         let (scan_pk, scan_vk): (PK, VK) =
             si.generate_keys::<H, Snark, Cr, ObjT>(rng, None, dummy_scan, true);
         let (pred_pk, pred_vk): (PK, VK) = generate_keys_for_statement_in::<
@@ -1270,15 +1270,12 @@ mod e2e {
             "invoked callbacks are waiting to be absorbed"
         );
 
-        let mut remaining = Vec::new();
-        for _ in 0..3 {
-            m.prepare_scan(&mut rng, false).unwrap();
-            let scan = m.commit_scan().unwrap();
-            deliver(&mut m, &scan);
-            remaining.push(m.sweep_remaining());
-            settle(&mut [&mut m]);
-        }
-        assert_eq!(remaining, vec![2, 1, 0], "one scan per callback");
+        // One padded scan (SCAN_SLOTS slots) answers all three in one proof.
+        m.prepare_scan(&mut rng, false).unwrap();
+        let scan = m.commit_scan().unwrap();
+        deliver(&mut m, &scan);
+        assert_eq!(m.sweep_remaining(), 0, "one scan finishes the sweep");
+        settle(&mut [&mut m]);
         assert!(
             !m.member().unwrap().user.is_scanning(),
             "the sweep finished"
@@ -1723,6 +1720,9 @@ mod e2e {
     #[test]
     #[ignore = "generates real Groth16 keys/proofs; run with --release --ignored"]
     fn e2e_a_post_cannot_interrupt_a_sweep() {
+        // A scan has SCAN_SLOTS (= k_max) slots and a member never holds more than k_max
+        // live tickets, so one honest scan always finishes the sweep: there is no
+        // half-swept object to post from, and the member can post right after.
         let mut rng = StdRng::seed_from_u64(32);
         let keys = keygen(&mut rng);
         let (mut admin, mut alice, _) = joined_pair(&mut rng, &keys, "sweep");
@@ -1731,29 +1731,20 @@ mod e2e {
             assert_eq!(status_of(&mut admin, &post), Status::Applied);
             settle(&mut [&mut admin, &mut alice]);
         }
-        for m in [&mut alice, &mut admin] {
-            for _ in 0..=settle_barriers() {
-                m.barrier();
-            }
-        }
+        to_next_epoch(&mut [&mut alice, &mut admin]);
         alice.prepare_scan(&mut rng, false).unwrap();
         let scan = alice.commit_scan().unwrap();
         assert_eq!(status_of(&mut admin, &scan), Status::Applied);
         let member = alice.member.as_ref().unwrap();
-        assert!(member.user.is_scanning(), "two tickets need two scans");
+        assert!(!member.user.is_scanning(), "two tickets, one scan");
         assert_eq!(
             member.user.data.num_interactions_since_last_scan,
-            F::from(2u64),
-            "an unfinished sweep does not reset the count"
+            F::from(0u64),
+            "a finished sweep resets the count"
         );
         settle(&mut [&mut admin, &mut alice]);
-        // The client refuses this itself, so stand in for one modified not to.
-        alice.member.as_mut().unwrap().user.force_clear_scan_index();
-        let post = alice.emit_post_anon(&mut rng, "mid-sweep").unwrap();
-        assert_eq!(
-            status_of(&mut admin, &post),
-            Status::Rejected("proof failed")
-        );
+        let post = alice.emit_post_anon(&mut rng, "after the scan").unwrap();
+        assert_eq!(status_of(&mut admin, &post), Status::Applied);
     }
 
     /// Two accounts cannot share a secret key.

@@ -41,7 +41,7 @@ use personas_bulletin::replica::record::{
 };
 use personas_core::circuits::{
     BadgesArgs, BadgesArgsVar, Claim, ClaimArgs, PostArgs, PostArgsVar, ClaimArgsVar, JoinArgs, JoinArgsVar, MsgUser,
-    NUM_SCANS_PER_FOLD, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate, PseudonymArgsVar,
+    SCAN_SLOTS, PrivScan, PrivScanVar, PseudonymArgs, PseudonymArgsRate, PseudonymArgsVar,
     PubScan, PubScanVar, REP_THRESHOLD_MAX, ResetArgs, ResetArgsVar, get_badge_request_interaction,
     get_callbacks, get_claim_interaction, rep_threshold,
     get_dummy_scan_interaction, get_scan_interaction, get_standard_interaction, get_standard_pseudo_interaction,
@@ -69,7 +69,7 @@ pub enum MemberError {
     /// panics on a missing membership witness, so we refuse first.
     #[error("this member is not on the bulletin yet — join first and let the join land")]
     NotJoined,
-    /// A scan needs at least `NUM_SCANS_PER_FOLD` outstanding callbacks to answer.
+    /// A scan needed outstanding callbacks to answer (no longer raised: scans are padded).
     #[error("nothing to scan: {have} outstanding callbacks, need {need}")]
     NothingToScan { have: usize, need: usize },
     #[error("a sweep is under way, so a dummy scan cannot run")]
@@ -223,7 +223,7 @@ impl Member {
             return true;
         }
         let have = self.user.num_outstanding_callbacks();
-        if have < NUM_SCANS_PER_FOLD {
+        if have == 0 {
             return false;
         }
         let cap = F::from((personas_core::circuits::NUM_INTS_BEFORE_SCAN - SCAN_CAP_MARGIN) as u64);
@@ -743,7 +743,7 @@ impl Member {
         let root = obj.root();
         let (ps, prs) = self
             .user
-            .get_scan_arguments::<Args, ArgsVar, Cr, MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>(
+            .get_scan_arguments::<Args, ArgsVar, Cr, MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>(
                 cbs,
                 (false, false),
                 Time::from(self.epoch_f()),
@@ -756,9 +756,9 @@ impl Member {
         .ok_or(MemberError::NotJoined)?;
         let exec = self
             .user
-            .interact::<H, PubScan<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, PubScanVar<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, PrivScan<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, PrivScanVar<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 0>(
+            .interact::<H, PubScan<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, PubScanVar<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, PrivScan<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, PrivScanVar<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 0>(
                 rng,
-                get_scan_interaction::<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>(),
+                get_scan_interaction::<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>(),
                 [],
                 Time::from(self.epoch_f()),
                 md,
@@ -790,7 +790,7 @@ impl Member {
             return Err(MemberError::SweepUnderway);
         }
         let root = obj.root();
-        let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(cbs, Time::from(self.epoch_f()));
+        let ps = merkle_scan_pubdata::<MH, NH, SCAN_SLOTS>(cbs, Time::from(self.epoch_f()));
         let prs = dummy_scan_witness::<MH, NH>(cbs);
         let md = <MerkleObjStore<F, OH> as PublicUserBul<F, MsgUser>>::get_membership_data(
             obj,
@@ -799,9 +799,9 @@ impl Member {
         .ok_or(MemberError::NotJoined)?;
         let exec = self
             .user
-            .interact::<H, PubScan<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, PubScanVar<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, PrivScan<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, PrivScanVar<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>, Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 0>(
+            .interact::<H, PubScan<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, PubScanVar<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, PrivScan<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, PrivScanVar<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>, Args, ArgsVar, Cr, Snark, MerkleObjStore<F, OH>, 0>(
                 rng,
-                get_dummy_scan_interaction::<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD>(),
+                get_dummy_scan_interaction::<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS>(),
                 [],
                 Time::from(self.epoch_f()),
                 md,
@@ -924,17 +924,17 @@ pub fn object_on_bulletin<const OH: usize>(
 /// branch of the predicate that ignores it.
 fn dummy_scan_witness<const MH: usize, const NH: usize>(
     cbs: &MerkleCallbackStore<F, MH, NH>,
-) -> PrivScan<MerkleCallbackStore<F, MH, NH>, NUM_SCANS_PER_FOLD> {
+) -> PrivScan<MerkleCallbackStore<F, MH, NH>, SCAN_SLOTS> {
     let ticket = FakeSigPubkey::pk();
     let (_, memb, _, nmemb) = PublicCallbackBul::<F, Args, Cr>::get_membership_data(cbs, ticket);
     PrivScan {
-        priv_n_tickets: [Default::default()],
-        enc_args: [Default::default()],
-        post_times: [Default::default()],
-        memb_priv: [memb],
-        nmemb_priv: [nmemb],
+        priv_n_tickets: core::array::from_fn(|_| Default::default()),
+        enc_args: core::array::from_fn(|_| Default::default()),
+        post_times: core::array::from_fn(|_| Default::default()),
+        memb_priv: core::array::from_fn(|_| memb.clone()),
+        nmemb_priv: core::array::from_fn(|_| nmemb.clone()),
         // A no-op scan: every slot is padding.
-        dummy: [true],
+        dummy: [true; SCAN_SLOTS],
     }
 }
 

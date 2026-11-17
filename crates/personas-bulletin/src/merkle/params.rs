@@ -31,7 +31,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate
 use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
 use personas_core::circuits::{
-    BadgesArgs, Claim, ClaimArgs, PostArgs, MsgUser, NUM_SCANS_PER_FOLD, PseudonymArgs, PseudonymArgsRate,
+    BadgesArgs, Claim, ClaimArgs, PostArgs, MsgUser, SCAN_SLOTS, PseudonymArgs, PseudonymArgsRate,
     PseudonymArgsVar, PubScan, ScanInt, get_badge_request_interaction, get_callbacks,
     get_claim_interaction, get_scan_interaction,
     get_standard_interaction, get_standard_pseudo_interaction,
@@ -314,11 +314,11 @@ pub fn generate_merkle_circuit_keys<S: SNARK<F>>(
         false,
     );
 
-    let scan_interaction: ScanInt<MerkleCStore> = get_scan_interaction();
+    let scan_interaction: ScanInt<MerkleCStore, SCAN_SLOTS> = get_scan_interaction();
     let dummy_scan = merkle_scan_pubdata::<
         DEFAULT_CB_MEMB_HEIGHT,
         DEFAULT_CB_NMEMB_HEIGHT,
-        NUM_SCANS_PER_FOLD,
+        SCAN_SLOTS,
     >(cstore, Time::default());
     let (scan_proving_key, scan_verifying_key) =
         scan_interaction.generate_keys::<H, S, Cr, MerkleOStore>(rng, None, dummy_scan, true);
@@ -452,11 +452,11 @@ pub fn generate_merkle_scan_key(
     rng: &mut (impl CryptoRng + RngCore),
     cstore: &MerkleCStore,
 ) -> (PK, VK) {
-    let scan_interaction: ScanInt<MerkleCStore> = get_scan_interaction();
+    let scan_interaction: ScanInt<MerkleCStore, SCAN_SLOTS> = get_scan_interaction();
     let dummy_scan = merkle_scan_pubdata::<
         DEFAULT_CB_MEMB_HEIGHT,
         DEFAULT_CB_NMEMB_HEIGHT,
-        NUM_SCANS_PER_FOLD,
+        SCAN_SLOTS,
     >(cstore, Time::default());
     scan_interaction.generate_keys::<H, Snark, Cr, MerkleOStore>(rng, None, dummy_scan, true)
 }
@@ -713,9 +713,9 @@ mod tests {
             false,
         );
         let cstore = CbT::new();
-        let scan_int: ScanInt<CbT> = get_scan_interaction();
+        let scan_int: ScanInt<CbT, SCAN_SLOTS> = get_scan_interaction();
         let dummy_scan =
-            merkle_scan_pubdata::<CMH, CNH, NUM_SCANS_PER_FOLD>(&cstore, Time::from(0));
+            merkle_scan_pubdata::<CMH, CNH, SCAN_SLOTS>(&cstore, Time::from(0));
         let (scan_pk, scan_vk) =
             scan_int.generate_keys::<H, Snark, Cr, ObjT>(&mut rng, None, dummy_scan, true);
 
@@ -744,7 +744,7 @@ mod tests {
         // The callback bulletin never called the ticket, so the scan proves
         // nonmembership. `(false, false)` = both roots are public inputs.
         // A sweep may start only in a later epoch than the object's: scan in epoch 1.
-        let (ps, prs) = user.get_scan_arguments::<Args, ArgsVar, Cr, CbT, NUM_SCANS_PER_FOLD>(
+        let (ps, prs) = user.get_scan_arguments::<Args, ArgsVar, Cr, CbT, SCAN_SLOTS>(
             &cstore,
             (false, false),
             Time::from(1),
@@ -754,10 +754,10 @@ mod tests {
         let scan_exec = user
             .interact::<
                 H,
-                PubScanAlias<CbT, NUM_SCANS_PER_FOLD>,
-                PubScanVar<CbT, NUM_SCANS_PER_FOLD>,
-                PrivScan<CbT, NUM_SCANS_PER_FOLD>,
-                PrivScanVar<CbT, NUM_SCANS_PER_FOLD>,
+                PubScanAlias<CbT, SCAN_SLOTS>,
+                PubScanVar<CbT, SCAN_SLOTS>,
+                PrivScan<CbT, SCAN_SLOTS>,
+                PrivScanVar<CbT, SCAN_SLOTS>,
                 Args,
                 ArgsVar,
                 Cr,
@@ -766,7 +766,7 @@ mod tests {
                 0,
             >(
                 &mut rng,
-                get_scan_interaction::<CbT, NUM_SCANS_PER_FOLD>(),
+                get_scan_interaction::<CbT, SCAN_SLOTS>(),
                 [],
                 Time::from(1),
                 <ObjT as PublicUserBul<Fr, MsgUser>>::get_membership_data(&obj, user.commit::<H>())
@@ -784,7 +784,7 @@ mod tests {
         // the separate membership public input.
         assert!(
             <ObjT as UserBul<Fr, MsgUser>>::verify_interaction::<
-                PubScanAlias<CbT, NUM_SCANS_PER_FOLD>,
+                PubScanAlias<CbT, SCAN_SLOTS>,
                 Snark,
                 0,
             >(

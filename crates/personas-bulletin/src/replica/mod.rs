@@ -89,7 +89,7 @@ use zk_callbacks::impls::centralized::crypto::FakeSigPrivkey;
 
 use personas_core::circuits::{
     BADGE1_FLAG, BADGE2_FLAG, BADGE3_FLAG, BAN_FLAG, BadgesArgs, Claim, ClaimArgs,
-    NUM_SCANS_PER_FOLD, PostArgs, PseudonymArgs, PseudonymArgsRate, RATE_LIMITED_PERSONAS_PER_CONTEXT,
+    SCAN_SLOTS, PostArgs, PseudonymArgs, PseudonymArgsRate, RATE_LIMITED_PERSONAS_PER_CONTEXT,
     arg_rep,
 };
 use personas_core::params::ServerKeys;
@@ -1002,7 +1002,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
             }
             Record::Scan { exec, obj_root, .. } => {
                 let exec = &exec.0;
-                let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(
+                let ps = merkle_scan_pubdata::<MH, NH, SCAN_SLOTS>(
                     &self.state.pinned,
                     Time::from(epoch_f),
                 );
@@ -1736,7 +1736,7 @@ impl<const OH: usize, const MH: usize, const NH: usize> Replica<OH, MH, NH> {
                 if cb_memb_root.0 != cbs.memb_root() || cb_nmemb_root.0 != cbs.nmemb_root() {
                     return Status::Rejected("scan names a superseded barrier");
                 }
-                let ps = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(cbs, Time::from(epoch_f));
+                let ps = merkle_scan_pubdata::<MH, NH, SCAN_SLOTS>(cbs, Time::from(epoch_f));
                 let ok = memo_interaction::<OH, _, 0>(
                     &mut self.verify_cache,
                     eh,

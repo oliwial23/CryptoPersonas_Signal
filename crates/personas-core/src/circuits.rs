@@ -114,6 +114,11 @@ pub const BADGE3_FLAG: u64 = 333333333;
 /// [`FOLD_SIZES`].
 pub const NUM_SCANS_PER_FOLD: usize = 1;
 
+/// Slots in a serverless scan: one Groth16 proof covers a member's whole sweep, padded
+/// to `k_max` with dummy slots, so every member sends the same single proof each epoch
+/// whatever it holds. A member never holds more than `k_max` live tickets.
+pub const SCAN_SLOTS: usize = K_MAX;
+
 /// The fold sizes the circuits are monomorphized for. [`dispatch_fold_size!`]
 /// turns a runtime `n` into one of these const-generic instantiations; any other
 /// value is unsupported. Keep this in lockstep with the macro's match arms — the

@@ -18,7 +18,7 @@ use rand::{SeedableRng, rngs::StdRng};
 use ark_ff::UniformRand;
 
 use personas_core::circuits::{
-    BAN_FLAG, MsgUser, NUM_SCANS_PER_FOLD, PostArgs, PostArgsVar, PrivScan, PrivScanVar,
+    MsgUser, SCAN_SLOTS, PostArgs, PostArgsVar, PrivScan, PrivScanVar,
     PseudonymArgs, PseudonymArgsRate,
     PseudonymArgsRateVar, PseudonymArgsVar, PubScan, PubScanVar, ScanInt, get_callbacks,
     get_scan_interaction, get_standard_interaction, get_standard_pseudo_interaction,
@@ -27,12 +27,11 @@ use personas_core::circuits::{
 };
 use personas_core::{Args, ArgsVar, Cr, F, H, PK, Snark, VK, persona};
 
-use zk_callbacks::crypto::enc::AECipherSigZK;
-use zk_callbacks::generic::bulletin::{CallbackBul, PublicUserBul};
+use zk_callbacks::generic::bulletin::PublicUserBul;
 use zk_callbacks::generic::interaction::generate_keys_for_statement_in;
 use zk_callbacks::generic::object::Time;
 use zk_callbacks::generic::user::{ExecutedMethod, User};
-use zk_callbacks::impls::centralized::crypto::{FakeSigPrivkey, FakeSigPubkey};
+use zk_callbacks::impls::centralized::crypto::FakeSigPubkey;
 
 use super::record::{Ark, Eh, Flavour, PollKind, Record, encode};
 use super::tally::BAN_OPTION;
@@ -53,8 +52,8 @@ fn standard_keys(rng: &mut StdRng) -> (PK, VK) {
 }
 
 fn scan_keys(rng: &mut StdRng, cstore: &CbT) -> (PK, VK) {
-    let si: ScanInt<CbT> = get_scan_interaction();
-    let dummy = merkle_scan_pubdata::<MH, NH, NUM_SCANS_PER_FOLD>(cstore, Time::from(0));
+    let si: ScanInt<CbT, SCAN_SLOTS> = get_scan_interaction();
+    let dummy = merkle_scan_pubdata::<MH, NH, SCAN_SLOTS>(cstore, Time::from(0));
     si.generate_keys::<H, Snark, Cr, ObjT>(rng, None, dummy, true)
 }
 
@@ -344,7 +343,7 @@ fn scan_of(
     obj_root: F,
     epoch: u64,
 ) -> Record {
-    let (ps, prs) = user.get_scan_arguments::<Args, ArgsVar, Cr, CbT, NUM_SCANS_PER_FOLD>(
+    let (ps, prs) = user.get_scan_arguments::<Args, ArgsVar, Cr, CbT, SCAN_SLOTS>(
         cbs,
         (false, false),
         Time::from(epoch),
@@ -353,9 +352,9 @@ fn scan_of(
     let md = <ObjT as PublicUserBul<F, MsgUser>>::get_membership_data(shadow, user.commit::<H>())
         .unwrap();
     let exec = user
-        .interact::<H, PubScan<CbT, NUM_SCANS_PER_FOLD>, PubScanVar<CbT, NUM_SCANS_PER_FOLD>, PrivScan<CbT, NUM_SCANS_PER_FOLD>, PrivScanVar<CbT, NUM_SCANS_PER_FOLD>, Args, ArgsVar, Cr, Snark, ObjT, 0>(
+        .interact::<H, PubScan<CbT, SCAN_SLOTS>, PubScanVar<CbT, SCAN_SLOTS>, PrivScan<CbT, SCAN_SLOTS>, PrivScanVar<CbT, SCAN_SLOTS>, Args, ArgsVar, Cr, Snark, ObjT, 0>(
             rng,
-            get_scan_interaction::<CbT, NUM_SCANS_PER_FOLD>(),
+            get_scan_interaction::<CbT, SCAN_SLOTS>(),
             [],
             Time::from(epoch),
             md,
@@ -372,19 +371,6 @@ fn scan_of(
         cb_memb_root: Ark(cbs.memb_root()),
         cb_nmemb_root: Ark(cbs.nmemb_root()),
     }
-}
-
-/// Invoke a callback with `arg` into a callback store, exactly as `settle_barrier`
-/// does — used to reconstruct the replica's post-ban callback store so a member can
-/// prove an absorbing scan against it.
-fn invoke_into(cbs: &mut CbT, ticket: &super::tally::Callback, arg: F, epoch: u64) {
-    let enc_key = ticket.cb_entry.enc_key.clone();
-    let tik = ticket.cb_entry.tik.clone();
-    let (enc, sig) =
-        <Cr as AECipherSigZK<F, F>>::encrypt_and_sign(arg, enc_key, FakeSigPrivkey::sk());
-    <CbT as CallbackBul<F, F, Cr>>::verify_call_and_append(cbs, tik, enc, sig, Time::from(epoch))
-        .expect("invoke");
-    cbs.update_epoch();
 }
 
 #[test]
@@ -432,7 +418,6 @@ fn e2e_ban_propagates_and_absorbs_and_stale_scan_rejected() {
     let p_new_object = p_exec.new_object;
     let p_old_nul = p_exec.old_nullifier;
     let p_cb_com = p_exec.cb_com_list;
-    let p_ticket = p_exec.cb_tik_list[0].0.clone();
     let post = Record::Post {
         flavour: Flavour::Anon,
         exec: Ark(p_exec),
