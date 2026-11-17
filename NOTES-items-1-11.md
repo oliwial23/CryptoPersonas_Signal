@@ -140,7 +140,7 @@ container needed `apt-get install protobuf-compiler` first (see question 8).
 | `cargo test --release -p personas-messenger -- --ignored --skip e2e_record_converges_over_signal` | 23 passed, 0 failed |
 | `cargo build --release -p personas-bench -p personas-server` then `target/release/personas-bench --server --callbacks 5 --iters 1 --server-dir <fresh> --out <tmp>/out.json` | every op finished: post, vote, merge_personas, rep_at_least, pp_request, pp_post, scan (5 callbacks), fold (5 callbacks). The server log shows the epoch turning exactly on each 120 s boundary (06:02:48, 06:04:48, …) with one `Epoch` rotation each. Wall time 8m09s, about 8 min of it waiting for boundaries.  Re-run on the final commit: see the line below. |
 
-Final-commit bench re-run: PENDING
+Final-commit bench re-run (after the last client change): every op finished again, exit 0, wall time 8m09s; numbers within noise of the table below.
 
 Excerpt of the first run's table (ms):
 
