@@ -214,9 +214,11 @@ pub type NP = (
     >,
 );
 
+/// A folded scan as sent to the server. `c = H(i, rho)` is the committed step counter: the
+/// verifier binds it into the proof without learning the step count `i`.
 #[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct FoldingProofData {
-    pub i: Fq,
+    pub c: Fq,
     pub z_0: Vec<Fq>,
     pub z_i: Vec<Fq>,
     pub proof: RandomizedIVCProof<Projective, Projective2>,

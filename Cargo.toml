@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# Vendored Sonobe (iteration hiding + fold soundness fixes); see third_party/sonobe/VENDORED.md.
+exclude = ["third_party/sonobe"]
 members = [
     "batch-zkc",
     "crates/personas-bench",
@@ -144,3 +146,7 @@ presage-store-sqlite = { path = "third_party/presage/presage-store-sqlite" }
 # values, so proofs, keys and roots are unchanged. See third_party/zk-callbacks/PATCHES.md.
 [patch."https://github.com/hkailad/callbacks.git"]
 zk-callbacks = { path = "third_party/zk-callbacks" }
+
+# Vendored Sonobe with the fold soundness fixes and iteration hiding (third_party/sonobe/VENDORED.md).
+[patch."https://github.com/hkailad/sonobe"]
+folding-schemes = { path = "third_party/sonobe/folding-schemes" }

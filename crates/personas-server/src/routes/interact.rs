@@ -165,7 +165,7 @@ pub async fn arbitrary_pred(
 /// all (`num_interactions_since_last_scan` hits the rate limit).
 pub async fn scan(State(state): State<ServerLock>, body: Bytes) -> AppResult<impl IntoResponse> {
     // A single-ticket scan reveals how many tickets its sender holds (one scan per ticket),
-    // so a deployment accepts only folded scans of fixed depth (`fold_scan`). The bench
+    // so a deployment accepts only folded scans (`fold_scan`), which hide that count. The bench
     // turns this route back on to time the per-callback baseline.
     if std::env::var_os("PERSONAS_ALLOW_UNPADDED_SCAN").is_none() {
         return Err(AppError::Rejected(
@@ -250,6 +250,11 @@ pub async fn fold_scan(
     let mut reader = decode(Kind::FoldScan, &body)?;
     let proof: FoldingProofData = reader.pull()?;
 
+    // The state vectors come from the sender; index them only once their shape is right.
+    if proof.z_0.len() != 2 || proof.z_i.len() != 2 {
+        return Err(AppError::Rejected("Fold scan has a malformed state".into()));
+    }
+
     let mut st = state.write().await;
     let current = epoch(&st.db);
 
@@ -263,7 +268,9 @@ pub async fn fold_scan(
                 &params.nova_c2_r1cs,
                 params.pp_hash,
                 &params.pos_config,
-                proof.i,
+                &params.folding_key.0.cs_pp,
+                &params.folding_key.0.cf_cs_pp,
+                proof.c,
                 proof.z_0.clone(),
                 proof.z_i.clone(),
                 &proof.proof,
@@ -287,14 +294,10 @@ pub async fn fold_scan(
         )
         .unwrap_or(false);
 
-        // 4. Every fold has the same number of steps, so its step count, which Nova's
-        //    verifier takes in the clear, says nothing about how many callbacks it answers.
-        //    (A benchmark's own server, started with PERSONAS_ALLOW_UNPADDED_SCAN, accepts
-        //    any depth, so the cost can be measured at each one.)
-        let fixed_depth = proof.i == ark_grumpkin::Fq::from(personas_core::fold::FOLD_DEPTH as u64)
-            || std::env::var_os("PERSONAS_ALLOW_UNPADDED_SCAN").is_some();
-
-        folded && bound && tied && fixed_depth
+        // The step count is never sent: the proof binds only the committed counter `c`, and
+        // its folded instances start from random accumulators, so nothing in it reveals how
+        // many callbacks it answers (third_party/sonobe, iteration hiding).
+        folded && bound && tied
     });
 
     personas_core::timing::append_timing_line_fold(

@@ -851,9 +851,8 @@ pub fn run(args: &Args, work: &Path, callbacks: usize) {
     eprintln!("fold: {callbacks} callbacks folded");
 
     // --- the fold sweep: the cost of a fold of each depth k ----------------------------------
-    // A deployment folds exactly FOLD_DEPTH (= k_max) steps; this server, started in bench
-    // mode, accepts any depth, so the cost can be measured as a function of k. Members with
-    // k tickets each fold exactly k steps, so every step is a real one.
+    // A member folds its real steps, at most FOLD_DEPTH (= k_max), and the proof hides how
+    // many. Members with k tickets each fold exactly k steps, so every step is a real one.
     for &k in &args.fold_sweep {
         let members: Vec<PersonaClient> =
             (0..args.iters).map(|i| member(&format!("sweep-{k}-{i}"))).collect();

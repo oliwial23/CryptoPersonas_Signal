@@ -1656,7 +1656,6 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "folding-schemes"
 version = "0.1.0"
-source = "git+https://github.com/hkailad/sonobe?rev=4d4fa08#4d4fa08727bed55821c787d51daf46a9a1f27ecd"
 dependencies = [
  "ark-bn254",
  "ark-crypto-primitives",
@@ -3454,8 +3453,10 @@ name = "personas-bench"
 version = "0.1.0"
 dependencies = [
  "ark-bn254",
+ "ark-ec",
  "ark-ff",
  "ark-grumpkin",
+ "ark-r1cs-std",
  "ark-relations",
  "ark-serialize",
  "ark-snark",
