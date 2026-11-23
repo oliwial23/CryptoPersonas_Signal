@@ -53,7 +53,7 @@ pub const PARAMS_FORMAT_VERSION: u32 = 2;
 /// Dependency revisions the circuits are compiled against. Must be kept in
 /// sync with the `[workspace.dependencies]` git pins — a rev bump changes the
 /// circuits, so it must change the cache key too.
-pub const DEP_REVS: &str = "zk-callbacks=d661879;sonobe=4d4fa08";
+pub const DEP_REVS: &str = "zk-callbacks=d661879;sonobe=4d4fa08+soundfix1+iterhide2";
 /// Bulletin implementation the keys are generated for.
 pub const BULLETIN_MODE: &str = "central-grschnorr";
 

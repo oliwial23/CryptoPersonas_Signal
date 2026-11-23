@@ -1,5 +1,4 @@
-//! The server-backed folded scan: one Nova step per callback slot, padded to a fixed
-//! number of steps.
+//! The server-backed folded scan: one Nova step per callback slot.
 //!
 //! zk-callbacks' generic [`FoldingScan`] folds scan steps but knows nothing of this
 //! object's epoch or post count. [`PersonasFold`] runs the same step and then applies the
@@ -10,9 +9,11 @@
 //! - the step that finishes a sweep sets `ep = t` and resets the post count;
 //! - a padding step (`noop`) leaves the object as it was, re-randomized.
 //!
-//! Every fold has [`FOLD_DEPTH`] steps: the real ones (or one empty-sweep step for a
-//! member with no tickets), then padding. Nova's verifier takes the step count as input, so
-//! without padding a folded scan would reveal how many callbacks it answers.
+//! A fold has only the real steps (one per callback, or one empty-sweep step for a member
+//! with no tickets), at most [`FOLD_DEPTH`]. It does not reveal how many: the vendored Sonobe
+//! (`third_party/sonobe`) binds a committed step counter instead of the count and starts
+//! every fold from random accumulators. Padding steps remain for benchmarks that fold to a
+//! fixed depth.
 
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
@@ -30,7 +31,7 @@ use zk_callbacks::generic::user::User;
 use crate::circuits::{K_MAX, MsgUser, NUM_SCANS_PER_FOLD};
 use crate::{Args, ArgsVar, Cr, F, H};
 
-/// Steps in every server-backed folded scan: enough slots for `k_max` live tickets.
+/// The most steps a server-backed folded scan has: enough slots for `k_max` live tickets.
 pub const FOLD_DEPTH: usize = K_MAX.div_ceil(NUM_SCANS_PER_FOLD);
 
 /// One step of a server-backed folded scan, with the personas sweep rules. See the module

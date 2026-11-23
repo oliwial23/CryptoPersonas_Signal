@@ -209,6 +209,7 @@ fn sweep<const N: usize>(
             let t = Instant::now();
             let circuit = Scan::<N>::new(params).expect("fold circuit");
             let mut nova = NovaM::<N>::init(&nova_params, circuit, z_0).expect("Nova init");
+            nova.randomize_initial_accumulators(&mut *rng).expect("random initial accumulators");
             s.init.push(micros(t));
 
             let t = Instant::now();
@@ -225,7 +226,7 @@ fn sweep<const N: usize>(
 
             let data = FoldingProofData {
                 proof,
-                i: nova.i,
+                c: nova.c(),
                 z_0: nova.z_0.clone(),
                 z_i: nova.z_i.clone(),
                 extra_verif: tie,
@@ -235,7 +236,7 @@ fn sweep<const N: usize>(
             }
 
             let t = Instant::now();
-            let ok = verify(&data, vp, pp_hash, tie_vk);
+            let ok = verify(&data, &nova_params.0, vp, pp_hash, tie_vk);
             s.verify.push(micros(t));
             assert!(ok, "a folded scan (N={N}, k={k}) must verify");
             // The fold's output is the member's object after absorbing all k callbacks.
@@ -312,6 +313,13 @@ fn fold_inputs<const N: usize>(
 /// The verifier's three checks, as `personas-server`'s `fold_scan` makes them.
 fn verify(
     data: &FoldingProofData,
+    pp: &folding_schemes::folding::nova::ProverParams<
+        Projective,
+        Projective2,
+        Pedersen<Projective, true>,
+        Pedersen<Projective2, true>,
+        true,
+    >,
     vp: &VerifierParams<
         Projective,
         Projective2,
@@ -329,7 +337,9 @@ fn verify(
             &vp.cf_r1cs,
             pp_hash,
             &poseidon_canonical_config::<F>(),
-            data.i,
+            &pp.cs_pp,
+            &pp.cf_cs_pp,
+            data.c,
             data.z_0.clone(),
             data.z_i.clone(),
             &data.proof,

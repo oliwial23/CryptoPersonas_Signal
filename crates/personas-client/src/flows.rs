@@ -288,20 +288,19 @@ impl PersonaClient {
         Ok(payload)
     }
 
-    /// Answer every outstanding callback in one Nova-folded proof.
-    ///
-    /// Note this folds `k / NUM_SCANS_PER_FOLD` steps and so silently drops the
-    /// `k mod NUM_SCANS_PER_FOLD` remainder — the fold-size menu is what fixes that.
+    /// Answer every outstanding callback in one Nova-folded proof, of exactly the real
+    /// steps. The proof hides how many (`third_party/sonobe`, iteration hiding).
     pub fn fold(&self) -> Result<Vec<u8>> {
-        self.fold_to_depth(personas_core::fold::FOLD_DEPTH)
+        self.fold_steps(None)
     }
 
-    /// [`fold`](Self::fold), padded to `total` steps instead of `FOLD_DEPTH`. For
-    /// benchmarks only: a deployment's server accepts only `FOLD_DEPTH`-step folds, and the
-    /// benchmark's server (started in bench mode) accepts any, so the cost can be measured
-    /// for each fold depth. Every step is the same circuit with the same keys whatever the
-    /// depth.
+    /// [`fold`](Self::fold), padded to `total` steps. For benchmarks, which measure the
+    /// cost at each depth; every step is the same circuit with the same keys.
     pub fn fold_to_depth(&self, total: usize) -> Result<Vec<u8>> {
+        self.fold_steps(Some(total))
+    }
+
+    fn fold_steps(&self, total: Option<usize>) -> Result<Vec<u8>> {
         let mut rng = OsRng;
         let mut user = self.load_user()?;
 
@@ -315,17 +314,22 @@ impl PersonaClient {
         )
         .ok_or_else(|| anyhow!("this user is not on the bulletin; run `join` first"))?;
 
-        // The real steps (one per callback, at least one so that a member with no tickets
-        // still brings its object up to the epoch), then padding to FOLD_DEPTH, which the
-        // server requires: the step count would otherwise reveal how many callbacks the
-        // fold answers.
+        // The real steps: one per callback, and at least one, so that a member with no
+        // tickets still brings its object up to the epoch.
         let real = personas_core::fold::real_fold_steps(
             user.num_outstanding_callbacks(),
             NUM_SCANS_PER_FOLD,
         );
+        if real > personas_core::fold::FOLD_DEPTH {
+            return Err(anyhow!(
+                "{real} fold steps needed, more than k_max = {} live tickets allow",
+                personas_core::fold::FOLD_DEPTH
+            ));
+        }
+        let total = total.unwrap_or(real);
         if real > total {
             return Err(anyhow!(
-                "{real} fold steps needed, more than the {total} a fold has (more than k_max live tickets)"
+                "{real} fold steps needed, more than the {total} requested"
             ));
         }
 
@@ -351,6 +355,11 @@ impl PersonaClient {
         let nova_params = self.fold_params();
         let mut folding_scheme: NFC = NFC::init(&nova_params, f_circ, init)
             .map_err(|e| anyhow!("failed to initialize Nova: {e}"))?;
+        // Start both running accumulators from random satisfying instances, so the folded
+        // proof does not reveal how many steps it took (and the zk layer requires it).
+        folding_scheme
+            .randomize_initial_accumulators(&mut rng)
+            .map_err(|e| anyhow!("failed to randomize the initial accumulators: {e}"))?;
 
         debug_assert!(!user.is_scanning());
 
@@ -371,7 +380,7 @@ impl PersonaClient {
 
         let data = FoldingProofData {
             proof,
-            i: folding_scheme.i,
+            c: folding_scheme.c(),
             z_0: folding_scheme.z_0,
             z_i: folding_scheme.z_i,
             extra_verif,
